@@ -43,7 +43,25 @@
       "Bash(pip install *)",
       "Bash(python3 -c \"import yaml; [yaml.safe_load\\(open\\(f\\)\\) for f in ['.github/workflows/ci.yml','.github/workflows/release.yml']]; print\\('YAML valid'\\)\")",
       "Bash(bash install.sh --help)",
-      "Bash(bash -i -c ' *)"
+      "Bash(bash -i -c ' *)",
+      "Bash(which asciinema *)",
+      "Read(//home/david/.cargo/**)",
+      "Bash(curl -sI https://github.com -o /dev/null -w \"github:%{http_code}\\\\n\" --max-time 10)",
+      "Bash(curl -s --max-time 10 https://api.github.com/repos/charmbracelet/vhs/releases/latest)",
+      "Bash(curl -s --max-time 10 https://api.github.com/repos/tsl0922/ttyd/releases/latest)",
+      "Bash(pkill -f ttyd)",
+      "Bash(pkill -f vhs)",
+      "Read(//home/david/.cache/**)",
+      "Bash(curl -s --max-time 15 https://api.github.com/repos/asciinema/agg/releases/latest)",
+      "Bash(curl -sL -o agg https://github.com/asciinema/agg/releases/download/v1.9.0/agg-x86_64-unknown-linux-musl)",
+      "Bash(chmod +x agg)",
+      "Bash(./agg --help)",
+      "Bash(timeout 120 python3 record.py)",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 -c \"import json,sys; print\\(json.loads\\(sys.stdin.read\\(\\)\\)[0]\\)\")",
+      "Bash(mkdir -p /tmp/claude-1000/-home-david-code-namo-complete/75b09931-8ce0-4d49-8f80-4619f03c96f9/scratchpad/demo/cache/namo_complete)",
+      "Bash(chmod +x probe2.sh)",
+      "Bash(timeout 30 ./probe2.sh)"
     ]
   }
 }

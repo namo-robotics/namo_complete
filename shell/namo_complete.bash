@@ -71,7 +71,12 @@ _namo_choose() {
     local k
     read -rsn1 -p "  select [1-${#cands[@]}]: " k
     printf '\n'
-    [[ "$k" =~ ^[1-9]$ ]] && (( k <= ${#cands[@]} )) || return 0
+    # Anything that is not one of the offered numbers cancels: no insertion,
+    # straight back to the regular prompt with the line as it was.
+    if ! [[ "$k" =~ ^[1-9]$ ]] || (( k > ${#cands[@]} )); then
+      declare -F _namo_hint >/dev/null && _namo_hint ""
+      return 0
+    fi
     pick="${cands[$((k - 1))]}"
   fi
 
@@ -99,9 +104,20 @@ _namo_run() {  # mode, force_picker
   bin=$(_namo_resolve_bin) || { printf '\n[namo] binary not found\n' >&2; return 0; }
 
   if [[ "$mode" == ask ]]; then
-    local q
+    # `read -e` would run readline inside readline: on return bash treats the
+    # outer line as accepted and *executes* whatever _namo_choose then puts in
+    # READLINE_LINE. Read the question in cooked mode instead -- the terminal's
+    # own line discipline still gives erase and kill, and nothing is executed.
+    local q rest saved_stty
     printf '\n'
-    IFS= read -e -r -p $'\033[36mask>\033[0m ' -i "$READLINE_LINE" q
+    saved_stty=$(stty -g </dev/tty 2>/dev/null)
+    stty sane </dev/tty 2>/dev/null
+    printf $'\033[36mask>\033[0m %s' "$READLINE_LINE" >/dev/tty
+    IFS= read -r rest </dev/tty
+    rc=$?
+    [[ -n "$saved_stty" ]] && stty "$saved_stty" </dev/tty 2>/dev/null
+    (( rc == 0 )) || return 0
+    q="$READLINE_LINE$rest"
     [[ -z "${q//[[:space:]]/}" ]] && return 0
     out=$(NAMO_MODE=ask NAMO_QUERY="$q" NAMO_CWD="$PWD" \
           timeout "$NAMO_TIMEOUT" "$bin" <<<"$(_namo_gather)" 2>/dev/null)

@@ -3,6 +3,9 @@
 LLM-powered autocomplete for Bash, written in the
 [Sun](https://namo-robotics.github.io/sun/) programming language.
 
+![namo_complete: a hint appears as you type, Alt-O accepts it; Alt-G asks for a
+command in plain English](assets/demo.gif)
+
 Type as usual. A moment after you pause, a dim hint appears on the bottom line
 with the command you are most likely reaching for. Keep typing and it updates or
 disappears. Accept it with **Alt-O**, or press
