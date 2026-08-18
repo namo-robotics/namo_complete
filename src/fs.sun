@@ -38,8 +38,7 @@ public module namo {
   }
 
   // Write `data` to `path`, truncating. `mode` applies only on creation.
-  public function write_file(alloc: ref HeapAllocator, path: ref String,
-                             data: ref String, mode: i32) void, IError {
+  public function write_file(alloc: ref HeapAllocator, path: ref String, data: ref String, mode: i32) void, IError {
     var cpath = to_cstr(alloc, path);
     var flags: i32 = O_WRONLY | O_CREAT | O_TRUNC;
     var fd: i32 = unsafe { open(cpath.rawData(), flags, mode); };
@@ -60,8 +59,7 @@ public module namo {
 
   // Write a file that must not already exist and must not be a symlink, with
   // restrictive permissions. Used for anything holding the API key.
-  public function write_file_private(alloc: ref HeapAllocator, path: ref String,
-                                     data: ref String) void, IError {
+  public function write_file_private(alloc: ref HeapAllocator, path: ref String, data: ref String) void, IError {
     remove_path(alloc, path);
     var cpath = to_cstr(alloc, path);
     var flags: i32 = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW;

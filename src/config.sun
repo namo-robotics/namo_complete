@@ -33,8 +33,11 @@ public module namo {
       this.cwd = env_or(alloc, "NAMO_CWD", ".");
       this.model = env_or(alloc, "NAMO_MODEL", "claude-haiku-4-5");
       this.api_key = env(alloc, "ANTHROPIC_API_KEY");
-      this.endpoint = env_or(alloc, "NAMO_ENDPOINT",
-                             "https://api.anthropic.com/v1/messages");
+      this.endpoint = env_or(
+        alloc,
+        "NAMO_ENDPOINT",
+        "https://api.anthropic.com/v1/messages"
+      );
 
       this.history_lines = env_int(alloc, "NAMO_HISTORY_LINES", 10);
       this.max_suggestions = env_int(alloc, "NAMO_MAX_SUGGESTIONS", 3);
@@ -80,8 +83,7 @@ public module namo {
     }
   }
 
-  public function env_int(alloc: ref HeapAllocator, name: static_ptr<u8>,
-                          fallback: i64) i64 {
+  public function env_int(alloc: ref HeapAllocator, name: static_ptr<u8>, fallback: i64) i64 {
     var raw = env(alloc, name);
     if (raw.length() == 0) {
       return fallback;

@@ -37,8 +37,7 @@ public module namo {
     return conf;
   }
 
-  public function call_api(alloc: ref HeapAllocator, cfg: ref Config,
-                           body: ref String) Reply, IError {
+  public function call_api(alloc: ref HeapAllocator, cfg: ref Config, body: ref String) Reply, IError {
     var reply = Reply(alloc);
 
     ensure_dir(alloc, cfg.runtime_dir);
@@ -88,8 +87,7 @@ public module namo {
   }
 
   // Pull the completion lines out of a Messages API response.
-  public function parse_reply(alloc: ref HeapAllocator, cfg: ref Config,
-                              raw: ref String, reply: ref Reply) void {
+  public function parse_reply(alloc: ref HeapAllocator, cfg: ref Config, raw: ref String, reply: ref Reply) void {
     try {
       var doc = json_parse(alloc, raw);
 

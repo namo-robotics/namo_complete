@@ -20,8 +20,7 @@ public module namo {
     return from_cstr(alloc, unsafe { getenv(raw); });
   }
 
-  public function env_or(alloc: ref HeapAllocator, name: static_ptr<u8>,
-                         fallback: static_ptr<u8>) String {
+  public function env_or(alloc: ref HeapAllocator, name: static_ptr<u8>, fallback: static_ptr<u8>) String {
     var v = env(alloc, name);
     if (v.length() == 0) {
       return String(alloc, fallback);

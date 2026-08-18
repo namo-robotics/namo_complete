@@ -22,8 +22,7 @@ public module namo {
 
   // Split stdin into (history, listing), dropping history lines that look
   // like they carry a credential, and keeping only the last `keep` entries.
-  public function parse_stdin(alloc: ref HeapAllocator, raw: ref String,
-                              keep: i64, want_ls: bool) Stdin {
+  public function parse_stdin(alloc: ref HeapAllocator, raw: ref String, keep: i64, want_ls: bool) Stdin {
     var out = Stdin(alloc);
     var lines = split_lines(alloc, raw);
 
