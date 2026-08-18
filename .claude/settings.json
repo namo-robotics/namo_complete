@@ -61,7 +61,19 @@
       "Bash(python3 -c \"import json,sys; print\\(json.loads\\(sys.stdin.read\\(\\)\\)[0]\\)\")",
       "Bash(mkdir -p /tmp/claude-1000/-home-david-code-namo-complete/75b09931-8ce0-4d49-8f80-4619f03c96f9/scratchpad/demo/cache/namo_complete)",
       "Bash(chmod +x probe2.sh)",
-      "Bash(timeout 30 ./probe2.sh)"
+      "Bash(timeout 30 ./probe2.sh)",
+      "Bash(sun --version)",
+      "Bash(sed -i 's/function boom\\(x: i64\\) i64 {/function boom\\(x: i64\\) i64, IError {/' t3.sun)",
+      "Bash(SUN_PATH=/usr/lib/sun sun -c -o t3 t3.sun)",
+      "Bash(timeout 10 ./t3)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(sed -i '/var subject: ref String/d; /println\\(subject\\);/d' t6.sun)",
+      "Bash(SUN_PATH=/usr/lib/sun sun -c -o t6 t6.sun)",
+      "Bash(timeout 10 ./t6)",
+      "Bash(sun --help)",
+      "Read(//usr/share/doc/sun/**)",
+      "Read(//usr/share/sun/**)",
+      "Bash(timeout 300 ./test.sh)"
     ]
   }
 }

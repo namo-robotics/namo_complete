@@ -31,7 +31,7 @@ public module namo {
     if (history.size() > 0) {
       ctx.append("<history>\n");
       for (var i: i64 = 0; i < history.size(); i = i + 1) {
-        ctx.append(history.borrow_unchecked(i));
+        ctx.append(history.get_unchecked(i));
         ctx.append("\n");
       }
       ctx.append("</history>\n");
@@ -55,7 +55,8 @@ public module namo {
   // no-op). Local caching does that job instead.
   public function build_body(alloc: ref HeapAllocator, cfg: ref Config, context: ref String) String {
     var req = json_object(alloc);
-    req.set(String(alloc, "model"), Json(clone_str(alloc, cfg.model)));
+    // Json(...) takes ownership of its String, so hand it a clone.
+    req.set(String(alloc, "model"), Json(cfg.model.clone(alloc)));
     req.set(String(alloc, "temperature"), Json(0));
     // Ask mode carries a description per line, so it needs the extra room.
     if (cfg.is_ask()) {
@@ -76,17 +77,10 @@ public module namo {
     var msgs = json_array(alloc);
     var turn = json_object(alloc);
     turn.set(String(alloc, "role"), json_string(alloc, "user"));
-    turn.set(String(alloc, "content"), Json(clone_str(alloc, context)));
+    turn.set(String(alloc, "content"), Json(context.clone(alloc)));
     msgs.push(turn);
     req.set(String(alloc, "messages"), msgs);
 
     return req.to_string(alloc);
-  }
-
-  // Json(...) takes ownership of a String, so hand it a copy.
-  public function clone_str(alloc: ref HeapAllocator, s: ref String) String {
-    var out = String(alloc, "");
-    out.append(s);
-    return out;
   }
 }

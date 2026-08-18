@@ -12,7 +12,7 @@ using namo;
 
 function emit(alloc: ref HeapAllocator, items: ref Vec<String>) void {
   for (var i: i64 = 0; i < items.size(); i = i + 1) {
-    println(items.borrow_unchecked(i));
+    println(items.get_unchecked(i));
   }
 }
 
@@ -24,16 +24,16 @@ function main() i32 {
     return 0;
   }
 
-  // Too little to go on: not worth a round trip.
-  // Copy rather than assign: `subject = cfg.query` MOVES the String out of
-  // the Config object, leaving the field empty for build_context later.
-  var subject = String(alloc, "");
+  // Too little to go on: not worth a round trip. Borrow the field rather than
+  // assigning it: `var subject = cfg.query` would move the String out of the
+  // Config object, leaving the field empty for build_context later.
+  var prefix = String(alloc, "");
   if (cfg.is_ask()) {
-    subject.append(cfg.query);
+    prefix = cfg.query.clone(alloc);
   } else {
-    subject.append(cfg.line);
+    prefix = cfg.line.clone(alloc);
   }
-  var prefix = trim(alloc, subject);
+  prefix.trim();
   if (prefix.length() < 3) {
     return 0;
   }

@@ -30,7 +30,7 @@ public module namo {
     var hist = Vec<String>(alloc, 16);
 
     for (var i: i64 = 0; i < lines.size(); i = i + 1) {
-      var line = lines.borrow_unchecked(i);
+      var line = lines.get_unchecked(i);
       if (line.equals_literal(LS_SENTINEL)) {
         in_ls = true;
       } else {
@@ -45,7 +45,7 @@ public module namo {
           // A line carrying a known credential prefix is dropped entirely
           // rather than partially masked.
           if (looks_secret(line) == false) {
-            hist.push(clone_str(alloc, line));
+            hist.push(line.clone(alloc));
           }
         }
       }
@@ -58,7 +58,7 @@ public module namo {
     }
     if (keep > 0) {
       for (var j: i64 = start; j < hist.size(); j = j + 1) {
-        out.history.push(clone_str(alloc, hist.borrow_unchecked(j)));
+        out.history.push(hist.get_unchecked(j).clone(alloc));
       }
     }
     return out;
@@ -66,17 +66,18 @@ public module namo {
 
   // Commands worth a second look before the user presses Enter.
   public function is_dangerous(alloc: ref HeapAllocator, cmd: ref String) bool {
-    var low = to_lower(alloc, cmd);
-    if (contains_lit(low, "rm -rf") or contains_lit(low, "rm -fr")) {
+    var low = cmd.clone(alloc);
+    low.to_lower();
+    if (low.contains("rm -rf") or low.contains("rm -fr")) {
       return true;
     }
-    if (contains_lit(low, "mkfs") or contains_lit(low, "dd if=")) {
+    if (low.contains("mkfs") or low.contains("dd if=")) {
       return true;
     }
-    if (contains_lit(low, "> /dev/") or contains_lit(low, "chmod -r 777")) {
+    if (low.contains("> /dev/") or low.contains("chmod -r 777")) {
       return true;
     }
-    if (contains_lit(low, "| sh") or contains_lit(low, "| bash")) {
+    if (low.contains("| sh") or low.contains("| bash")) {
       return true;
     }
     if (low.starts_with("sudo ")) {

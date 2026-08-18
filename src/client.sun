@@ -118,7 +118,7 @@ public module namo {
         if (reply.suggestions.size() >= cfg.max_suggestions) {
           return;
         }
-        var cand = clone_str(alloc, lines.borrow_unchecked(i));
+        var cand = lines.get_unchecked(i).clone(alloc);
         if (cand.length() > 0) {
           reply.suggestions.push(cand);
         }
