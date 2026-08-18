@@ -1,0 +1,95 @@
+// config.sun - runtime configuration, entirely from the environment.
+//
+// Input arrives via environment variables rather than argv: bash `export`
+// handles arbitrary bytes with no quoting concerns, and the values we need
+// (READLINE_LINE, PWD) are already shell variables.
+
+public module namo {
+  using sun;
+
+  public class Config {
+    public var line: String;
+    public var query: String;
+    public var mode: String;
+    public var cwd: String;
+    public var model: String;
+    public var api_key: String;
+    public var endpoint: String;
+    public var runtime_dir: String;
+    public var cache_dir: String;
+    public var history_lines: i64;
+    public var max_suggestions: i64;
+    public var cache_ttl: i64;
+    public var min_gap: i64;
+    public var use_cache: bool;
+    public var send_ls: bool;
+    public var disabled: bool;
+    public var cache_only: bool;
+
+    public function init(alloc: ref HeapAllocator) {
+      this.line = env(alloc, "NAMO_LINE");
+      this.query = env(alloc, "NAMO_QUERY");
+      this.mode = env_or(alloc, "NAMO_MODE", "complete");
+      this.cwd = env_or(alloc, "NAMO_CWD", ".");
+      this.model = env_or(alloc, "NAMO_MODEL", "claude-haiku-4-5");
+      this.api_key = env(alloc, "ANTHROPIC_API_KEY");
+      this.endpoint = env_or(alloc, "NAMO_ENDPOINT",
+                             "https://api.anthropic.com/v1/messages");
+
+      this.history_lines = env_int(alloc, "NAMO_HISTORY_LINES", 10);
+      this.max_suggestions = env_int(alloc, "NAMO_MAX_SUGGESTIONS", 3);
+      this.cache_ttl = env_int(alloc, "NAMO_CACHE_TTL", 900);
+      this.min_gap = env_int(alloc, "NAMO_MIN_GAP", 1);
+      this.use_cache = env_int(alloc, "NAMO_CACHE", 1) != 0;
+      this.send_ls = env_int(alloc, "NAMO_NO_LS", 0) == 0;
+      this.disabled = env_int(alloc, "NAMO_DISABLE", 0) != 0;
+      this.cache_only = env_int(alloc, "NAMO_CACHE_ONLY", 0) != 0;
+
+      // Runtime dir holds the API key for the duration of one call, so it
+      // must be user-private. XDG_RUNTIME_DIR is tmpfs mode 0700.
+      var rt = env(alloc, "XDG_RUNTIME_DIR");
+      if (rt.length() == 0) {
+        rt = String(alloc, "/tmp/namo-");
+        rt.append(uid());
+      } else {
+        rt.append("/namo_complete");
+      }
+      this.runtime_dir = rt;
+
+      var cd = env(alloc, "XDG_CACHE_HOME");
+      if (cd.length() == 0) {
+        cd = env_or(alloc, "HOME", "/tmp");
+        cd.append("/.cache/namo_complete");
+      } else {
+        cd.append("/namo_complete");
+      }
+      this.cache_dir = cd;
+    }
+
+    public function is_ask() bool {
+      return this.mode.equals_literal("ask");
+    }
+
+    // Path inside the runtime dir.
+    public function rt_path(alloc: ref HeapAllocator, name: static_ptr<u8>) String {
+      var p = String(alloc, "");
+      p.append(this.runtime_dir);
+      p.append("/");
+      p.append(name);
+      return p;
+    }
+  }
+
+  public function env_int(alloc: ref HeapAllocator, name: static_ptr<u8>,
+                          fallback: i64) i64 {
+    var raw = env(alloc, name);
+    if (raw.length() == 0) {
+      return fallback;
+    }
+    var parsed = raw.parse_i64();
+    return match parsed {
+      Option.Some(v) => v,
+      Option.None => fallback
+    };
+  }
+}

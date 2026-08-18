@@ -1,0 +1,133 @@
+// client.sun - HTTPS via the curl binary.
+//
+// Sun's stdlib has TCP but no TLS, so the request goes out through curl. The
+// safety property that matters: we chdir() into the runtime directory first,
+// so the command string is a compile-time constant made only of relative
+// literal paths. No user-controlled byte ever reaches /bin/sh. The API key
+// travels in a mode-0600 curl config file, so it never appears in `ps`.
+
+public module namo {
+  using sun;
+
+  public class Reply {
+    public var suggestions: Vec<String>;
+    public var failed: bool;
+
+    public function init(alloc: ref HeapAllocator) {
+      this.suggestions = Vec<String>(alloc, 4);
+      this.failed = false;
+    }
+  }
+
+  function build_conf(alloc: ref HeapAllocator, cfg: ref Config) String {
+    var conf = String(alloc, "url = \"");
+    conf.append(cfg.endpoint);
+    conf.append("\"\n");
+    conf.append("header = \"x-api-key: ");
+    conf.append(cfg.api_key);
+    conf.append("\"\n");
+    conf.append("header = \"anthropic-version: 2023-06-01\"\n");
+    conf.append("header = \"content-type: application/json\"\n");
+    conf.append("data-binary = \"@body.json\"\n");
+    conf.append("output = \"resp.json\"\n");
+    conf.append("write-out = \"%{http_code}\"\n");
+    conf.append("max-time = 8\n");
+    conf.append("silent\n");
+    conf.append("show-error\n");
+    return conf;
+  }
+
+  public function call_api(alloc: ref HeapAllocator, cfg: ref Config,
+                           body: ref String) Reply, IError {
+    var reply = Reply(alloc);
+
+    ensure_dir(alloc, cfg.runtime_dir);
+    if (change_dir(alloc, cfg.runtime_dir) != 0) {
+      throw Error(-1, "cannot enter runtime directory");
+    }
+
+    // From here on every path is a relative literal.
+    var p_body = String(alloc, "./body.json");
+    var p_conf = String(alloc, "./req.conf");
+    var p_resp = String(alloc, "./resp.json");
+    var p_err = String(alloc, "./curl.err");
+
+    write_file(alloc, p_body, body, MODE_0600);
+
+    var conf = build_conf(alloc, cfg);
+    write_file_private(alloc, p_conf, conf);
+
+    var rc: i32 = run_curl();
+
+    // The key is on disk only for the duration of the call.
+    remove_path(alloc, p_conf);
+
+    if (rc != 0) {
+      var errtxt = String(alloc, "");
+      try {
+        errtxt = read_file(alloc, p_err);
+      } catch (e: IError) {
+        errtxt = String(alloc, "curl failed");
+      }
+      var m = String(alloc, "[namo] curl exit ");
+      m.append(rc);
+      m.append(": ");
+      m.append(errtxt);
+      m.append("\n");
+      eprint(alloc, m);
+      reply.failed = true;
+      return reply;
+    }
+
+    var raw = read_file(alloc, p_resp);
+    remove_path(alloc, p_resp);
+    remove_path(alloc, p_body);
+
+    parse_reply(alloc, cfg, raw, reply);
+    return reply;
+  }
+
+  // Pull the completion lines out of a Messages API response.
+  public function parse_reply(alloc: ref HeapAllocator, cfg: ref Config,
+                              raw: ref String, reply: ref Reply) void {
+    try {
+      var doc = json_parse(alloc, raw);
+
+      if (doc.has("error")) {
+        var msg = doc.get("error").get("message").as_string();
+        var m = String(alloc, "[namo] api error: ");
+        m.append(msg);
+        m.append("\n");
+        eprint(alloc, m);
+        reply.failed = true;
+        return;
+      }
+
+      var text = doc.get("content").at(0).get("text").as_string();
+      var lines = split_lines(alloc, text);
+
+      // A truncated response leaves a partial final line; drop it.
+      var usable: i64 = lines.size();
+      if (doc.has("stop_reason")) {
+        if (doc.get("stop_reason").as_string().equals_literal("max_tokens")) {
+          if (usable > 1) {
+            usable = usable - 1;
+          }
+        }
+      }
+
+      for (var i: i64 = 0; i < usable; i = i + 1) {
+        if (reply.suggestions.size() >= cfg.max_suggestions) {
+          return;
+        }
+        var cand = clone_str(alloc, lines.borrow_unchecked(i));
+        if (cand.length() > 0) {
+          reply.suggestions.push(cand);
+        }
+      }
+    } catch (e: IError) {
+      eprint_lit(alloc, "[namo] could not parse api response\n");
+      reply.failed = true;
+    }
+  }
+}

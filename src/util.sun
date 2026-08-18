@@ -1,0 +1,182 @@
+// util.sun - string helpers the stdlib does not provide.
+//
+// Sun's String has no split, substring, trim, replace, or case conversion, so
+// everything here is built from length()/at()/append_char().
+
+public module namo {
+  using sun;
+
+  public var CH_NL: u8 = 10;
+  public var CH_CR: u8 = 13;
+  public var CH_SP: u8 = 32;
+  public var CH_TAB: u8 = 9;
+
+  public function is_space(c: u8) bool {
+    return c == CH_SP or c == CH_TAB or c == CH_NL or c == CH_CR;
+  }
+
+  public function trim(alloc: ref HeapAllocator, s: ref String) String {
+    var n: i64 = s.length();
+    var start: i64 = 0;
+    while (start < n and is_space(s.at(start))) {
+      start = start + 1;
+    }
+    var end: i64 = n;
+    while (end > start and is_space(s.at(end - 1))) {
+      end = end - 1;
+    }
+    var out = String(alloc, "");
+    for (var i: i64 = start; i < end; i = i + 1) {
+      out.append_char(s.at(i));
+    }
+    return out;
+  }
+
+  // Split on '\n', dropping empty/whitespace-only lines. CR is stripped.
+  public function split_lines(alloc: ref HeapAllocator, s: ref String) Vec<String> {
+    var out = Vec<String>(alloc, 8);
+    var n: i64 = s.length();
+    var start: i64 = 0;
+    for (var i: i64 = 0; i <= n; i = i + 1) {
+      if (i == n or s.at(i) == CH_NL) {
+        var line = String(alloc, "");
+        for (var j: i64 = start; j < i; j = j + 1) {
+          var c: u8 = s.at(j);
+          if (c != CH_CR) {
+            line.append_char(c);
+          }
+        }
+        var t = trim(alloc, line);
+        if (t.length() > 0) {
+          out.push(t);
+        }
+        start = i + 1;
+      }
+    }
+    return out;
+  }
+
+  // NOTE: `c = c + 32` on a u8 (bare integer literal) miscompiles into an
+  // infinite loop on sun 0.dev, and `append_char(c + 32)` fails LLVM
+  // verification outright -- the literal is promoted to i32 and never narrowed
+  // back. Keeping the addend in a u8-typed variable avoids both. See
+  // SUN_FEEDBACK.md.
+  public function to_lower(alloc: ref HeapAllocator, s: ref String) String {
+    var out = String(alloc, "");
+    var delta: u8 = 32;
+    for (var i: i64 = 0; i < s.length(); i = i + 1) {
+      var c: u8 = s.at(i);
+      if (c >= 65 and c <= 90) {
+        c = c + delta;
+      }
+      out.append_char(c);
+    }
+    return out;
+  }
+
+  // Substring search against a compile-time literal.
+  public function contains_lit(s: ref String, lit: static_ptr<u8>) bool {
+    var p: raw_ptr<u8> = _static_ptr_data<u8>(lit);
+    var m: i64 = _static_ptr_len<u8>(lit);
+    var n: i64 = s.length();
+    if (m == 0) {
+      return true;
+    }
+    if (m > n) {
+      return false;
+    }
+    for (var i: i64 = 0; i <= n - m; i = i + 1) {
+      var ok: bool = true;
+      for (var j: i64 = 0; j < m; j = j + 1) {
+        if (s.at(i + j) != unsafe { _load<u8>(p, j); }) {
+          ok = false;
+        }
+      }
+      if (ok) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Collapse whitespace runs to a single space; used for cache-key stability.
+  public function normalize_ws(alloc: ref HeapAllocator, s: ref String) String {
+    var out = String(alloc, "");
+    var prev_space: bool = false;
+    for (var i: i64 = 0; i < s.length(); i = i + 1) {
+      var c: u8 = s.at(i);
+      if (is_space(c)) {
+        if (prev_space == false and out.length() > 0) {
+          out.append_char(CH_SP);
+        }
+        prev_space = true;
+      } else {
+        out.append_char(c);
+        prev_space = false;
+      }
+    }
+    return trim(alloc, out);
+  }
+
+  // Polynomial rolling hash, reduced each step so it cannot overflow i64.
+  // This is a cache key, not a security primitive.
+  public function hash_str(s: ref String, seed: i64) i64 {
+    var h: i64 = seed;
+    for (var i: i64 = 0; i < s.length(); i = i + 1) {
+      h = (h * 131 + s.at(i)) % 1000000007;
+    }
+    return h;
+  }
+
+  public function append_hex_i64(out: ref String, v: i64) void {
+    var digits: static_ptr<u8> = "0123456789abcdef";
+    var p: raw_ptr<u8> = _static_ptr_data<u8>(digits);
+    var started: bool = false;
+    for (var shift: i64 = 60; shift >= 0; shift = shift - 4) {
+      var nib: i64 = (v >> shift) & 15;
+      if (nib != 0 or started or shift == 0) {
+        out.append_char(unsafe { _load<u8>(p, nib); });
+        started = true;
+      }
+    }
+  }
+
+  // True when the line looks like it carries a credential.
+  public function looks_secret(alloc: ref HeapAllocator, line: ref String) bool {
+    var low = to_lower(alloc, line);
+    if (contains_lit(low, "password") or contains_lit(low, "passwd")) {
+      return true;
+    }
+    if (contains_lit(low, "secret") or contains_lit(low, "token")) {
+      return true;
+    }
+    if (contains_lit(low, "credential") or contains_lit(low, "api_key")) {
+      return true;
+    }
+    if (contains_lit(low, "apikey") or contains_lit(low, "authorization")) {
+      return true;
+    }
+    if (contains_lit(low, "access_key") or contains_lit(low, "private_key")) {
+      return true;
+    }
+    // Known credential prefixes.
+    if (contains_lit(line, "sk-") or contains_lit(line, "ghp_")) {
+      return true;
+    }
+    if (contains_lit(line, "github_pat_") or contains_lit(line, "AKIA")) {
+      return true;
+    }
+    if (contains_lit(line, "xoxb-") or contains_lit(line, "xoxp-")) {
+      return true;
+    }
+    // `export FOO=...` may carry anything; drop the value side wholesale.
+    if (low.starts_with("export ")) {
+      return true;
+    }
+    // A bare `key=` assignment with a long opaque value.
+    if (contains_lit(low, "key=") and line.length() > 40) {
+      return true;
+    }
+    return false;
+  }
+}

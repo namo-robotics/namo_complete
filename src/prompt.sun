@@ -1,0 +1,91 @@
+// prompt.sun - build the Claude Messages API request.
+//
+// Every string that goes into the request is placed via the stdlib Json API,
+// so escaping (quotes, backslashes, newlines, unicode) is handled for us.
+
+public module namo {
+  using sun;
+
+  public var SYSTEM_PROMPT: static_ptr<u8> =
+    "You complete bash command lines. Output ONLY command lines, nothing else.\n\nRules:\n- Return the FULL command line, not just the missing suffix.\n- Return at most 3 alternatives, best first, one per line.\n- No explanations, no markdown, no backticks, no comments, no prose.\n- Never invent file or directory names that were not shown to you.\n- Prefer the simplest command that satisfies the intent.\n- If you cannot produce a useful completion, output nothing at all.";
+
+  // Natural-language mode: the user describes what they want in English and
+  // gets a runnable command back.
+  public var ASK_SYSTEM_PROMPT: static_ptr<u8> =
+    "You turn a plain-English description into a runnable bash command.\n\nRules:\n- Output ONLY command lines, nothing else.\n- Return at most 3 alternatives, best first, one per line.\n- No explanations, no markdown, no backticks, no comments, no prose.\n- Use the files and directories shown in context; never invent names.\n- Prefer portable, widely available tools.\n- If the request is destructive, still answer, but prefer the least\n  destructive form that satisfies it.";
+
+  // Assemble the tagged context block shown to the model. The cursor position
+  // is marked explicitly so the model knows where the user is typing.
+  public function build_context(alloc: ref HeapAllocator, cfg: ref Config,
+                                history: ref Vec<String>, listing: ref String) String {
+    var ctx = String(alloc, "<shell>bash</shell>\n<cwd>");
+    ctx.append(cfg.cwd);
+    ctx.append("</cwd>\n");
+
+    if (listing.length() > 0) {
+      ctx.append("<ls>");
+      ctx.append(listing);
+      ctx.append("</ls>\n");
+    }
+
+    if (history.size() > 0) {
+      ctx.append("<history>\n");
+      for (var i: i64 = 0; i < history.size(); i = i + 1) {
+        ctx.append(history.borrow_unchecked(i));
+        ctx.append("\n");
+      }
+      ctx.append("</history>\n");
+    }
+
+    if (cfg.is_ask()) {
+      ctx.append("<request>");
+      ctx.append(cfg.query);
+      ctx.append("</request>");
+    } else {
+      ctx.append("<line>");
+      ctx.append(cfg.line);
+      ctx.append("<|CURSOR|></line>");
+    }
+    return ctx;
+  }
+
+  // Serialize the request body. Note: no `output_config.effort` (errors on
+  // Haiku 4.5) and no `cache_control` (Haiku's minimum cacheable prefix is
+  // 4096 tokens, far above our ~150-token system prompt, so it would silently
+  // no-op). Local caching does that job instead.
+  public function build_body(alloc: ref HeapAllocator, cfg: ref Config,
+                             context: ref String) String {
+    var req = json_object(alloc);
+    req.set(String(alloc, "model"), Json(clone_str(alloc, cfg.model)));
+    req.set(String(alloc, "max_tokens"), Json(150));
+    req.set(String(alloc, "temperature"), Json(0));
+    if (cfg.is_ask()) {
+      req.set(String(alloc, "system"), json_string(alloc, ASK_SYSTEM_PROMPT));
+    } else {
+      req.set(String(alloc, "system"), json_string(alloc, SYSTEM_PROMPT));
+    }
+
+    // Only non-whitespace stop sequences are accepted -- the API rejects
+    // "\n\n" with "each stop sequence must contain non-whitespace".
+    // max_tokens plus the system prompt already bound the response length.
+    var stops = json_array(alloc);
+    stops.push(json_string(alloc, "```"));
+    req.set(String(alloc, "stop_sequences"), stops);
+
+    var msgs = json_array(alloc);
+    var turn = json_object(alloc);
+    turn.set(String(alloc, "role"), json_string(alloc, "user"));
+    turn.set(String(alloc, "content"), Json(clone_str(alloc, context)));
+    msgs.push(turn);
+    req.set(String(alloc, "messages"), msgs);
+
+    return req.to_string(alloc);
+  }
+
+  // Json(...) takes ownership of a String, so hand it a copy.
+  public function clone_str(alloc: ref HeapAllocator, s: ref String) String {
+    var out = String(alloc, "");
+    out.append(s);
+    return out;
+  }
+}

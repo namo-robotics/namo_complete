@@ -1,0 +1,20 @@
+# --- secrets: never commit these -------------------------------------------
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+
+# --- build output ----------------------------------------------------------
+bin/
+*_debug/
+a.out
+*.o
+*.moon
+
+# --- scratch ---------------------------------------------------------------
+spike/
+*.tmp
+*.swp
+.DS_Store

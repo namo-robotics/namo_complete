@@ -1,0 +1,153 @@
+// fs.sun - file I/O over libc, for paths computed at runtime.
+//
+// The stdlib's sun.io.File takes `static_ptr<u8>` paths, which only string
+// literals satisfy -- there is no way to build a static_ptr at runtime, so
+// stdlib file I/O cannot open a path we computed. Everything here goes
+// straight to libc instead.
+
+public module namo {
+  using sun;
+
+  extern "C" function open(path: raw_ptr<u8>, flags: i32, mode: i32) i32;
+  extern "C" function read(fd: i32, buf: raw_ptr<u8>, n: i64) i64;
+  extern "C" function write(fd: i32, buf: raw_ptr<u8>, n: i64) i64;
+  extern "C" function close(fd: i32) i32;
+  extern "C" function unlink(path: raw_ptr<u8>) i32;
+  extern "C" function mkdir(path: raw_ptr<u8>, mode: i32) i32;
+
+  // Linux open(2) flags.
+  public var O_RDONLY: i32 = 0;
+  public var O_WRONLY: i32 = 1;
+  public var O_CREAT: i32 = 64;
+  public var O_EXCL: i32 = 128;
+  public var O_TRUNC: i32 = 512;
+  public var O_NOFOLLOW: i32 = 131072;
+
+  public var MODE_0600: i32 = 384;
+  public var MODE_0700: i32 = 448;
+
+  // Create a directory, tolerating "already exists".
+  public function ensure_dir(alloc: ref HeapAllocator, path: ref String) void {
+    var c = to_cstr(alloc, path);
+    unsafe { mkdir(c.rawData(), MODE_0700); };
+  }
+
+  public function remove_path(alloc: ref HeapAllocator, path: ref String) void {
+    var c = to_cstr(alloc, path);
+    unsafe { unlink(c.rawData()); };
+  }
+
+  // Write `data` to `path`, truncating. `mode` applies only on creation.
+  public function write_file(alloc: ref HeapAllocator, path: ref String,
+                             data: ref String, mode: i32) void, IError {
+    var cpath = to_cstr(alloc, path);
+    var flags: i32 = O_WRONLY | O_CREAT | O_TRUNC;
+    var fd: i32 = unsafe { open(cpath.rawData(), flags, mode); };
+    if (fd < 0) {
+      throw Error(fd, "cannot open file for writing");
+    }
+    var n: i64 = data.length();
+    if (n > 0) {
+      var cdata = to_cstr(alloc, data);
+      var written: i64 = unsafe { write(fd, cdata.rawData(), n); };
+      if (written != n) {
+        unsafe { close(fd); };
+        throw Error(-1, "short write");
+      }
+    }
+    unsafe { close(fd); };
+  }
+
+  // Write a file that must not already exist and must not be a symlink, with
+  // restrictive permissions. Used for anything holding the API key.
+  public function write_file_private(alloc: ref HeapAllocator, path: ref String,
+                                     data: ref String) void, IError {
+    remove_path(alloc, path);
+    var cpath = to_cstr(alloc, path);
+    var flags: i32 = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW;
+    var fd: i32 = unsafe { open(cpath.rawData(), flags, MODE_0600); };
+    if (fd < 0) {
+      throw Error(fd, "cannot create private file");
+    }
+    var n: i64 = data.length();
+    if (n > 0) {
+      var cdata = to_cstr(alloc, data);
+      var written: i64 = unsafe { write(fd, cdata.rawData(), n); };
+      if (written != n) {
+        unsafe { close(fd); };
+        throw Error(-1, "short write to private file");
+      }
+    }
+    unsafe { close(fd); };
+  }
+
+  public function read_file(alloc: ref HeapAllocator, path: ref String) String, IError {
+    var cpath = to_cstr(alloc, path);
+    var fd: i32 = unsafe { open(cpath.rawData(), O_RDONLY, 0); };
+    if (fd < 0) {
+      throw Error(fd, "cannot open file for reading");
+    }
+    var out = read_fd(alloc, fd);
+    unsafe { close(fd); };
+    return out;
+  }
+
+  // Drain a file descriptor to end-of-file. Also used for stdin (fd 0).
+  public function read_fd(alloc: ref HeapAllocator, fd: i32) String {
+    var out = String(alloc, "");
+    var chunk = ContiguousBuffer<u8>(alloc, 4096);
+    var done: bool = false;
+    while (done == false) {
+      var n: i64 = unsafe { read(fd, chunk.rawData(), 4096); };
+      if (n <= 0) {
+        done = true;
+      } else {
+        for (var i: i64 = 0; i < n; i = i + 1) {
+          out.append_char(chunk.get_unchecked(i));
+        }
+      }
+    }
+    return out;
+  }
+
+  // mkdir -p: create every component of an absolute path.
+  public function ensure_dir_p(alloc: ref HeapAllocator, path: ref String) void {
+    var acc = String(alloc, "");
+    for (var i: i64 = 0; i < path.length(); i = i + 1) {
+      var c: u8 = path.at(i);
+      acc.append_char(c);
+      if (c == 47 and acc.length() > 1) {
+        ensure_dir(alloc, acc);
+      }
+    }
+    if (acc.length() > 0) {
+      ensure_dir(alloc, acc);
+    }
+  }
+
+  // Diagnostics must not land on stdout: stdout is the suggestion channel and
+  // bash substitutes it straight into the readline buffer.
+  public function eprint(alloc: ref HeapAllocator, s: ref String) void {
+    var n: i64 = s.length();
+    if (n == 0) {
+      return;
+    }
+    var c = to_cstr(alloc, s);
+    unsafe { write(2, c.rawData(), n); };
+  }
+
+  public function eprint_lit(alloc: ref HeapAllocator, lit: static_ptr<u8>) void {
+    var s = String(alloc, lit);
+    eprint(alloc, s);
+  }
+
+  public function file_exists(alloc: ref HeapAllocator, path: ref String) bool {
+    var cpath = to_cstr(alloc, path);
+    var fd: i32 = unsafe { open(cpath.rawData(), O_RDONLY, 0); };
+    if (fd < 0) {
+      return false;
+    }
+    unsafe { close(fd); };
+    return true;
+  }
+}

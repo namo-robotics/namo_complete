@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sed -i 's/if \\(i == n || txt.at\\(i\\) == 10\\)/if \\(i == n or txt.at\\(i\\) == 10\\)/' gate_json.sun)",
+      "Bash(SUN_PATH=/usr/lib/sun sun gate_json.sun)",
+      "Bash(cd /usr/share/sun/stdlib && echo \"=== Option API ===\"; grep -nE 'public function' option.sun | head -20; echo; echo \"=== Vec API ===\"; grep -nE 'public function' vec.sun | head -22)",
+      "Read(//usr/share/sun/stdlib/**)",
+      "Bash(cd /usr/share/sun/stdlib && echo \"=== option.sun structure ===\"; head -60 option.sun; echo \"...\"; grep -nE 'enum|case|function' option.sun | head -25)",
+      "Bash(timeout 60 env SUN_PATH=/usr/lib/sun sun -c -o spike/check1 spike/check1.sun)",
+      "Bash(echo \"compile-rc=$?\")",
+      "Bash(timeout 20 ./spike/check1)",
+      "Bash(docker --version)",
+      "Bash(docker info *)",
+      "Bash(podman --version)",
+      "Bash(curl -s \"https://hub.docker.com/v2/repositories/library/ubuntu/tags?page_size=100&name=26\")",
+      "Bash(curl -sI -L \"https://github.com/namo-robotics/sun/releases/download/dev/sun_0.dev_amd64.deb\")",
+      "Bash(dpkg -s sun)",
+      "Bash(chmod +x .devcontainer/verify.sh)",
+      "Bash(docker build *)",
+      "Bash(timeout 90 env SUN_PATH=/usr/lib/sun sun spike/check1.sun)",
+      "Bash(echo \"rc=$?\")",
+      "Bash(cd /usr/share/sun/stdlib && grep -nE 'parse_i64|parse_f64' string.sun | head -5; echo \"=== class public field example ===\"; grep -nE -B2 -A4 'public var' http.sun | head -14)",
+      "Bash(awk '{printf \"%d\\\\t%s\\\\n\", $1+39, substr\\($0, index\\($0,$2\\)\\)}')",
+      "Bash(python3 -)",
+      "Bash(bash -n test.sh)",
+      "Bash(./build.sh)",
+      "Bash(./test.sh --live)",
+      "Bash(sed -i 's/namo: live hints OFF \\(Ctrl-O still works\\)/namo: live hints OFF \\(Alt-O still works\\)/' shell/namo_live.bash)",
+      "Bash(sed -i 's/Start typing and a hint appears; Ctrl-O completes; Alt-G takes plain English\\\\./Start typing and a hint appears; Alt-O completes; Alt-G takes plain English./' README.md)",
+      "Bash(bash -n shell/namo_live.bash)"
+    ]
+  }
+}

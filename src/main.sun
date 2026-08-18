@@ -1,0 +1,106 @@
+// namo_complete - LLM-powered bash command completion.
+//
+// Reads the partial command line from the environment and recent history plus
+// a directory listing from stdin, asks Claude for completions, and writes the
+// candidates to stdout one per line. Bash puts the chosen line into the
+// readline buffer; nothing here ever executes a command.
+//
+// Any failure is silent on stdout so the shell prompt degrades gracefully.
+
+using sun;
+using namo;
+
+function emit(alloc: ref HeapAllocator, items: ref Vec<String>) void {
+  for (var i: i64 = 0; i < items.size(); i = i + 1) {
+    println(items.borrow_unchecked(i));
+  }
+}
+
+function main() i32 {
+  var alloc = make_heap_allocator();
+  var cfg = Config(alloc);
+
+  if (cfg.disabled) {
+    return 0;
+  }
+
+  // Too little to go on: not worth a round trip.
+  // Copy rather than assign: `subject = cfg.query` MOVES the String out of
+  // the Config object, leaving the field empty for build_context later.
+  var subject = String(alloc, "");
+  if (cfg.is_ask()) {
+    subject.append(cfg.query);
+  } else {
+    subject.append(cfg.line);
+  }
+  var prefix = trim(alloc, subject);
+  if (prefix.length() < 3) {
+    return 0;
+  }
+
+  var key = cache_key(alloc, cfg);
+  if (cfg.use_cache) {
+    var hit = cache_lookup(alloc, cfg, key);
+    if (hit.size() > 0) {
+      emit(alloc, hit);
+      return 0;
+    }
+  }
+
+  // Live rendering calls us on every keystroke and must never block on the
+  // network: serve from cache or return nothing at all.
+  if (cfg.cache_only) {
+    return 0;
+  }
+
+  if (cfg.api_key.length() == 0) {
+    eprint_lit(alloc, "[namo] ANTHROPIC_API_KEY is not set\n");
+    return 1;
+  }
+
+  if (cfg.min_gap > 0 and rate_limit_ok(alloc, cfg, cfg.min_gap) == false) {
+    return 0;
+  }
+
+  // History and directory listing arrive on stdin -- bash gathers both, which
+  // keeps a user-controlled path out of every command string we build.
+  var raw_stdin = read_fd(alloc, 0);
+  var input = parse_stdin(alloc, raw_stdin, cfg.history_lines, cfg.send_ls);
+
+  var context = build_context(alloc, cfg, input.history, input.listing);
+  var body = build_body(alloc, cfg, context);
+
+  var reply = Reply(alloc);
+  try {
+    reply = call_api(alloc, cfg, body);
+  } catch (e: IError) {
+    eprint_lit(alloc, "[namo] request failed\n");
+    return 1;
+  }
+
+  if (reply.failed) {
+    return 1;
+  }
+  if (reply.suggestions.size() == 0) {
+    return 0;
+  }
+
+  cache_store(alloc, cfg, key, reply.suggestions);
+  emit(alloc, reply.suggestions);
+  return 0;
+}
+
+manifest {
+    suns: [
+        "cstr.sun",
+        "util.sun",
+        "fs.sun",
+        "sysexec.sun",
+        "config.sun",
+        "prompt.sun",
+        "redact.sun",
+        "client.sun",
+        "cache.sun"
+    ]
+    moons: ["stdlib.moon"]
+}

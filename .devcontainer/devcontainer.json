@@ -1,0 +1,47 @@
+{
+  "name": "namo_complete (Ubuntu 26.04)",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "args": {
+      "USER_UID": "1000",
+      "USER_GID": "1000"
+    }
+  },
+
+  "remoteUser": "dev",
+  "workspaceFolder": "/workspace",
+
+  // Bind ONLY the project directory. Nothing else from the host is visible,
+  // which is the entire point of this container.
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+
+  // Pass the API key through without baking it into the image.
+  "containerEnv": {
+    "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
+    "SUN_PATH": "/usr/lib/sun"
+  },
+
+  // Drop privileges the container has no use for. Deliberately absent:
+  //   - a docker.sock mount (would hand out host root)
+  //   - any host $HOME / ~/.ssh / ~/.aws mount
+  //   - "privileged": true
+  "runArgs": [
+    "--cap-drop=ALL",
+    "--security-opt=no-new-privileges"
+  ],
+
+  "postCreateCommand": ".devcontainer/verify.sh",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "anthropic.claude-code",
+        "timonwong.shellcheck"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "files.eol": "\n"
+      }
+    }
+  }
+}

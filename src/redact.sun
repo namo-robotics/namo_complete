@@ -1,0 +1,88 @@
+// redact.sun - decide what leaves the machine.
+//
+// stdin carries two sections separated by a sentinel line: recent history
+// first, then a directory listing. Bash gathers both, which keeps directory
+// enumeration out of Sun (no opendir FFI) and, more importantly, keeps a
+// user-controlled path out of any command string.
+
+public module namo {
+  using sun;
+
+  public var LS_SENTINEL: static_ptr<u8> = "%%NAMO_LS%%";
+
+  public class Stdin {
+    public var history: Vec<String>;
+    public var listing: String;
+
+    public function init(alloc: ref HeapAllocator) {
+      this.history = Vec<String>(alloc, 8);
+      this.listing = String(alloc, "");
+    }
+  }
+
+  // Split stdin into (history, listing), dropping history lines that look
+  // like they carry a credential, and keeping only the last `keep` entries.
+  public function parse_stdin(alloc: ref HeapAllocator, raw: ref String,
+                              keep: i64, want_ls: bool) Stdin {
+    var out = Stdin(alloc);
+    var lines = split_lines(alloc, raw);
+
+    var in_ls: bool = false;
+    var hist = Vec<String>(alloc, 16);
+
+    for (var i: i64 = 0; i < lines.size(); i = i + 1) {
+      var line = lines.borrow_unchecked(i);
+      if (line.equals_literal(LS_SENTINEL)) {
+        in_ls = true;
+      } else {
+        if (in_ls) {
+          if (want_ls and out.listing.length() < 512) {
+            if (out.listing.length() > 0) {
+              out.listing.append(" ");
+            }
+            out.listing.append(line);
+          }
+        } else {
+          // Fail closed: anything that smells like a secret is dropped
+          // entirely rather than partially masked.
+          if (looks_secret(alloc, line) == false) {
+            hist.push(clone_str(alloc, line));
+          }
+        }
+      }
+    }
+
+    // Keep only the most recent `keep` commands.
+    var start: i64 = 0;
+    if (hist.size() > keep) {
+      start = hist.size() - keep;
+    }
+    if (keep > 0) {
+      for (var j: i64 = start; j < hist.size(); j = j + 1) {
+        out.history.push(clone_str(alloc, hist.borrow_unchecked(j)));
+      }
+    }
+    return out;
+  }
+
+  // Commands worth a second look before the user presses Enter.
+  public function is_dangerous(alloc: ref HeapAllocator, cmd: ref String) bool {
+    var low = to_lower(alloc, cmd);
+    if (contains_lit(low, "rm -rf") or contains_lit(low, "rm -fr")) {
+      return true;
+    }
+    if (contains_lit(low, "mkfs") or contains_lit(low, "dd if=")) {
+      return true;
+    }
+    if (contains_lit(low, "> /dev/") or contains_lit(low, "chmod -r 777")) {
+      return true;
+    }
+    if (contains_lit(low, "| sh") or contains_lit(low, "| bash")) {
+      return true;
+    }
+    if (low.starts_with("sudo ")) {
+      return true;
+    }
+    return false;
+  }
+}
