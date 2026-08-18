@@ -1,0 +1,64 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    # Ubuntu 26.04 for libllvm20, which the Sun toolchain package depends on.
+    container: ubuntu:26.04
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl git file bash \
+            python3 util-linux \
+            build-essential
+        # build-essential is required: `sun -c` shells out to cc/ld to link, and
+        # static linking needs libc.a. Verified in a clean ubuntu:26.04 container
+        # that `gcc` + `libc6-dev` alone is NOT enough.
+        # libllvm20/libstdc++6/libgcc-s1 are deliberately absent -- they are
+        # declared by the Sun package and apt resolves them (see below).
+        # util-linux provides `script`, which test.sh uses to allocate a pty
+        # for the job-control regression test.
+
+      - uses: actions/checkout@v4
+
+      - name: Install Sun toolchain
+        run: |
+          curl -fsSL -o /tmp/sun.deb \
+            https://github.com/namo-robotics/sun/releases/download/dev/sun_0.dev_amd64.deb
+          # `apt-get install ./file.deb` resolves the package's declared
+          # dependencies (libllvm20 etc). `dpkg -i` would not.
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends /tmp/sun.deb
+          sun --version
+
+      - name: Build
+        run: ./build.sh
+
+      - name: Verify the binary is statically linked
+        # The whole distribution story depends on this: a static binary runs on
+        # any x86_64 Linux with no runtime dependency but curl.
+        run: |
+          file bin/namo_complete
+          if ldd bin/namo_complete 2>&1 | grep -qv 'not a dynamic executable'; then
+            echo "::error::binary is dynamically linked; it will not be portable"
+            exit 1
+          fi
+
+      - name: Test
+        # No API key: the suite runs against a local mock. `--live` is
+        # deliberately not used in CI so pull requests cost nothing.
+        run: ./test.sh
+
+      - name: Shellcheck
+        continue-on-error: true
+        run: |
+          apt-get install -y --no-install-recommends shellcheck || exit 0
+          shellcheck -S warning shell/*.bash install.sh build.sh run.sh test.sh || true

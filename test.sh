@@ -145,10 +145,43 @@ esac
 
 # keybindings must survive hosts that steal Ctrl-G (VS Code = "Go to Line")
 binds=$(bash -i -c 'source shell/namo_complete.bash 2>/dev/null; bind -X 2>/dev/null' 2>/dev/null)
-for seq in '\\eo' '\\eg'; do
+for seq in '\\eo' '\\ea' '\\eg'; do
   printf '%s' "$binds" | grep -q "\"$seq\"" \
     && ok "keyseq $seq bound" || bad "keyseq $seq not bound"
 done
+
+# default: no picker -- the top suggestion is accepted with no extra keystroke
+res=$(bash -i -c '
+  source shell/namo_complete.bash 2>/dev/null
+  READLINE_LINE="git com"; READLINE_POINT=7
+  _namo_choose "$(printf "git commit\ngit commit --amend\ngit commit -a")" </dev/null
+  echo "R=[$READLINE_LINE]"
+' 2>/dev/null | grep '^R=')
+[ "$res" = 'R=[git commit]' ] && ok "top suggestion accepted without a picker" \
+                              || bad "expected top suggestion, got $res"
+
+# Alt-A forces the list for one invocation without changing config
+res=$(bash -i -c '
+  source shell/namo_complete.bash 2>/dev/null
+  READLINE_LINE="git com"; READLINE_POINT=7
+  _namo_choose "$(printf "git commit\ngit commit --amend\ngit commit -a")" 1 <<<"3"
+  echo "R=[$READLINE_LINE]"
+' 2>/dev/null | grep '^R=')
+[ "$res" = 'R=[git commit -a]' ] && ok "Alt-A path lists alternatives and selects #3" \
+                                 || bad "forced picker failed (got $res)"
+
+# opt-in picker still works and cancels cleanly on a non-numeric key
+res=$(bash -i -c '
+  source shell/namo_complete.bash 2>/dev/null
+  NAMO_PICKER=1
+  READLINE_LINE="git com"; READLINE_POINT=7
+  # here-string, not a pipe: a pipe would run _namo_choose in a subshell and
+  # its READLINE_LINE assignment would be discarded.
+  _namo_choose "$(printf "git commit\ngit commit --amend\ngit commit -a")" <<<"2"
+  echo "R=[$READLINE_LINE]"
+' 2>/dev/null | grep '^R=')
+[ "$res" = 'R=[git commit --amend]' ] && ok "NAMO_PICKER=1 selects the chosen alternative" \
+                                      || bad "picker did not select #2 (got $res)"
 
 # --------------------------------------------------------------------------
 head_ "4. ask mode (plain English -> command)"
@@ -239,8 +272,42 @@ else
 fi
 
 # --------------------------------------------------------------------------
+head_ "6. packaging"
+# --------------------------------------------------------------------------
+# Build the release tarball the same way .github/workflows/release.yml does,
+# then install from it into a temp prefix -- so a packaging break is caught
+# here rather than at tag time.
+PKGTMP=$(mktemp -d)
+PNAME=$(./packaging/package.sh v0.0.0-test "$PKGTMP" 2>/dev/null)
+
+[ -s "$PKGTMP/$PNAME.tar.gz" ] && ok "release tarball builds" || bad "tarball missing"
+( cd "$PKGTMP" && sha256sum -c --status SHA256SUMS ) \
+  && ok "checksum verifies" || bad "checksum failed"
+
+mkdir -p "$PKGTMP/x"
+tar -C "$PKGTMP/x" -xzf "$PKGTMP/$PNAME.tar.gz"
+"$PKGTMP/x/$PNAME/install.sh" --prefix "$PKGTMP/prefix" --no-bashrc-hint >/dev/null 2>&1
+[ -x "$PKGTMP/prefix/bin/namo_complete" ] \
+  && ok "installs a runnable binary into the prefix" || bad "binary not installed"
+[ -f "$PKGTMP/prefix/share/namo_complete/namo_complete.bash" ] && \
+[ -f "$PKGTMP/prefix/share/namo_complete/namo_live.bash" ] \
+  && ok "installs both shell files" || bad "shell integration not installed"
+
+out=$(env -u ANTHROPIC_API_KEY NAMO_LINE='gi' NAMO_CWD="$PWD" \
+        "$PKGTMP/prefix/bin/namo_complete" </dev/null 2>&1); rc=$?
+[ "$rc" = 0 ] && [ -z "$out" ] \
+  && ok "installed binary runs" || bad "installed binary misbehaved (rc=$rc out=$out)"
+
+res=$(NAMO_BIN="$PKGTMP/prefix/bin/namo_complete" bash -i -c '
+  source '"$PKGTMP"'/prefix/share/namo_complete/namo_complete.bash 2>/dev/null
+  _namo_resolve_bin' 2>/dev/null)
+[ "$res" = "$PKGTMP/prefix/bin/namo_complete" ] \
+  && ok "integration resolves the installed binary" || bad "bin resolution failed ($res)"
+rm -rf "$PKGTMP"
+
+# --------------------------------------------------------------------------
 if [ "${1:-}" = "--live" ]; then
-  head_ "6. live Anthropic API call"
+  head_ "7. live Anthropic API call"
   unset NAMO_ENDPOINT
   if [ -z "${ANTHROPIC_API_KEY_REAL:-}" ]; then
     bad "no real key: put ANTHROPIC_API_KEY in .env for --live"

@@ -27,7 +27,17 @@
       "Bash(./test.sh --live)",
       "Bash(sed -i 's/namo: live hints OFF \\(Ctrl-O still works\\)/namo: live hints OFF \\(Alt-O still works\\)/' shell/namo_live.bash)",
       "Bash(sed -i 's/Start typing and a hint appears; Ctrl-O completes; Alt-G takes plain English\\\\./Start typing and a hint appears; Alt-O completes; Alt-G takes plain English./' README.md)",
-      "Bash(bash -n shell/namo_live.bash)"
+      "Bash(bash -n shell/namo_live.bash)",
+      "Bash(bash -n shell/namo_complete.bash)",
+      "Bash(./test.sh)",
+      "Bash(bash -n run.sh)",
+      "Bash(bash -i -c 'source shell/namo_complete.bash 2>/dev/null; bind -X 2>/dev/null')",
+      "Bash(ldd bin/namo_complete)",
+      "Bash(bash -n install.sh)",
+      "Bash(bash -c 'uname\\(\\){ echo Darwin; }; export -f uname 2>/dev/null; ./install.sh 2>&1 | head -12')",
+      "Bash(./packaging/package.sh v9.9.9-local /tmp/pkgtest)",
+      "Read(//tmp/**)",
+      "Bash(rm -rf /tmp/pkgtest)"
     ]
   }
 }

@@ -1,0 +1,118 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write        # needed to create the release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    container: ubuntu:26.04
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl git file bash \
+            python3 util-linux \
+            build-essential
+        # build-essential is required: `sun -c` shells out to cc/ld to link, and
+        # static linking needs libc.a. Verified in a clean ubuntu:26.04 container
+        # that `gcc` + `libc6-dev` alone is NOT enough.
+        # libllvm20/libstdc++6/libgcc-s1 are deliberately absent -- they are
+        # declared by the Sun package and apt resolves them (see below).
+
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: v
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            V="${{ github.event.inputs.version }}"
+          else
+            V="${GITHUB_REF_NAME}"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "building $V"
+
+      - name: Install Sun toolchain
+        run: |
+          curl -fsSL -o /tmp/sun.deb \
+            https://github.com/namo-robotics/sun/releases/download/dev/sun_0.dev_amd64.deb
+          # `apt-get install ./file.deb` resolves the package's declared
+          # dependencies (libllvm20 etc). `dpkg -i` would not.
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends /tmp/sun.deb
+          sun --version | tee /tmp/sun-version.txt
+
+      - name: Build
+        run: ./build.sh
+
+      - name: Verify the binary is statically linked
+        run: |
+          file bin/namo_complete
+          if ldd bin/namo_complete 2>&1 | grep -qv 'not a dynamic executable'; then
+            echo "::error::binary is dynamically linked; it will not be portable"
+            exit 1
+          fi
+
+      - name: Test
+        run: ./test.sh
+
+      - name: Package
+        id: pkg
+        run: |
+          NAME=$(NAMO_BUILT_WITH="$(cat /tmp/sun-version.txt)" \
+                 ./packaging/package.sh "${{ steps.v.outputs.version }}")
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke-test the packaged artifact
+        # Install from the tarball exactly as a user would, into a temp prefix,
+        # and confirm the installed binary actually runs.
+        run: |
+          set -euo pipefail
+          NAME="${{ steps.pkg.outputs.name }}"
+          TMP=$(mktemp -d)
+          tar -C "$TMP" -xzf "dist/${NAME}.tar.gz"
+          PREFIX="$TMP/prefix" "$TMP/$NAME/install.sh" --prefix "$TMP/prefix" --no-bashrc-hint
+          test -x "$TMP/prefix/bin/namo_complete"
+          test -f "$TMP/prefix/share/namo_complete/namo_complete.bash"
+          # Exits 0 and prints nothing when the prefix is too short to complete.
+          out=$(NAMO_LINE='gi' NAMO_CWD="$PWD" "$TMP/prefix/bin/namo_complete" </dev/null)
+          [ -z "$out" ] || { echo "::error::unexpected output: $out"; exit 1; }
+          echo "packaged artifact installs and runs"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.v.outputs.version }}
+          name: namo_complete ${{ steps.v.outputs.version }}
+          generate_release_notes: true
+          files: |
+            dist/${{ steps.pkg.outputs.name }}.tar.gz
+            dist/SHA256SUMS
+          body: |
+            ## Install
+
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash
+            ```
+
+            Downloads this prebuilt binary — no Sun toolchain and no compiler
+            needed. Then add to `~/.bashrc`:
+
+            ```bash
+            NAMO_LIVE=1
+            source ~/.local/share/namo_complete/namo_complete.bash
+            ```
+
+            Requires Linux x86_64, bash, and `curl`. The binary is statically
+            linked and has no other runtime dependencies.

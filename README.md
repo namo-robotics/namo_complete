@@ -8,18 +8,28 @@ Suggestions appear **as you type**, and two keys put one in your prompt:
 | Key | What it does |
 |---|---|
 | *(just type)* | A hint appears on the bottom line once you pause |
-| **Alt-O** | Complete the partial command you are typing |
+| **Alt-O** | Accept the suggestion shown on the bottom line |
+| **Alt-A** | Same, but list the alternatives and pick one |
 | **Alt-G** | Describe what you want in plain English, get a command |
 
-Type part of a command, press **Alt-O**, and Claude completes it in place:
+Type part of a command, press **Alt-O**, and the suggestion on the bottom line
+is accepted in place:
 
 ```
-$ git com<Alt-O>
+$ git com
+  ~ git commit -m "..."  (Alt-O)          <- hint, appears while you type
+
+$ git commit -m "..."                     <- after Alt-O
+```
+
+Press **Alt-A** instead when you want to see the other candidates:
+
+```
+$ git com<Alt-A>
   1) git commit -m "..."
   2) git commit --amend
   3) git commit -a
   select [1-3] (any other key cancels): 1
-$ git commit -m "..."
 ```
 
 Or press **Alt-G** and just say what you mean:
@@ -27,9 +37,6 @@ Or press **Alt-G** and just say what you mean:
 ```
 $ <Alt-G>
 ask> undo my last commit but keep the changes staged
-  1) git reset --soft HEAD~1
-  2) git reset HEAD~1
-  select [1-2] (any other key cancels): 1
 $ git reset --soft HEAD~1
 ```
 
@@ -112,7 +119,8 @@ cache, same timeouts. The only differences are that the binary comes from
 `./bin` instead of `~/.local/bin`, and the prompt gets a blue `namo` prefix so
 you can tell the shell apart from your normal one.
 
-Start typing and a hint appears; Alt-O completes; Alt-G takes plain English.
+Start typing and a hint appears; Alt-O accepts it, Alt-A shows alternatives,
+Alt-G takes plain English.
 Nothing is installed, your `.bashrc` is untouched, and Ctrl-D exits.
 
 It needs a real API key. Copy the example env file — `.env` is gitignored:
@@ -130,11 +138,15 @@ $EDITOR .env          # set ANTHROPIC_API_KEY
 curl -fsSL https://raw.githubusercontent.com/namo-robotics/namo_complete/main/install.sh | bash
 ```
 
-The installer sets up the Sun toolchain if it is missing, builds the binary
-into `~/.local/bin`, and installs the shell integration. It does **not** edit
-your `.bashrc`; it prints the line for you to add:
+Downloads a prebuilt release binary, verifies its SHA-256, and installs to
+`~/.local` — **no Sun toolchain, no compiler, no root**. Pin a version with
+`--version v0.1.0`, change the location with `--prefix`, or build from a
+checkout with `--from-source`.
+
+It does **not** edit your `.bashrc`; it prints the line for you to add:
 
 ```bash
+NAMO_LIVE=1
 source ~/.local/share/namo_complete/namo_complete.bash
 ```
 
@@ -164,6 +176,8 @@ All settings are environment variables.
 | `NAMO_HISTORY_LINES` | `10` | History commands to send. `0` disables. |
 | `NAMO_LS_LIMIT` | `40` | Filenames to send. |
 | `NAMO_NO_LS` | `0` | `1` sends no directory listing. |
+| `NAMO_ALT_KEY` | `\ea` | Alternatives binding (Alt-A). |
+| `NAMO_PICKER` | `0` | `1` makes Alt-O always list alternatives too. |
 | `NAMO_MAX_SUGGESTIONS` | `3` | Candidates to request. |
 | `NAMO_CACHE` | `1` | `0` disables the local cache. |
 | `NAMO_CACHE_TTL` | `900` | Cache lifetime in seconds. |
@@ -202,6 +216,18 @@ Two properties are deliberate:
   request completes.
 
 The binary is statically linked and depends on nothing at runtime but `curl`.
+
+## Releases
+
+Tagging `v*` runs [`.github/workflows/release.yml`](.github/workflows/release.yml),
+which builds in an `ubuntu:26.04` container, runs the test suite, checks the
+binary really is statically linked, installs from the packaged tarball as a
+smoke test, and publishes `namo_complete-<version>-linux-x86_64.tar.gz` plus
+`SHA256SUMS`. Every push runs the same build and tests via
+[`ci.yml`](.github/workflows/ci.yml), without touching the API.
+
+`./test.sh` builds and installs the tarball locally too, so packaging breaks
+surface before tag time rather than during a release.
 
 ## Building from source
 

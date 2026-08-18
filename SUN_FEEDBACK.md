@@ -140,7 +140,29 @@ buf.set_unchecked(n, 0);
 A `String.as_cstr()` (or a `CStr` type) would delete `src/cstr.sun`. This is
 the single most-used function in the project.
 
-### 7. No TLS
+### 7. No macOS target (blocks distribution entirely)
+
+`extern "C"` supports ELF only, so a program that uses the FFI cannot be built
+for macOS at all:
+
+```
+$ sun -c --target aarch64-apple-darwin -o out prog.sun
+Error: no C ABI rules for target 'aarch64-apple-darwin';
+       extern "C" supports x86_64 and aarch64 (ELF) only
+```
+
+`x86_64-apple-darwin` gets past the ABI check and then fails at link. Because
+§5 and §8 force *every* file operation and environment read through the FFI,
+this is not a limitation we can design around -- there is no subset of the
+program that still works. `namo_complete` is therefore Linux-only, and the
+published releases are Linux x86_64 only.
+
+Mach-O argument classification (and an aarch64-apple-darwin ABI) would be the
+single highest-impact addition for anyone shipping a Sun program to end users.
+Adjacent: upstream publishes only `sun_0.dev_amd64.deb`, so there is no macOS
+toolchain to build with either.
+
+### 8. No TLS
 
 `networking.sun` provides raw IPv4 TCP and `http.sun` a plaintext HTTP
 *server*; there is no HTTPS client. Since this program's whole job is calling
@@ -156,7 +178,7 @@ libcurl's write-callback API.
 *An HTTPS client — or even just TLS sockets — removes ~150 lines and a runtime
 dependency on an external binary.*
 
-### 8. No process/environment/stdin in the stdlib
+### 9. No process/environment/stdin in the stdlib
 
 `getenv`, `system`, `chdir`, `getuid`, `time`, and reading stdin are all
 hand-declared FFI in `src/sysexec.sun` and `src/fs.sun`. Command-line arguments
@@ -164,7 +186,7 @@ are reachable (`main(argc, argv)` — `src/driver.cpp` checks `mainArgCount == 2
 but the parameter types are undocumented; every example in the docs uses bare
 `main()`. We used environment variables instead, partly for this reason.
 
-### 9. No string utilities
+### 10. No string utilities
 
 `String` has no `split`, `substring`, `trim`, `replace`, or case conversion —
 only `find_char`/`rfind_char` and slicing to a `StringView`. `src/util.sun`
