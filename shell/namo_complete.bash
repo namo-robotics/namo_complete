@@ -9,10 +9,8 @@ case $- in *i*) ;; *) return 0 ;; esac
 : "${NAMO_ALT_KEY:=\ea}"
 : "${NAMO_ASK_KEY:=\eg}"
 : "${NAMO_TIMEOUT:=10}"
-: "${NAMO_HISTORY_LINES:=10}"
+: "${NAMO_HISTORY_LINES:=50}"
 : "${NAMO_LS_LIMIT:=40}"
-: "${NAMO_CONFIRM_DANGEROUS:=1}"
-: "${NAMO_PICKER:=0}"
 
 _namo_resolve_bin() {
   if [[ "$NAMO_BIN" == */* ]]; then
@@ -50,8 +48,9 @@ _namo_choose() {
   done <<<"$out"
   (( ${#cands[@]} )) || return 0
 
+  # Alt-O takes the top candidate; only Alt-A (force) opens the list.
   local pick="${cands[0]}"
-  if { [[ "$NAMO_PICKER" == 1 ]] || [[ "$force" == 1 ]]; } && (( ${#cands[@]} > 1 )); then
+  if [[ "$force" == 1 ]] && (( ${#cands[@]} > 1 )); then
     printf '\n'
     local i
     for i in "${!cands[@]}"; do printf '  %d) %s\n' "$((i + 1))" "${cands[$i]}"; done
@@ -62,7 +61,7 @@ _namo_choose() {
     pick="${cands[$((k - 1))]}"
   fi
 
-  if [[ "$NAMO_CONFIRM_DANGEROUS" == 1 ]] && _namo_is_dangerous "$pick"; then
+  if _namo_is_dangerous "$pick"; then
     local yn
     printf '\n  \033[33mdestructive:\033[0m %s\n' "$pick"
     read -rsn1 -p "  insert anyway? [y/N] " yn
@@ -110,5 +109,5 @@ _namo_bind "$NAMO_KEY" _namo_complete
 _namo_bind "$NAMO_ALT_KEY" _namo_alternatives
 _namo_bind "$NAMO_ASK_KEY" _namo_ask
 
-# Live hints rebind every printable key; `namo-live off` reverts that.
+# Live hints rebind every printable key. See namo_live.bash for the cost.
 [ -f "${BASH_SOURCE[0]%/*}/namo_live.bash" ] && source "${BASH_SOURCE[0]%/*}/namo_live.bash"

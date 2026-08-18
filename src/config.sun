@@ -39,7 +39,7 @@ public module namo {
         "https://api.anthropic.com/v1/messages"
       );
 
-      this.history_lines = env_int(alloc, "NAMO_HISTORY_LINES", 10);
+      this.history_lines = env_int(alloc, "NAMO_HISTORY_LINES", 50);
       this.max_suggestions = env_int(alloc, "NAMO_MAX_SUGGESTIONS", 3);
       this.cache_ttl = env_int(alloc, "NAMO_CACHE_TTL", 900);
       this.min_gap = env_int(alloc, "NAMO_MIN_GAP", 1);

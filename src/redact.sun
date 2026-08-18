@@ -42,9 +42,9 @@ public module namo {
             out.listing.append(line);
           }
         } else {
-          // Fail closed: anything that smells like a secret is dropped
-          // entirely rather than partially masked.
-          if (looks_secret(alloc, line) == false) {
+          // A line carrying a known credential prefix is dropped entirely
+          // rather than partially masked.
+          if (looks_secret(line) == false) {
             hist.push(clone_str(alloc, line));
           }
         }

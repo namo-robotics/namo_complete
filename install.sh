@@ -4,16 +4,14 @@
 #   curl -fsSL https://raw.githubusercontent.com/namo-robotics/namo_complete/main/install.sh | bash
 #
 #   --version vX.Y.Z   install a specific release      (NAMO_VERSION)
-#                      use `--version dev` for the rolling build of main
+#                      default: latest stable, or `dev` if there is none
 #   --prefix DIR       install root, default ~/.local  (NAMO_PREFIX)
-#   --from-source      build locally; needs the Sun compiler
 #   --no-bashrc        do not add the source line to ~/.bashrc
 set -euo pipefail
 
 REPO="${NAMO_REPO:-namo-robotics/namo_complete}"
 PREFIX="${NAMO_PREFIX:-$HOME/.local}"
 VERSION="${NAMO_VERSION:-}"
-FROM_SOURCE=0
 NO_BASHRC=0
 
 say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
@@ -26,9 +24,8 @@ while [ $# -gt 0 ]; do
     --version=*) VERSION="${1#*=}"; shift ;;
     --prefix) PREFIX="$2"; shift 2 ;;
     --prefix=*) PREFIX="${1#*=}"; shift ;;
-    --from-source) FROM_SOURCE=1; shift ;;
     --no-bashrc) NO_BASHRC=1; shift ;;
-    -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
 done
@@ -40,29 +37,8 @@ command -v curl >/dev/null 2>&1 || die "curl is required."
 [ "$(uname -s)" = Linux ] || die "only Linux is supported (got $(uname -s)); Sun's FFI is ELF-only."
 case "$(uname -m)" in
   x86_64|amd64) ARCH=x86_64 ;;
-  *) die "no prebuilt binary for $(uname -m); try --from-source" ;;
+  *) die "no prebuilt binary for $(uname -m); only linux-x86_64 is published." ;;
 esac
-
-if [ "$FROM_SOURCE" = 1 ]; then
-  command -v sun >/dev/null 2>&1 || die "--from-source needs the Sun compiler on PATH."
-  SRC="$(cd "$(dirname "$0")" && pwd)"
-  [ -f "$SRC/src/main.sun" ] || die "--from-source must run from a source checkout."
-  ( cd "$SRC" && ./build.sh >/dev/null ) || die "build failed."
-  mkdir -p "$PREFIX/bin" "$PREFIX/share/namo_complete"
-  install -m 0755 "$SRC/bin/namo_complete" "$PREFIX/bin/namo_complete"
-  install -m 0644 "$SRC/shell/namo_complete.bash" "$SRC/shell/namo_live.bash" \
-                  "$PREFIX/share/namo_complete/"
-  say "installed to $PREFIX"
-  SHARE="$PREFIX/share/namo_complete"
-  LINE="[ -f \"$SHARE/namo_complete.bash\" ] && . \"$SHARE/namo_complete.bash\""
-  if [ "$NO_BASHRC" = 0 ] && ! { [ -f "$HOME/.bashrc" ] && grep -qF '# namo_complete' "$HOME/.bashrc"; }; then
-    printf '\n# namo_complete\n%s\n' "$LINE" >> "$HOME/.bashrc"
-    say "added to $HOME/.bashrc"
-  else
-    printf '\nAdd to ~/.bashrc:\n\n    %s\n' "$LINE"
-  fi
-  exit 0
-fi
 
 if [ -z "$VERSION" ]; then
   # Follow the /releases/latest redirect: no token, no rate limit, no jq.
@@ -71,7 +47,8 @@ if [ -z "$VERSION" ]; then
   VERSION="${loc##*/}"
   case "$VERSION" in
     v*) ;;
-    *) die "could not find the latest release of $REPO; pass --version vX.Y.Z" ;;
+    *) VERSION=dev
+       warn "no stable release of $REPO; falling back to the rolling dev build." ;;
   esac
 fi
 

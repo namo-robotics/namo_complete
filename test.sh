@@ -88,6 +88,7 @@ export NAMO_MIN_GAP=0   # the 1s throttle would otherwise starve these tests
 payload() {
   echo 'git status'
   echo 'export GITHUB_TOKEN=ghp_SECRETVALUE'
+  echo 'git commit -m "fix the password reset flow"'
   echo 'ls -la'
   echo '%%NAMO_LS%%'
   echo 'README.md'
@@ -102,6 +103,9 @@ grep -q 'ghp_SECRETVALUE' /tmp/namo_req.json \
   && bad "SECRET LEAKED into the prompt" || ok "credential line redacted from history"
 grep -q 'git status' /tmp/namo_req.json \
   && ok "benign history retained" || bad "benign history dropped"
+grep -q 'fix the password reset flow' /tmp/namo_req.json \
+  && ok "keyword-only line kept; prefixes are the whole filter" \
+  || bad "keyword-only line dropped"
 grep -q '<ls>' /tmp/namo_req.json \
   && ok "directory listing sent in its own tag" || bad "listing tag missing"
 grep -qi "x-api-key: sk-ant-TESTKEY" /tmp/namo_hdr.txt \
@@ -170,18 +174,27 @@ res=$(bash -i -c '
 [ "$res" = 'R=[git commit -a]' ] && ok "Alt-A path lists alternatives and selects #3" \
                                  || bad "forced picker failed (got $res)"
 
-# opt-in picker still works and cancels cleanly on a non-numeric key
+# the picker cancels cleanly on a non-numeric key, leaving the line alone
 res=$(bash -i -c '
   source shell/namo_complete.bash 2>/dev/null
-  NAMO_PICKER=1
   READLINE_LINE="git com"; READLINE_POINT=7
   # here-string, not a pipe: a pipe would run _namo_choose in a subshell and
   # its READLINE_LINE assignment would be discarded.
-  _namo_choose "$(printf "git commit\ngit commit --amend\ngit commit -a")" <<<"2"
+  _namo_choose "$(printf "git commit\ngit commit --amend\ngit commit -a")" 1 <<<"q"
   echo "R=[$READLINE_LINE]"
 ' 2>/dev/null | grep '^R=')
-[ "$res" = 'R=[git commit --amend]' ] && ok "NAMO_PICKER=1 selects the chosen alternative" \
-                                      || bad "picker did not select #2 (got $res)"
+[ "$res" = 'R=[git com]' ] && ok "picker cancels on a non-numeric key" \
+                           || bad "cancel did not leave the line alone (got $res)"
+
+# The destructive-command confirmation is unconditional; declining inserts nothing.
+res=$(bash -i -c '
+  source shell/namo_complete.bash 2>/dev/null
+  READLINE_LINE="clean up"; READLINE_POINT=8
+  _namo_choose "rm -rf build" <<<"n"
+  echo "R=[$READLINE_LINE]"
+' 2>/dev/null | grep '^R=')
+[ "$res" = 'R=[clean up]' ] && ok "destructive suggestion held for confirmation" \
+                            || bad "destructive suggestion inserted anyway (got $res)"
 
 # --------------------------------------------------------------------------
 head_ "4. ask mode (plain English -> command)"
@@ -244,12 +257,13 @@ res=$(bash -i -c '
 # Live hints are the point of the tool: they must be on with no opt-in.
 printf '%s' "$binds" | grep -q '"a" "_namo_key a"' \
   && ok "live hints active on source, no opt-in" || bad "live hints not enabled by default"
+printf '%s' "$binds" | grep -q '"\\C-?" "_namo_backspace"' \
+  && ok "backspace routed through the live handler" || bad "backspace not rebound"
 res=$(bash -i -c '
   source shell/namo_complete.bash 2>/dev/null
-  namo-live off >/dev/null
-  bind -X 2>/dev/null | grep -c "_namo_key" || true' 2>/dev/null | tail -1)
-[ "$res" = 0 ] && ok "namo-live off unbinds the printable keys" \
-               || bad "namo-live off left $res key bindings"
+  type -t namo-live' 2>/dev/null | tail -1)
+[ -z "$res" ] && ok "no switch to turn live hints off" \
+              || bad "namo-live still defined ($res)"
 
 # Regression: a bare `cmd &` in an interactive shell prints "[1] 12345" to the
 # terminal on every keystroke. Needs a real pty to reproduce.

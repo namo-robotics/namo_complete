@@ -141,25 +141,10 @@ public module namo {
     }
   }
 
-  // True when the line looks like it carries a credential.
-  public function looks_secret(alloc: ref HeapAllocator, line: ref String) bool {
-    var low = to_lower(alloc, line);
-    if (contains_lit(low, "password") or contains_lit(low, "passwd")) {
-      return true;
-    }
-    if (contains_lit(low, "secret") or contains_lit(low, "token")) {
-      return true;
-    }
-    if (contains_lit(low, "credential") or contains_lit(low, "api_key")) {
-      return true;
-    }
-    if (contains_lit(low, "apikey") or contains_lit(low, "authorization")) {
-      return true;
-    }
-    if (contains_lit(low, "access_key") or contains_lit(low, "private_key")) {
-      return true;
-    }
-    // Known credential prefixes.
+  // True when the line carries a known credential prefix. Only these are
+  // matched: keyword heuristics ("password", "token", `export `) dropped far
+  // too much ordinary history to be worth the recall.
+  public function looks_secret(line: ref String) bool {
     if (contains_lit(line, "sk-") or contains_lit(line, "ghp_")) {
       return true;
     }
@@ -167,14 +152,6 @@ public module namo {
       return true;
     }
     if (contains_lit(line, "xoxb-") or contains_lit(line, "xoxp-")) {
-      return true;
-    }
-    // `export FOO=...` may carry anything; drop the value side wholesale.
-    if (low.starts_with("export ")) {
-      return true;
-    }
-    // A bare `key=` assignment with a long opaque value.
-    if (contains_lit(low, "key=") and line.length() > 40) {
       return true;
     }
     return false;

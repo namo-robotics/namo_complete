@@ -33,8 +33,9 @@ Downloads a prebuilt binary, verifies its SHA-256, installs to `~/.local`, and
 adds the source line to `~/.bashrc`. No toolchain, no compiler, no root. Open a
 new shell and start typing.
 
-Flags: `--version dev` (rolling build of `main`), `--version v0.1.0`,
-`--prefix DIR`, `--no-bashrc`, `--from-source`.
+Flags: `--version v0.1.0` (a specific release) or `--version dev` (rolling build
+of `main`), `--prefix DIR`, `--no-bashrc`. Without `--version` it takes the
+latest stable release, falling back to `dev` if none has been published yet.
 
 **Linux x86_64 only**, plus `bash` 4.4+ and `curl`. `curl` is the HTTPS
 transport — Sun's stdlib has no TLS. macOS is unsupported because Sun's C FFI
@@ -49,19 +50,19 @@ See [what gets sent to Anthropic](#what-gets-sent-to-anthropic) first.
 | The partial command line | always | — |
 | Current directory path | always | — |
 | Filenames in that directory | 40 | `NAMO_NO_LS=1` |
-| Recent shell history | 10 commands | `NAMO_HISTORY_LINES=0` |
+| Recent shell history | 50 commands | `NAMO_HISTORY_LINES=0` |
 | Everything | | `NAMO_DISABLE=1` |
 
-History lines matching `password`, `secret`, `token`, `key=`, `credential`,
-`authorization`, a known prefix (`sk-`, `ghp_`, `github_pat_`, `AKIA`, `xoxb-`,
-`xoxp-`), or starting with `export` are dropped before the request is built.
-This is best-effort pattern matching, not a guarantee — set
-`NAMO_HISTORY_LINES=0` if your shell handles sensitive material.
+History lines containing a known credential prefix (`sk-`, `ghp_`,
+`github_pat_`, `AKIA`, `xoxb-`, `xoxp-`) are dropped before the request is
+built. That is the whole filter: it catches pasted keys, not a secret in some
+other shape, so set `NAMO_HISTORY_LINES=0` if your shell handles sensitive
+material.
 
 ## Live hints
 
-The hint appears ~400ms after you stop typing. On by default; `namo-live off`
-disables it for the session while Alt-O/A/G keep working.
+The hint appears ~400ms after you stop typing. Always on — there is no switch;
+`NAMO_DISABLE=1` turns the whole tool off.
 
 Readline has no line-changed hook, so this rebinds every printable key. That
 makes paste slower, changes undo granularity, inserts multi-byte UTF-8
@@ -84,17 +85,16 @@ request and repaints when it lands.
 | `NAMO_DEBOUNCE` | `0.4` | Idle seconds before a live request |
 | `NAMO_HINT_MIN` | `3` | Minimum characters before hinting |
 | `NAMO_TIMEOUT` | `10` | Seconds before giving up |
-| `NAMO_HISTORY_LINES` | `10` | History commands sent; `0` disables |
+| `NAMO_HISTORY_LINES` | `50` | History commands sent; `0` disables |
 | `NAMO_LS_LIMIT` / `NAMO_NO_LS` | `40` / `0` | Directory listing |
 | `NAMO_MAX_SUGGESTIONS` | `3` | Candidates requested |
-| `NAMO_PICKER` | `0` | `1` makes Alt-O always list alternatives |
 | `NAMO_CACHE` / `NAMO_CACHE_TTL` | `1` / `900` | Local cache |
-| `NAMO_CONFIRM_DANGEROUS` | `1` | Confirm destructive-looking commands |
 | `NAMO_DISABLE` | `0` | `1` turns everything off |
 | `NAMO_ENDPOINT` | Messages API | Override, for testing |
 
-Responses are cached under `$XDG_CACHE_HOME/namo_complete`, keyed on prefix +
-directory + model.
+Responses are cached in `~/.cache/namo_complete` (or
+`$XDG_CACHE_HOME/namo_complete` if that variable is set), keyed on prefix +
+directory + model. Deleting the directory is safe at any time.
 
 ## How it works
 
@@ -150,7 +150,7 @@ or network error leaves the prompt untouched and explains itself on stderr.
 [`release.yml`](.github/workflows/release.yml) builds in a container, runs the
 tests, verifies the binary is static, installs from the tarball as a smoke test,
 then publishes the tarball and `SHA256SUMS`. `install.sh` resolves the newest
-*stable* release, so `dev` is opt-in. Pull requests run
+*stable* release and only uses `dev` if there is no stable one. Pull requests run
 [`ci.yml`](.github/workflows/ci.yml) — same build and tests, no publishing.
 
 ## Notes on Sun

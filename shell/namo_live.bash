@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# As-you-type hints, on by default. Disable for a session with `namo-live off`.
+# As-you-type hints. Always on: they are the feature, not an add-on.
 #
 # Readline has no line-changed hook, so every printable key is rebound. Costs:
 # slower paste, per-character undo, byte-wise UTF-8, no vi command mode.
@@ -64,7 +64,7 @@ _namo_prefetch() {
       sleep "$NAMO_DEBOUNCE"
       [ "$(cat "$_NAMO_STATE" 2>/dev/null)" = "$line" ] || exit 0
 
-      { fc -ln -"${NAMO_HISTORY_LINES:-10}" 2>/dev/null
+      { fc -ln -"${NAMO_HISTORY_LINES:-50}" 2>/dev/null
         echo '%%NAMO_LS%%'
         ls -1A 2>/dev/null | head -n "${NAMO_LS_LIMIT:-40}"
       } | NAMO_LINE="$line" NAMO_CWD="$PWD" "$bin" >/dev/null 2>&1
@@ -110,31 +110,12 @@ _namo_backspace() {
 
 _NAMO_PUNCT=(' ' '-' '_' '.' '/' '=' ',' ':' '+' '@' '%' '~')
 
-_namo_live_on() {
-  local c
-  for c in {a..z} {A..Z} {0..9}; do bind -x "\"$c\": _namo_key $c" 2>/dev/null; done
-  for c in "${_NAMO_PUNCT[@]}"; do bind -x "\"$c\": _namo_key \"$c\"" 2>/dev/null; done
-  bind -x '"\C-?": _namo_backspace' 2>/dev/null
-  _NAMO_LIVE=1
-}
-
-_namo_live_off() {
-  local c
-  for c in {a..z} {A..Z} {0..9} "${_NAMO_PUNCT[@]}"; do
-    bind "\"$c\": self-insert" 2>/dev/null
-  done
-  bind '"\C-?": backward-delete-char' 2>/dev/null
-  _namo_hint ""
-  _NAMO_LIVE=0
-}
-
-namo-live() {
-  case "${1:-status}" in
-    on)     _namo_live_on;  echo "namo: live hints on" ;;
-    off)    _namo_live_off; echo "namo: live hints off (Alt-O still works)" ;;
-    status) echo "namo live hints: ${_NAMO_LIVE:-0} (debounce ${NAMO_DEBOUNCE}s)" ;;
-    *)      echo "usage: namo-live [on|off|status]" >&2; return 2 ;;
-  esac
-}
-
-_namo_live_on
+# Every printable key routes through _namo_key so the hint can follow the line.
+for _namo_c in {a..z} {A..Z} {0..9}; do
+  bind -x "\"$_namo_c\": _namo_key $_namo_c" 2>/dev/null
+done
+for _namo_c in "${_NAMO_PUNCT[@]}"; do
+  bind -x "\"$_namo_c\": _namo_key \"$_namo_c\"" 2>/dev/null
+done
+unset _namo_c
+bind -x '"\C-?": _namo_backspace' 2>/dev/null
