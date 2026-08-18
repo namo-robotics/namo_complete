@@ -79,6 +79,7 @@ request and repaints when it lands.
 |---|---|---|
 | `ANTHROPIC_API_KEY` | — | Required |
 | `NAMO_MODEL` | `claude-haiku-4-5` | Any Claude model |
+| `NAMO_BIN` | `namo_complete` | Binary path, if not on `PATH` |
 | `NAMO_KEY` / `NAMO_ALT_KEY` / `NAMO_ASK_KEY` | `\eo` / `\ea` / `\eg` | Bindings, `bind` syntax |
 | `NAMO_DEBOUNCE` | `0.4` | Idle seconds before a live request |
 | `NAMO_HINT_MIN` | `3` | Minimum characters before hinting |
