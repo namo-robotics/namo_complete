@@ -110,18 +110,33 @@ directory + model. Deleting the directory is safe at any time.
 
 ## How it works
 
+```mermaid
+flowchart TD
+    A["You press Alt-O"] --> B["Shell function gathers the line,<br>your history and the directory listing"]
+    B --> C["Sun binary drops credentials,<br>then checks the local cache"]
+    C -->|hit| F["Candidates printed to stdout"]
+    C -->|miss| D["curl posts the request to the Claude API"]
+    D --> E["Reply parsed into up to 3 commands"]
+    E --> F
+    F --> G["Bash puts one in your line.<br>You press Enter"]
 ```
-bash readline ──Alt-O──> _namo_complete()      shell/namo_complete.bash
-                            │ env: NAMO_LINE, NAMO_CWD
-                            │ stdin: history, %%NAMO_LS%%, listing
-                            ▼
-                         namo_complete                 (Sun binary)
-                            │ redact -> cache -> build JSON
-                            │ chdir(runtime); write body.json + req.conf
-                            │ system("curl -sS -K ./req.conf ...")
-                            ▼
-                         stdout ──> READLINE_LINE
-```
+
+It starts in bash, and the shell function is the only part that touches your
+environment. It takes the partial line from readline, collects the two pieces of
+context worth sending — recent history and a listing of the current directory —
+and pipes them to the binary on stdin. Collecting the listing here rather than
+in the binary is deliberate: it keeps a user-controlled path out of every command
+string the binary goes on to build.
+
+The binary does the rest. It drops history lines carrying a credential prefix,
+hashes the line, directory and model into a cache key, and returns straight away
+if a fresh answer is already on disk. Otherwise it builds the JSON request and
+hands it to curl — Sun's standard library has TCP but no TLS, so curl is the
+transport as well as the installer.
+
+The reply comes back as at most three command lines on stdout. Bash reads them,
+inserts the first or offers the list, and assigns the result to `READLINE_LINE`.
+Nothing runs: the command sits in your prompt waiting for you.
 
 Two deliberate properties:
 
