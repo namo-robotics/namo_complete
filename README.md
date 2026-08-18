@@ -3,14 +3,19 @@
 LLM-powered autocomplete for Bash, written in the
 [Sun](https://namo-robotics.github.io/sun/) programming language.
 
-A hint appears on the bottom line as you type. **Nothing is ever executed** —
-suggestions go into your readline buffer and you still press Enter.
+Type as usual. A moment after you pause, a dim hint appears on the bottom line
+with the command you are most likely reaching for; keep typing and it updates or
+disappears, so ignoring it costs nothing. Take it with **Alt-O**, or press
+**Alt-A** to see the other candidates when it is close but wrong. When you do not
+know the command at all, **Alt-G** turns a plain-English description into a few
+options to choose from. Accepting one puts the command in your line —
+**nothing is ever executed**, so you can edit it before pressing Enter.
 
 | Key | Action |
-|---|---|
+| --- | --- |
 | **Alt-O** | Accept the hint |
-| **Alt-A** | List alternatives and pick one |
-| **Alt-G** | Describe what you want in plain English |
+| **Alt-A** | List the other candidates, pick one by number |
+| **Alt-G** | Describe what you want in plain English, pick from described options |
 
 ```
 $ git com
@@ -19,6 +24,11 @@ $ git commit -m "..."                <- after Alt-O
 
 $ <Alt-G>
 ask> undo my last commit but keep the changes staged
+  1) git reset --soft HEAD~1
+     Undo last commit, keep changes staged
+  2) git revert --no-commit HEAD
+     Create revert commit, keep changes staged
+  select [1-2]: 1
 $ git reset --soft HEAD~1
 ```
 
@@ -46,7 +56,7 @@ See [what gets sent to Anthropic](#what-gets-sent-to-anthropic) first.
 ## What gets sent to Anthropic
 
 | Sent | Default | Disable |
-|---|---|---|
+| --- | --- | --- |
 | The partial command line | always | — |
 | Current directory path | always | — |
 | Filenames in that directory | 40 | `NAMO_NO_LS=1` |
@@ -64,6 +74,10 @@ material.
 The hint appears ~400ms after you stop typing. Always on — there is no switch;
 `NAMO_DISABLE=1` turns the whole tool off.
 
+Sourcing the shell file also adds a prompt hook that starts every prompt on a
+fresh line, so output with no trailing newline (`curl -s`, `printf`) no longer
+gets the next prompt glued to it.
+
 Readline has no line-changed hook, so this rebinds every printable key. That
 makes paste slower, changes undo granularity, inserts multi-byte UTF-8
 byte-by-byte, and does not cover vi command mode. Rendering is a bottom-line
@@ -77,7 +91,7 @@ request and repaints when it lands.
 ## Configuration
 
 | Variable | Default | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | `ANTHROPIC_API_KEY` | — | Required |
 | `NAMO_MODEL` | `claude-haiku-4-5` | Any Claude model |
 | `NAMO_BIN` | `namo_complete` | Binary path, if not on `PATH` |
@@ -143,7 +157,7 @@ or network error leaves the prompt untouched and explains itself on stderr.
 ## Releases
 
 | Trigger | Release |
-|---|---|
+| --- | --- |
 | merge to `main` | `dev` — rolling prerelease, overwritten each time |
 | tag `v*` | immutable versioned release |
 

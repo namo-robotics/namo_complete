@@ -9,8 +9,11 @@ public module namo {
   public var SYSTEM_PROMPT: static_ptr<u8> = "You complete bash command lines. Output ONLY command lines, nothing else.\n\nRules:\n- Return the FULL command line, not just the missing suffix.\n- Return at most 3 alternatives, best first, one per line.\n- No explanations, no markdown, no backticks, no comments, no prose.\n- Never invent file or directory names that were not shown to you.\n- Prefer the simplest command that satisfies the intent.\n- If you cannot produce a useful completion, output nothing at all.";
 
   // Natural-language mode: the user describes what they want in English and
-  // gets a runnable command back.
-  public var ASK_SYSTEM_PROMPT: static_ptr<u8> = "You turn a plain-English description into a runnable bash command.\n\nRules:\n- Output ONLY command lines, nothing else.\n- Return at most 3 alternatives, best first, one per line.\n- No explanations, no markdown, no backticks, no comments, no prose.\n- Use the files and directories shown in context; never invent names.\n- Prefer portable, widely available tools.\n- If the request is destructive, still answer, but prefer the least\n  destructive form that satisfies it.";
+  // gets runnable commands back. Unlike completion, the user has not typed a
+  // prefix and cannot judge the answers at a glance, so each alternative
+  // carries a short description. Format is COMMAND, one tab, DESCRIPTION --
+  // a tab never occurs inside a suggested command, so the split is unambiguous.
+  public var ASK_SYSTEM_PROMPT: static_ptr<u8> = "You turn a plain-English description into runnable bash commands.\n\nOutput at most 3 alternatives, best first, one per line, in exactly this form:\n\nCOMMAND<TAB>DESCRIPTION\n\nRules:\n- Separate the command from its description with ONE literal tab character.\n- Every line must contain a tab. Never omit the description.\n- DESCRIPTION is a short phrase, at most 8 words, no trailing period.\n- COMMAND is one runnable line: no markdown, backticks, comments, or prose.\n- Make the alternatives meaningfully different, not spelling variants.\n- Use the files and directories shown in context; never invent names.\n- Prefer portable, widely available tools.\n- If the request is destructive, still answer, but prefer the least\n  destructive form that satisfies it.";
 
   // Assemble the tagged context block shown to the model. The cursor position
   // is marked explicitly so the model knows where the user is typing.
@@ -53,11 +56,13 @@ public module namo {
   public function build_body(alloc: ref HeapAllocator, cfg: ref Config, context: ref String) String {
     var req = json_object(alloc);
     req.set(String(alloc, "model"), Json(clone_str(alloc, cfg.model)));
-    req.set(String(alloc, "max_tokens"), Json(150));
     req.set(String(alloc, "temperature"), Json(0));
+    // Ask mode carries a description per line, so it needs the extra room.
     if (cfg.is_ask()) {
+      req.set(String(alloc, "max_tokens"), Json(300));
       req.set(String(alloc, "system"), json_string(alloc, ASK_SYSTEM_PROMPT));
     } else {
+      req.set(String(alloc, "max_tokens"), Json(150));
       req.set(String(alloc, "system"), json_string(alloc, SYSTEM_PROMPT));
     }
 

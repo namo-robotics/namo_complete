@@ -39,7 +39,18 @@ _namo_hint() {
   fi
 }
 
-_namo_live_prompt_hook() { _namo_hint ""; }
+# Output without a trailing newline (`curl -s`, `printf`, ...) leaves the next
+# prompt glued to it. Writing one full terminal width of spaces wraps to a fresh
+# line only when the cursor is not already at column 1: at column 1 the terminal
+# defers the wrap, so \r lands back on the same row and the prompt overwrites the
+# spaces. Costs nothing and needs no cursor-position query. Same trick as zsh's
+# PROMPT_EOL_MARK.
+_namo_eol_fix() {
+  [ -t 1 ] || return 0
+  printf '%*s\r' "${COLUMNS:-80}" ''
+}
+
+_namo_live_prompt_hook() { _namo_hint ""; _namo_eol_fix; }
 if [[ ${PROMPT_COMMAND@a} == *a* ]]; then
   [[ " ${PROMPT_COMMAND[*]} " == *" _namo_live_prompt_hook "* ]] || \
     PROMPT_COMMAND=(_namo_live_prompt_hook "${PROMPT_COMMAND[@]}")

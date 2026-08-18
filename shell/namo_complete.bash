@@ -38,6 +38,16 @@ _namo_is_dangerous() {
   return 1
 }
 
+# Ask mode returns "COMMAND<TAB>DESCRIPTION"; completion returns bare commands.
+# Sets cmd and desc in the caller's scope.
+_namo_split() {
+  cmd="${1%%$'\t'*}"
+  desc=""
+  [[ "$1" == *$'\t'* ]] && desc="${1#*$'\t'}"
+  cmd="${cmd%"${cmd##*[![:space:]]}"}"
+  desc="${desc#"${desc%%[![:space:]]*}"}"
+}
+
 _namo_choose() {
   local out=$1 force=${2:-0}
   [[ -z "${out//[[:space:]]/}" ]] && return 0
@@ -48,18 +58,25 @@ _namo_choose() {
   done <<<"$out"
   (( ${#cands[@]} )) || return 0
 
-  # Alt-O takes the top candidate; only Alt-A (force) opens the list.
+  # Alt-O takes the top candidate; Alt-A and ask mode (force) open the list.
   local pick="${cands[0]}"
   if [[ "$force" == 1 ]] && (( ${#cands[@]} > 1 )); then
     printf '\n'
-    local i
-    for i in "${!cands[@]}"; do printf '  %d) %s\n' "$((i + 1))" "${cands[$i]}"; done
+    local i cmd desc
+    for i in "${!cands[@]}"; do
+      _namo_split "${cands[$i]}"
+      printf '  %d) %s\n' "$((i + 1))" "$cmd"
+      [[ -n "$desc" ]] && printf '     \033[2m%s\033[0m\n' "$desc"
+    done
     local k
     read -rsn1 -p "  select [1-${#cands[@]}]: " k
     printf '\n'
     [[ "$k" =~ ^[1-9]$ ]] && (( k <= ${#cands[@]} )) || return 0
     pick="${cands[$((k - 1))]}"
   fi
+
+  # Only the command half ever reaches the buffer.
+  pick="${pick%%$'\t'*}"
 
   if _namo_is_dangerous "$pick"; then
     local yn
@@ -102,7 +119,7 @@ _namo_run() {  # mode, force_picker
 
 _namo_complete()     { _namo_run complete 0; }
 _namo_alternatives() { _namo_run complete 1; }
-_namo_ask()          { _namo_run ask 0; }
+_namo_ask()          { _namo_run ask 1; }
 
 _namo_bind() { bind -x "\"$1\": $2" 2>/dev/null; bind -m vi-insert -x "\"$1\": $2" 2>/dev/null; }
 _namo_bind "$NAMO_KEY" _namo_complete

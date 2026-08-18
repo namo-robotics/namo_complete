@@ -42,7 +42,8 @@
       "Bash(python3 -c \"import yaml,sys; [yaml.safe_load\\(open\\(f\\)\\) for f in ['.github/workflows/ci.yml','.github/workflows/release.yml']]; print\\('YAML valid'\\)\")",
       "Bash(pip install *)",
       "Bash(python3 -c \"import yaml; [yaml.safe_load\\(open\\(f\\)\\) for f in ['.github/workflows/ci.yml','.github/workflows/release.yml']]; print\\('YAML valid'\\)\")",
-      "Bash(bash install.sh --help)"
+      "Bash(bash install.sh --help)",
+      "Bash(bash -i -c ' *)"
     ]
   }
 }

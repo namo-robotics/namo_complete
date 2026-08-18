@@ -186,6 +186,20 @@ res=$(bash -i -c '
 [ "$res" = 'R=[git com]' ] && ok "picker cancels on a non-numeric key" \
                            || bad "cancel did not leave the line alone (got $res)"
 
+# Ask mode returns COMMAND<TAB>DESCRIPTION: the list shows both, the buffer
+# gets the command only.
+res=$(bash -i -c '
+  source shell/namo_complete.bash 2>/dev/null
+  READLINE_LINE="x"; READLINE_POINT=1
+  _namo_choose "$(printf "du -sh *\tShow sizes\nls -lhS\tSort by size")" 1 <<<"2"
+  echo "R=[$READLINE_LINE]"
+' 2>/dev/null)
+printf '%s' "$res" | grep -q 'Sort by size' \
+  && ok "descriptions shown next to each alternative" || bad "descriptions not displayed"
+printf '%s' "$res" | grep -q '^R=\[ls -lhS\]$' \
+  && ok "only the command half reaches the buffer" \
+  || bad "description leaked into the buffer ($(printf '%s' "$res" | grep '^R='))"
+
 # The destructive-command confirmation is unconditional; declining inserts nothing.
 res=$(bash -i -c '
   source shell/namo_complete.bash 2>/dev/null
@@ -211,6 +225,8 @@ python3 - <<'PYX' && ok "ask mode uses the ask system prompt" || bad "wrong syst
 import json
 d=json.load(open('/tmp/namo_req.json'))
 assert 'plain-English' in d['system'], d['system'][:80]
+assert 'COMMAND<TAB>DESCRIPTION' in d['system'], "ask prompt does not request descriptions"
+assert d['max_tokens'] == 300, d['max_tokens']
 PYX
 
 # ask-mode cache must not collide with completion cache
@@ -279,9 +295,17 @@ RCEOF
   jobnoise=$(printf 'READLINE_LINE=""; READLINE_POINT=0; for c in g i t " " c o; do _namo_key "$c"; done\nsleep 1\nexit\n' \
     | script -qec "bash --rcfile /tmp/namo_rc_test.sh -i" /dev/null 2>&1 \
     | tr -d '\r' | grep -acE '^\[[0-9]+\][[:space:]]+[0-9]+')
-  rm -f /tmp/namo_rc_test.sh
   [ "$jobnoise" = 0 ] && ok "no job-control noise while typing" \
                       || bad "$jobnoise job notifications leaked to the terminal"
+
+  # Output with no trailing newline must not swallow the next prompt: the hook
+  # pads to the end of the row so the wrap happens before the prompt is drawn.
+  eolcap=$(printf 'printf hi\nexit\n' \
+    | script -qec "bash --rcfile /tmp/namo_rc_test.sh -i" /dev/null 2>&1)
+  printf '%s' "$eolcap" | grep -q "hi  *$(printf '\r')" \
+    && ok "prompt starts on a fresh line after unterminated output" \
+    || bad "no end-of-line padding emitted after unterminated output"
+  rm -f /tmp/namo_rc_test.sh
   # Ctrl-G must NOT be bound: VS Code steals it, so it would look broken.
   for stolen in '\\C-g' '\\C-o'; do
     printf '%s' "$binds" | grep -q "\"$stolen\"" \
