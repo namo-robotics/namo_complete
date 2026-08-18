@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# As-you-type hints. Opt in with NAMO_LIVE=1; toggle with `namo-live on|off`.
+# As-you-type hints, on by default. Disable for a session with `namo-live off`.
 #
 # Readline has no line-changed hook, so every printable key is rebound. Costs:
 # slower paste, per-character undo, byte-wise UTF-8, no vi command mode.
@@ -8,7 +8,7 @@
 case $- in *i*) ;; *) return 0 ;; esac
 
 : "${NAMO_DEBOUNCE:=0.4}"
-: "${NAMO_LIVE_MIN:=3}"
+: "${NAMO_HINT_MIN:=3}"
 : "${NAMO_HINT_PREFIX:=~ }"
 : "${NAMO_HINT_SUFFIX:=  (Alt-O / Alt-A for more)}"
 
@@ -82,7 +82,7 @@ _namo_tick() {
   bin=$(_namo_resolve_bin) || return 0
   printf '%s' "$READLINE_LINE" > "$_NAMO_STATE"
 
-  if [ "${#READLINE_LINE}" -lt "$NAMO_LIVE_MIN" ]; then _namo_hint ""; return 0; fi
+  if [ "${#READLINE_LINE}" -lt "$NAMO_HINT_MIN" ]; then _namo_hint ""; return 0; fi
 
   # Cache only: never block on the network here.
   h=$(NAMO_CACHE_ONLY=1 NAMO_LINE="$READLINE_LINE" NAMO_CWD="$PWD" "$bin" </dev/null 2>/dev/null | head -1)
@@ -115,7 +115,7 @@ _namo_live_on() {
   for c in {a..z} {A..Z} {0..9}; do bind -x "\"$c\": _namo_key $c" 2>/dev/null; done
   for c in "${_NAMO_PUNCT[@]}"; do bind -x "\"$c\": _namo_key \"$c\"" 2>/dev/null; done
   bind -x '"\C-?": _namo_backspace' 2>/dev/null
-  NAMO_LIVE=1
+  _NAMO_LIVE=1
 }
 
 _namo_live_off() {
@@ -125,16 +125,16 @@ _namo_live_off() {
   done
   bind '"\C-?": backward-delete-char' 2>/dev/null
   _namo_hint ""
-  NAMO_LIVE=0
+  _NAMO_LIVE=0
 }
 
 namo-live() {
   case "${1:-status}" in
     on)     _namo_live_on;  echo "namo: live hints on" ;;
     off)    _namo_live_off; echo "namo: live hints off (Alt-O still works)" ;;
-    status) echo "namo live hints: ${NAMO_LIVE:-0} (debounce ${NAMO_DEBOUNCE}s)" ;;
+    status) echo "namo live hints: ${_NAMO_LIVE:-0} (debounce ${NAMO_DEBOUNCE}s)" ;;
     *)      echo "usage: namo-live [on|off|status]" >&2; return 2 ;;
   esac
 }
 
-[ "${NAMO_LIVE:-0}" = 1 ] && _namo_live_on
+_namo_live_on

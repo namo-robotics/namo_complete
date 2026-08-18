@@ -37,7 +37,11 @@
       "Bash(bash -c 'uname\\(\\){ echo Darwin; }; export -f uname 2>/dev/null; ./install.sh 2>&1 | head -12')",
       "Bash(./packaging/package.sh v9.9.9-local /tmp/pkgtest)",
       "Read(//tmp/**)",
-      "Bash(rm -rf /tmp/pkgtest)"
+      "Bash(rm -rf /tmp/pkgtest)",
+      "Bash(grep -n '^#\\\\{2,3\\\\} ' README.md)",
+      "Bash(python3 -c \"import yaml,sys; [yaml.safe_load\\(open\\(f\\)\\) for f in ['.github/workflows/ci.yml','.github/workflows/release.yml']]; print\\('YAML valid'\\)\")",
+      "Bash(pip install *)",
+      "Bash(python3 -c \"import yaml; [yaml.safe_load\\(open\\(f\\)\\) for f in ['.github/workflows/ci.yml','.github/workflows/release.yml']]; print\\('YAML valid'\\)\")"
     ]
   }
 }

@@ -43,37 +43,72 @@ $ git reset --soft HEAD~1
 The suggestion is placed in your readline buffer. **Nothing is ever executed** —
 you still press Enter.
 
-### Why Alt and not Ctrl
+## Install
 
-Both bindings use Alt so they are consistent, and because Ctrl-G is unusable in
-editor terminals: VS Code binds it to *Go to Line/Column* and lists it in
-`terminal.integrated.commandsToSkipShell`, so the keystroke is consumed by the
-editor and never reaches bash. Alt-O and Alt-G are not claimed by anything and
-work in VS Code, plain terminals, and over SSH alike.
+```bash
+curl -fsSL https://raw.githubusercontent.com/namo-robotics/namo_complete/main/install.sh | bash
+```
 
-Both are overridable with `NAMO_KEY` and `NAMO_ASK_KEY`, in `bind` keyseq
-syntax. On macOS, Option-O and Option-G type `ø` and `©` rather than sending
-Meta, so set something else there, e.g. `NAMO_KEY='\C-x\C-o'`.
+Downloads a prebuilt release binary, verifies its SHA-256, installs to
+`~/.local`, and adds the source line to your `~/.bashrc` — **no Sun toolchain,
+no compiler, no root**. Pass `--no-bashrc` to skip the `.bashrc` edit. Pin a version with
+`--version v0.1.0`, change the location with `--prefix`, or build from a
+checkout with `--from-source`. For the latest build of `main`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/namo-robotics/namo_complete/main/install.sh | bash -s -- --version dev
+```
+
+Then set your API key and open a new shell:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+**Requires Linux x86_64**, `bash` 4.4+, and `curl` — not optional, since Sun's
+stdlib has no TLS and `namo_complete` performs HTTPS by invoking it. macOS is
+not supported: Sun's C FFI targets ELF only, and every syscall this program
+makes goes through it (see [SUN_FEEDBACK.md](SUN_FEEDBACK.md)).
+
+Before installing, see [what gets sent to Anthropic](#what-gets-sent-to-anthropic).
+
+## Try it without installing
+
+```bash
+./run.sh
+```
+
+Opens an interactive bash shell **in your current directory**, set up exactly
+the way an installed user's `.bashrc` would set it up — same throttling, same
+cache, same timeouts. The only differences are that the binary comes from
+`./bin` instead of `~/.local/bin`, and the prompt gets a blue `namo` prefix so
+you can tell the shell apart from your normal one.
+
+Start typing and a hint appears; Alt-O accepts it, Alt-A shows alternatives,
+Alt-G takes plain English.
+Nothing is installed, your `.bashrc` is untouched, and Ctrl-D exits.
+
+It needs a real API key. Copy the example env file — `.env` is gitignored:
+
+```bash
+cp .env.example .env && chmod 600 .env
+$EDITOR .env          # set ANTHROPIC_API_KEY
+```
+
+`run.sh` and `test.sh` load `.env` automatically.
 
 ## Live hints as you type
 
-Off by default, because it is invasive. Turn it on before sourcing:
-
-```bash
-NAMO_LIVE=1
-source ~/.local/share/namo_complete/namo_complete.bash
-```
-
-A dimmed suggestion then appears on the terminal's bottom line ~400ms after you
-stop typing; press Alt-O to accept it. Toggle at runtime with
-`namo-live on|off|status`.
+A dimmed suggestion appears on the terminal's bottom line ~400ms after you stop
+typing; press Alt-O to accept it. This is on by default — it is the point of
+the tool. Turn it off for a session with `namo-live off`.
 
 **What this costs.** Bash's readline has no "line changed" hook, so live hints
 work by rebinding every printable key to a function that inserts the character
 and then does the extra work. That means bracketed paste is slower, undo
 granularity changes, multi-byte UTF-8 is inserted byte-by-byte, and vi command
 mode is not instrumented. If any of that bothers you, run `namo-live off` — the
-Alt-O and Alt-G bindings keep working.
+Alt-O, Alt-A and Alt-G bindings keep working.
 
 Rendering is a bottom-line status hint rather than inline grey ghost text.
 True inline ghost text needs a full line editor; if you want that, install
@@ -107,58 +142,6 @@ material in your shell, set `NAMO_HISTORY_LINES=0`.
 
 Prompts are subject to Anthropic's data retention policy.
 
-## Try it without installing
-
-```bash
-./run.sh
-```
-
-Opens an interactive bash shell **in your current directory**, set up exactly
-the way an installed user's `.bashrc` would set it up — same throttling, same
-cache, same timeouts. The only differences are that the binary comes from
-`./bin` instead of `~/.local/bin`, and the prompt gets a blue `namo` prefix so
-you can tell the shell apart from your normal one.
-
-Start typing and a hint appears; Alt-O accepts it, Alt-A shows alternatives,
-Alt-G takes plain English.
-Nothing is installed, your `.bashrc` is untouched, and Ctrl-D exits.
-
-It needs a real API key. Copy the example env file — `.env` is gitignored:
-
-```bash
-cp .env.example .env && chmod 600 .env
-$EDITOR .env          # set ANTHROPIC_API_KEY
-```
-
-`run.sh` and `test.sh` load `.env` automatically.
-
-## Install
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/namo-robotics/namo_complete/main/install.sh | bash
-```
-
-Downloads a prebuilt release binary, verifies its SHA-256, and installs to
-`~/.local` — **no Sun toolchain, no compiler, no root**. Pin a version with
-`--version v0.1.0`, change the location with `--prefix`, or build from a
-checkout with `--from-source`.
-
-It does **not** edit your `.bashrc`; it prints the line for you to add:
-
-```bash
-NAMO_LIVE=1
-source ~/.local/share/namo_complete/namo_complete.bash
-```
-
-Then set your API key and open a new shell:
-
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-```
-
-Requirements: Linux, `bash`, and `curl`. (`curl` is not optional — Sun's stdlib
-has no TLS, so `namo_complete` performs HTTPS by invoking it.)
-
 ## Configuration
 
 All settings are environment variables.
@@ -168,9 +151,8 @@ All settings are environment variables.
 | `ANTHROPIC_API_KEY` | — | Required. |
 | `NAMO_KEY` | `\eo` | Completion binding (Alt-O), in `bind` syntax. |
 | `NAMO_ASK_KEY` | `\eg` | Plain-English binding (Alt-G). |
-| `NAMO_LIVE` | `0` | `1` enables as-you-type hints. |
 | `NAMO_DEBOUNCE` | `0.4` | Idle seconds before a live request fires. |
-| `NAMO_LIVE_MIN` | `3` | Minimum characters before hinting. |
+| `NAMO_HINT_MIN` | `3` | Minimum characters before hinting. |
 | `NAMO_MODEL` | `claude-haiku-4-5` | Chosen for latency; any Claude model works. |
 | `NAMO_TIMEOUT` | `10` | Seconds before the call is abandoned. |
 | `NAMO_HISTORY_LINES` | `10` | History commands to send. `0` disables. |
@@ -219,12 +201,20 @@ The binary is statically linked and depends on nothing at runtime but `curl`.
 
 ## Releases
 
-Tagging `v*` runs [`.github/workflows/release.yml`](.github/workflows/release.yml),
-which builds in an `ubuntu:26.04` container, runs the test suite, checks the
-binary really is statically linked, installs from the packaged tarball as a
-smoke test, and publishes `namo_complete-<version>-linux-x86_64.tar.gz` plus
-`SHA256SUMS`. Every push runs the same build and tests via
-[`ci.yml`](.github/workflows/ci.yml), without touching the API.
+[`release.yml`](.github/workflows/release.yml) builds in an `ubuntu:26.04`
+container, runs the test suite, checks the binary really is statically linked,
+installs from the packaged tarball as a smoke test, then publishes
+`namo_complete-<version>-linux-x86_64.tar.gz` plus `SHA256SUMS`.
+
+| Trigger | Release |
+|---|---|
+| merge to `main` | `dev` — a rolling prerelease, tag force-moved and assets overwritten every time |
+| tag `v*` | immutable versioned release with generated notes |
+
+`install.sh` resolves the newest *stable* release by default, so the `dev`
+prerelease is opt-in via `--version dev`. Pull requests run
+[`ci.yml`](.github/workflows/ci.yml), which is the same build and tests without
+publishing or touching the API.
 
 `./test.sh` builds and installs the tarball locally too, so packaging breaks
 surface before tag time rather than during a release.

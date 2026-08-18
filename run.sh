@@ -17,7 +17,7 @@ RC=$(mktemp)
 {
   # --rcfile replaces ~/.bashrc, so source it explicitly.
   printf 'if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi\n'
-  printf 'export NAMO_BIN=%q NAMO_LIVE=1\n' "$ROOT/bin/namo_complete"
+  printf 'export NAMO_BIN=%q\n' "$ROOT/bin/namo_complete"
   printf 'source %q\n' "$ROOT/shell/namo_complete.bash"
   cat <<'EOF'
 # Prefix the existing prompt; from PROMPT_COMMAND because prompts like starship

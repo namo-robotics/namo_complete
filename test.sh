@@ -241,15 +241,22 @@ res=$(bash -i -c '
 [ "$res" = 'R=[gitX c|4]' ] && ok "live key handlers edit the buffer correctly" \
                             || bad "live key handlers wrong (got $res)"
 
-res=$(bash -i -c 'source shell/namo_complete.bash 2>/dev/null; echo "L=${NAMO_LIVE:-0}"' 2>/dev/null | grep '^L=')
-[ "$res" = 'L=0' ] && ok "live hints are opt-in (off by default)" || bad "live hints on by default ($res)"
+# Live hints are the point of the tool: they must be on with no opt-in.
+printf '%s' "$binds" | grep -q '"a" "_namo_key a"' \
+  && ok "live hints active on source, no opt-in" || bad "live hints not enabled by default"
+res=$(bash -i -c '
+  source shell/namo_complete.bash 2>/dev/null
+  namo-live off >/dev/null
+  bind -X 2>/dev/null | grep -c "_namo_key" || true' 2>/dev/null | tail -1)
+[ "$res" = 0 ] && ok "namo-live off unbinds the printable keys" \
+               || bad "namo-live off left $res key bindings"
 
 # Regression: a bare `cmd &` in an interactive shell prints "[1] 12345" to the
 # terminal on every keystroke. Needs a real pty to reproduce.
 if command -v script >/dev/null 2>&1; then
   cat > /tmp/namo_rc_test.sh <<RCEOF
 export NAMO_BIN="$PWD/$BIN"
-export NAMO_MIN_GAP=0 NAMO_LIVE=1 NAMO_DEBOUNCE=0.3
+export NAMO_MIN_GAP=0 NAMO_DEBOUNCE=0.3
 export NAMO_ENDPOINT="$NAMO_ENDPOINT"
 export ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
 source "$PWD/shell/namo_complete.bash"
@@ -286,7 +293,7 @@ PNAME=$(./packaging/package.sh v0.0.0-test "$PKGTMP" 2>/dev/null)
 
 mkdir -p "$PKGTMP/x"
 tar -C "$PKGTMP/x" -xzf "$PKGTMP/$PNAME.tar.gz"
-"$PKGTMP/x/$PNAME/install.sh" --prefix "$PKGTMP/prefix" --no-bashrc-hint >/dev/null 2>&1
+"$PKGTMP/x/$PNAME/install.sh" --prefix "$PKGTMP/prefix" --no-bashrc >/dev/null 2>&1
 [ -x "$PKGTMP/prefix/bin/namo_complete" ] \
   && ok "installs a runnable binary into the prefix" || bad "binary not installed"
 [ -f "$PKGTMP/prefix/share/namo_complete/namo_complete.bash" ] && \
@@ -297,6 +304,19 @@ out=$(env -u ANTHROPIC_API_KEY NAMO_LINE='gi' NAMO_CWD="$PWD" \
         "$PKGTMP/prefix/bin/namo_complete" </dev/null 2>&1); rc=$?
 [ "$rc" = 0 ] && [ -z "$out" ] \
   && ok "installed binary runs" || bad "installed binary misbehaved (rc=$rc out=$out)"
+
+# .bashrc handling: adds once, never duplicates, and honours --no-bashrc.
+: > "$PKGTMP/bashrc"
+BASHRC="$PKGTMP/bashrc" "$PKGTMP/x/$PNAME/install.sh" --prefix "$PKGTMP/p2" >/dev/null 2>&1
+BASHRC="$PKGTMP/bashrc" "$PKGTMP/x/$PNAME/install.sh" --prefix "$PKGTMP/p2" >/dev/null 2>&1
+n=$(grep -c 'namo_complete.bash' "$PKGTMP/bashrc" 2>/dev/null || echo 0)
+[ "$n" = 1 ] && ok "adds the source line to .bashrc exactly once" \
+             || bad "expected 1 source line in .bashrc, found $n"
+
+: > "$PKGTMP/bashrc2"
+BASHRC="$PKGTMP/bashrc2" "$PKGTMP/x/$PNAME/install.sh" --prefix "$PKGTMP/p3" --no-bashrc >/dev/null 2>&1
+[ ! -s "$PKGTMP/bashrc2" ] && ok "--no-bashrc leaves .bashrc untouched" \
+                           || bad "--no-bashrc modified .bashrc"
 
 res=$(NAMO_BIN="$PKGTMP/prefix/bin/namo_complete" bash -i -c '
   source '"$PKGTMP"'/prefix/share/namo_complete/namo_complete.bash 2>/dev/null

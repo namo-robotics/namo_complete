@@ -110,5 +110,5 @@ _namo_bind "$NAMO_KEY" _namo_complete
 _namo_bind "$NAMO_ALT_KEY" _namo_alternatives
 _namo_bind "$NAMO_ASK_KEY" _namo_ask
 
-# Live hints are opt-in: they rebind every printable key.
+# Live hints rebind every printable key; `namo-live off` reverts that.
 [ -f "${BASH_SOURCE[0]%/*}/namo_live.bash" ] && source "${BASH_SOURCE[0]%/*}/namo_live.bash"

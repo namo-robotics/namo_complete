@@ -1,10 +1,9 @@
 name: ci
 
 on:
-  push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
+# Pushes to main are built and published by release.yml (rolling `dev`).
 
 jobs:
   build-and-test:

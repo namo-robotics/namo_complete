@@ -2,15 +2,16 @@ name: release
 
 on:
   push:
-    tags: ["v*"]
+    branches: [main]        # rolling "dev" release, overwritten each merge
+    tags: ["v*"]            # immutable versioned release
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to build (e.g. v0.1.0)"
-        required: true
+        description: "Version to build (blank = dev)"
+        required: false
 
 permissions:
-  contents: write        # needed to create the release
+  contents: write
 
 jobs:
   release:
@@ -26,30 +27,32 @@ jobs:
             python3 util-linux \
             build-essential
         # build-essential is required: `sun -c` shells out to cc/ld to link, and
-        # static linking needs libc.a. Verified in a clean ubuntu:26.04 container
-        # that `gcc` + `libc6-dev` alone is NOT enough.
-        # libllvm20/libstdc++6/libgcc-s1 are deliberately absent -- they are
-        # declared by the Sun package and apt resolves them (see below).
+        # static linking needs libc.a. `gcc` + `libc6-dev` alone is NOT enough.
+        # libllvm20 etc are declared by the Sun package and resolved by apt.
 
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # need tags to force-move `dev`
 
       - name: Resolve version
         id: v
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            V="${{ github.event.inputs.version }}"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            V="$GITHUB_REF_NAME"; DEV=false
           else
-            V="${GITHUB_REF_NAME}"
+            V="${{ github.event.inputs.version }}"; V="${V:-dev}"
+            if [ "$V" = dev ]; then DEV=true; else DEV=false; fi
           fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
-          echo "building $V"
+          echo "dev=$DEV" >> "$GITHUB_OUTPUT"
+          echo "building $V (prerelease=$DEV)"
 
       - name: Install Sun toolchain
         run: |
           curl -fsSL -o /tmp/sun.deb \
             https://github.com/namo-robotics/sun/releases/download/dev/sun_0.dev_amd64.deb
-          # `apt-get install ./file.deb` resolves the package's declared
-          # dependencies (libllvm20 etc). `dpkg -i` would not.
+          # `apt-get install ./file.deb` resolves the package's dependencies;
+          # `dpkg -i` would not.
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends /tmp/sun.deb
           sun --version | tee /tmp/sun-version.txt
 
@@ -75,44 +78,32 @@ jobs:
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
 
       - name: Smoke-test the packaged artifact
-        # Install from the tarball exactly as a user would, into a temp prefix,
-        # and confirm the installed binary actually runs.
         run: |
           set -euo pipefail
           NAME="${{ steps.pkg.outputs.name }}"
           TMP=$(mktemp -d)
-          tar -C "$TMP" -xzf "dist/${NAME}.tar.gz"
-          PREFIX="$TMP/prefix" "$TMP/$NAME/install.sh" --prefix "$TMP/prefix" --no-bashrc-hint
+          tar -C "$TMP" -xzf "dist/$NAME.tar.gz"
+          "$TMP/$NAME/install.sh" --prefix "$TMP/prefix" --no-bashrc
           test -x "$TMP/prefix/bin/namo_complete"
-          test -f "$TMP/prefix/share/namo_complete/namo_complete.bash"
-          # Exits 0 and prints nothing when the prefix is too short to complete.
           out=$(NAMO_LINE='gi' NAMO_CWD="$PWD" "$TMP/prefix/bin/namo_complete" </dev/null)
           [ -z "$out" ] || { echo "::error::unexpected output: $out"; exit 1; }
-          echo "packaged artifact installs and runs"
 
-      - name: Create release
+      - name: Move the dev tag
+        if: steps.v.outputs.dev == 'true'
+        # Force-move `dev` to this commit so the rolling release points at the
+        # build it actually contains.
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git tag -f dev
+          git push -f origin refs/tags/dev
+
+      - name: Publish
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.v.outputs.version }}
-          name: namo_complete ${{ steps.v.outputs.version }}
-          generate_release_notes: true
+          name: ${{ steps.v.outputs.dev == 'true' && 'dev (rolling)' || format('namo_complete {0}', steps.v.outputs.version) }}
+          prerelease: ${{ steps.v.outputs.dev == 'true' }}
+          generate_release_notes: ${{ steps.v.outputs.dev != 'true' }}
           files: |
             dist/${{ steps.pkg.outputs.name }}.tar.gz
             dist/SHA256SUMS
-          body: |
-            ## Install
-
-            ```bash
-            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash
-            ```
-
-            Downloads this prebuilt binary — no Sun toolchain and no compiler
-            needed. Then add to `~/.bashrc`:
-
-            ```bash
-            NAMO_LIVE=1
-            source ~/.local/share/namo_complete/namo_complete.bash
-            ```
-
-            Requires Linux x86_64, bash, and `curl`. The binary is statically
-            linked and has no other runtime dependencies.

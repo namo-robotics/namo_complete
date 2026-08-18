@@ -4,16 +4,17 @@
 #   curl -fsSL https://raw.githubusercontent.com/namo-robotics/namo_complete/main/install.sh | bash
 #
 #   --version vX.Y.Z   install a specific release      (NAMO_VERSION)
+#                      use `--version dev` for the rolling build of main
 #   --prefix DIR       install root, default ~/.local  (NAMO_PREFIX)
 #   --from-source      build locally; needs the Sun compiler
-#
-# Never edits your .bashrc; prints the line to add.
+#   --no-bashrc        do not add the source line to ~/.bashrc
 set -euo pipefail
 
 REPO="${NAMO_REPO:-namo-robotics/namo_complete}"
 PREFIX="${NAMO_PREFIX:-$HOME/.local}"
 VERSION="${NAMO_VERSION:-}"
 FROM_SOURCE=0
+NO_BASHRC=0
 
 say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33mwarning:\033[0m %s\n' "$*" >&2; }
@@ -26,6 +27,7 @@ while [ $# -gt 0 ]; do
     --prefix) PREFIX="$2"; shift 2 ;;
     --prefix=*) PREFIX="${1#*=}"; shift ;;
     --from-source) FROM_SOURCE=1; shift ;;
+    --no-bashrc) NO_BASHRC=1; shift ;;
     -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
@@ -51,7 +53,14 @@ if [ "$FROM_SOURCE" = 1 ]; then
   install -m 0644 "$SRC/shell/namo_complete.bash" "$SRC/shell/namo_live.bash" \
                   "$PREFIX/share/namo_complete/"
   say "installed to $PREFIX"
-  printf '\nAdd to ~/.bashrc:\n\n    NAMO_LIVE=1\n    source %s/share/namo_complete/namo_complete.bash\n\n' "$PREFIX"
+  SHARE="$PREFIX/share/namo_complete"
+  LINE="[ -f \"$SHARE/namo_complete.bash\" ] && . \"$SHARE/namo_complete.bash\""
+  if [ "$NO_BASHRC" = 0 ] && ! { [ -f "$HOME/.bashrc" ] && grep -qF '# namo_complete' "$HOME/.bashrc"; }; then
+    printf '\n# namo_complete\n%s\n' "$LINE" >> "$HOME/.bashrc"
+    say "added to $HOME/.bashrc"
+  else
+    printf '\nAdd to ~/.bashrc:\n\n    %s\n' "$LINE"
+  fi
   exit 0
 fi
 
@@ -84,6 +93,7 @@ else
 fi
 
 tar -C "$TMP" -xzf "$TMP/$NAME.tar.gz"
-"$TMP/$NAME/install.sh" --prefix "$PREFIX"
+[ "$NO_BASHRC" = 1 ] && set -- --no-bashrc || set --
+"$TMP/$NAME/install.sh" --prefix "$PREFIX" "$@"
 
 [ -n "${ANTHROPIC_API_KEY:-}" ] || warn "ANTHROPIC_API_KEY is not set."
