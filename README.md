@@ -4,11 +4,9 @@ LLM-powered autocomplete for Bash, written in the
 [Sun](https://namo-robotics.github.io/sun/) programming language.
 
 Type as usual. A moment after you pause, a dim hint appears on the bottom line
-with the command you are most likely reaching for; keep typing and it updates or
-disappears, so ignoring it costs nothing. Take it with **Alt-O**, or press
-**Alt-A** to see the other candidates when it is close but wrong. When you do not
-know the command at all, **Alt-G** turns a plain-English description into a few
-options to choose from. Accepting one puts the command in your line —
+with the command you are most likely reaching for. Keep typing and it updates or
+disappears. Accept it with **Alt-O**, or press
+**Alt-A** to see the other candidates. Press **Alt-G** to enter *ask* mode and describe the command you want in plain-English. Accepting a hint puts the command in your line —
 **nothing is ever executed**, so you can edit it before pressing Enter.
 
 | Key | Action |
