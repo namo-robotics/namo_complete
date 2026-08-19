@@ -86,6 +86,7 @@ _NAMO_RFD=""   # read end of the reply FIFO, likewise
 _NAMO_REQ_ID=0
 _NAMO_OFF=""   # set if the plumbing could not be built; everything goes quiet
 _NAMO_TTYFD="" # dup of the real terminal, to fall back on if the relay dies
+_NAMO_CAPTURE="" # set while this shell's output really is going through a relay
 
 # Resolved once. Doing it per prompt would be a command substitution, and this
 # is the only value the prompt hook needs from outside the shell.
@@ -158,13 +159,16 @@ _namo_relay_is_running() {
 }
 
 _namo_capture_ensure() {
+  # Nothing below prints a marker unless this ends up back at 1: a shell with no
+  # relay behind it must not put control bytes in its own output.
+  _NAMO_CAPTURE=""
   (( NAMO_OUTPUT > 0 )) || return 0
   # Only when stdout is already a terminal. A shell whose output is a pipe or a
   # file is being read by something -- a script, a harness -- and putting a pty
   # in front of it would send that output to the terminal instead.
   [ -t 1 ] || return 0
   [ -n "$_NAMO_OFF" ] && return 1
-  _namo_relay_is_running && return 0
+  _namo_relay_is_running && { _NAMO_CAPTURE=1; return 0; }
 
   if [ -z "$_NAMO_TTYFD" ]; then
     # Kept for the life of the shell: if the relay ever dies, this is the only
@@ -184,6 +188,7 @@ _namo_capture_ensure() {
   { read -r pts; } < "$_NAMO_PTSFILE" 2>/dev/null || return 1
   [ -n "$pts" ] || return 1
   exec > "$pts" 2>&1
+  _NAMO_CAPTURE=1
 }
 
 # Hand the current line to the daemon and return. One write() into a pipe
@@ -275,12 +280,26 @@ _namo_reserve_hint_row() {
 #
 # It is also where the recording of a command's output starts, when there is
 # one: everything before this point was the prompt and the line being typed.
-_NAMO_PS0=$'\033[2K'
-(( NAMO_OUTPUT > 0 )) && _NAMO_PS0=$'\036'"$_NAMO_PS0"
-case "${PS0:-}" in
-  *$'\033[2K'*) ;;
-  *) PS0="${PS0:-}$_NAMO_PS0" ;;
-esac
+# The marker rides in front of the clear, and only while a relay is actually
+# there to take it back out again, so PS0 is rebuilt whenever that changes.
+if [[ "${PS0:-}" != *$'\033[2K'* ]]; then
+  _NAMO_PS0_BASE="${PS0:-}"
+  _NAMO_PS0=$'\033[2K'
+  PS0="$_NAMO_PS0_BASE$_NAMO_PS0"
+elif [ -z "${_NAMO_PS0:-}" ]; then
+  # A clear is already in PS0 and it is not ours: leave PS0 alone entirely.
+  _NAMO_PS0_BASE=""
+  _NAMO_PS0=""
+fi
+
+_namo_ps0_sync() {
+  [ -n "${_NAMO_PS0:-}" ] || return 0
+  local want=$'\033[2K'
+  [ -n "$_NAMO_CAPTURE" ] && want=$'\036'"$want"
+  [ "$want" = "$_NAMO_PS0" ] && return 0
+  _NAMO_PS0=$want
+  PS0="$_NAMO_PS0_BASE$_NAMO_PS0"
+}
 
 # Between commands: make sure the daemon is still there, drop the hint, refresh
 # its view of the history, and post anything command_not_found_handle left for
@@ -292,7 +311,8 @@ _namo_on_prompt() {
   _namo_capture_ensure
   # The command is done: this is what it printed. The relay writes those lines
   # down and takes the marker back out again, so the screen never sees it.
-  (( NAMO_OUTPUT > 0 )) && printf '\037'
+  [ -n "$_NAMO_CAPTURE" ] && printf '\037'
+  _namo_ps0_sync
   _namo_send_line ""
   { fc -ln -"${NAMO_HISTORY_LINES:-50}"; } > "$_NAMO_HISTFILE" 2>/dev/null
   # After the snapshot, so the line is corrected against a history that already
@@ -399,22 +419,37 @@ _namo_pick_and_insert() {
 # byte arrives the moment it is typed; the echo and the erasing are ours.
 #
 # Leaves the question in _NAMO_QUESTION. Returns 1 if it was abandoned.
+#
+# It draws on stdout, like every other row this file prints. That matters with
+# the output capture on: stdout is then a pty the relay copies through, and a
+# write straight to /dev/tty would overtake the rows the shell itself printed
+# -- the prompt would land on top of a hint instead of under it. The wrapper
+# keeps /dev/tty for the one case stdout is not a terminal.
 _namo_read_question() {
+  if [ -t 1 ]; then _namo_read_question_on_tty
+  elif { : >/dev/tty; } 2>/dev/null; then _namo_read_question_on_tty >/dev/tty
+  else _namo_read_question_on_tty >/dev/null   # no terminal at all: still read
+  fi
+}
+
+_namo_read_question_on_tty() {
   _NAMO_QUESTION=""
   local q="$READLINE_LINE" ch
-  printf '\n\033[36mask>\033[0m %s' "$q" >/dev/tty
+  # The row below the line is the reserved hint row, and a hint may still be
+  # sitting in it: clear it before the prompt goes there.
+  printf '\n\r\033[2K\033[36mask>\033[0m %s' "$q"
   while IFS= read -rsn1 ch; do
     case "$ch" in
-      '')                 break ;;                            # Enter
-      $'\003'|$'\033')    printf '\n' >/dev/tty; return 1 ;;   # Ctrl-C, Esc
-      $'\177'|$'\010')                                         # Backspace
-        [[ -n "$q" ]] && { q="${q%?}"; printf '\b \b' >/dev/tty; } ;;
-      $'\025')                                                 # Ctrl-U
-        q=""; printf '\r\033[K\033[36mask>\033[0m ' >/dev/tty ;;
-      *)                  q+="$ch"; printf '%s' "$ch" >/dev/tty ;;
+      '')                 break ;;                  # Enter
+      $'\003'|$'\033')    printf '\n'; return 1 ;;   # Ctrl-C, Esc
+      $'\177'|$'\010')                               # Backspace
+        [[ -n "$q" ]] && { q="${q%?}"; printf '\b \b'; } ;;
+      $'\025')                                       # Ctrl-U
+        q=""; printf '\r\033[K\033[36mask>\033[0m ' ;;
+      *)                  q+="$ch"; printf '%s' "$ch" ;;
     esac
   done
-  printf '\n' >/dev/tty
+  printf '\n'
   _NAMO_QUESTION="$q"
 }
 
