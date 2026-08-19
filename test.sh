@@ -344,11 +344,20 @@ export ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
 source "$PWD/shell/namo_complete.bash"
 PS1='T\$ '
 RCEOF
+  daemons_before=$(pgrep -x namo_complete 2>/dev/null | sort | tr '\n' ' ')
   jobnoise=$(printf 'READLINE_LINE=""; READLINE_POINT=0; for c in g i t " " c o; do _namo_key "$c"; done\nsleep 1\nexit\n' \
     | script -qec "bash --rcfile /tmp/namo_rc_test.sh -i" /dev/null 2>&1 \
     | tr -d '\r' | grep -acE '^\[[0-9]+\][[:space:]]+[0-9]+')
   [ "$jobnoise" = 0 ] && ok "no job-control noise while typing" \
                       || bad "$jobnoise job notifications leaked to the terminal"
+
+  # The daemon holds the read end of the FIFO; when the shell that owns the
+  # write end goes away it must see end-of-file and stop, not linger.
+  sleep 0.8
+  daemons_after=$(pgrep -x namo_complete 2>/dev/null | sort | tr '\n' ' ')
+  [ "$daemons_before" = "$daemons_after" ] \
+    && ok "no live daemon left behind by an exited shell" \
+    || bad "a live daemon outlived its shell"
 
   # Output with no trailing newline must not swallow the next prompt: the hook
   # pads to the end of the row so the wrap happens before the prompt is drawn.
@@ -367,6 +376,65 @@ RCEOF
 else
   echo "  (skipped pty test: 'script' not available)"
 fi
+
+# --------------------------------------------------------------------------
+head_ "5b. the live daemon"
+# --------------------------------------------------------------------------
+# The FIFO read loop, the debounce, the cache lookup, the API call and the hint
+# row all live inside the binary now (src/live.sun); the shell only writes
+# "<cwd><tab><line>" into a pipe. These drive that side of it directly.
+DT=$(mktemp -d)
+mkfifo -m 600 "$DT/fifo"
+printf 'git status\nexport TOK=ghp_LIVELEAK\n' > "$DT/hist"
+exec {DFD}<>"$DT/fifo"
+rm -f /tmp/namo_req.json
+
+NAMO_DAEMON=1 NAMO_FIFO="$DT/fifo" NAMO_HISTFILE="$DT/hist" NAMO_PIDFILE="$DT/pid" \
+  NAMO_TTY="$DT/tty" NAMO_DEBOUNCE=0.2 NAMO_QUIET=0.05 "$BIN" </dev/null >/dev/null 2>&1
+dpid=$(cat "$DT/pid" 2>/dev/null)
+{ [ -n "$dpid" ] && kill -0 "$dpid" 2>/dev/null; } \
+  && ok "daemon detaches and records its pid before returning" \
+  || bad "daemon did not start"
+
+printf '%s\t%s\n' "$PWD" "live daemon probe" >&"$DFD"
+sleep 1.2
+grep -q 'hint: ' "$DT/tty" && ok "hint painted after the debounce" || bad "no hint painted"
+grep -q "$(printf '\033')\[999;1H" "$DT/tty" \
+  && ok "hint row addressed absolutely, no newline emitted" || bad "hint row not positioned"
+
+grep -q 'ghp_LIVELEAK' /tmp/namo_req.json \
+  && bad "SECRET LEAKED from the live path" \
+  || ok "history snapshot redacted on the live path too"
+
+python3 - <<'PYCHK' && ok "listing gathered by the binary, sorted, no . or .." \
+                    || bad "directory listing wrong on the live path"
+import json
+c = json.load(open('/tmp/namo_req.json'))['messages'][0]['content']
+assert '<ls>' in c, c
+names = c.split('<ls>')[1].split('</ls>')[0].split()
+assert 'README.md' in names and 'src' in names, names
+assert '.' not in names and '..' not in names, names
+assert names == sorted(names), names
+PYCHK
+
+# A line under NAMO_HINT_MIN clears the row instead of leaving a stale hint.
+: > "$DT/tty"
+printf '%s\t%s\n' "$PWD" "hi" >&"$DFD"
+sleep 0.5
+grep -q '2K' "$DT/tty" && ok "short line clears the hint row" || bad "row not cleared"
+
+rm -f /tmp/namo_req.json
+printf '%s\t%s\n' "$PWD" "live daemon probe" >&"$DFD"
+sleep 1.2
+[ -f /tmp/namo_req.json ] && bad "live path re-called the API for a cached line" \
+                          || ok "repeat line served from cache, no call"
+
+exec {DFD}>&-
+sleep 0.8
+kill -0 "$dpid" 2>/dev/null && bad "daemon outlived the shell that owned the FIFO" \
+                            || ok "daemon stops when the FIFO reaches end-of-file"
+[ -f "$DT/pid" ] && bad "pid file left behind" || ok "pid file removed on exit"
+rm -rf "$DT"
 
 # --------------------------------------------------------------------------
 head_ "6. packaging"

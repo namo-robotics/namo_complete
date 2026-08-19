@@ -85,9 +85,12 @@ byte-by-byte, and does not cover vi command mode. Rendering is a bottom-line
 hint, not inline ghost text — that needs a full line editor such as
 [ble.sh](https://github.com/akinomyoga/ble.sh).
 
-A call takes ~700ms, far too slow per keystroke, so the render path only reads
-the local cache (~2ms) and never blocks; a debounced background job makes the
-request and repaints when it lands.
+A call takes ~700ms, far too slow per keystroke. Bash also blanks the prompt
+line before running a `bind -x` handler and repaints it afterwards, so anything
+the handler waits for — a fork included — is a visible hole in the line you are
+typing into. So the keystroke path does one thing: write the line into a FIFO.
+Everything else runs in a daemon the binary forks once per shell, which
+debounces, reads the cache, makes the request and draws the hint row itself.
 
 ## Configuration
 
@@ -97,7 +100,7 @@ request and repaints when it lands.
 | `NAMO_MODEL` | `claude-haiku-4-5` | Any Claude model |
 | `NAMO_BIN` | `namo_complete` | Binary path, if not on `PATH` |
 | `NAMO_KEY` / `NAMO_ALT_KEY` / `NAMO_ASK_KEY` | `\eo` / `\ea` / `\eg` | Bindings, `bind` syntax |
-| `NAMO_DEBOUNCE` | `0.2` | Idle seconds before a live request |
+| `NAMO_DEBOUNCE` / `NAMO_QUIET` | `0.2` / `0.05` | Idle seconds before a live request; keystroke coalescing window |
 | `NAMO_HINT_MIN` | `3` | Minimum characters before hinting |
 | `NAMO_HINT_PREFIX` | `hint: ` | Text in front of the hint row |
 | `NAMO_TIMEOUT` | `10` | Seconds before giving up |
@@ -116,8 +119,8 @@ directory + model. Deleting the directory is safe at any time.
 
 ```mermaid
 flowchart TD
-    A["You press Alt-O"] --> B["Shell function gathers the line,<br>your history and the directory listing"]
-    B --> C["Sun binary drops credentials,<br>then checks the local cache"]
+    A["You press Alt-O"] --> B["Shell function gathers the line<br>and your history"]
+    B --> C["Sun binary drops credentials,<br>lists the directory,<br>then checks the local cache"]
     C -->|hit| F["Candidates printed to stdout"]
     C -->|miss| D["curl posts the request to the Claude API"]
     D --> E["Reply parsed into up to 3 commands"]
@@ -125,12 +128,17 @@ flowchart TD
     F --> G["Bash puts one in your line.<br>You press Enter"]
 ```
 
-It starts in bash, and the shell function is the only part that touches your
-environment. It takes the partial line from readline, collects the two pieces of
-context worth sending — recent history and a listing of the current directory —
-and pipes them to the binary on stdin. Collecting the listing here rather than
-in the binary is deliberate: it keeps a user-controlled path out of every command
-string the binary goes on to build.
+It starts in bash, because readline is where the line lives. The shell function
+takes the partial line, adds recent history — `fc` is a builtin, so the shell is
+the only thing that can read its own history — and pipes it to the binary on
+stdin.
+
+The live path is the same binary in a different shape. Sourcing the integration
+starts a daemon (`NAMO_DAEMON=1`, [src/live.sun](src/live.sun)) that holds the
+read end of a FIFO; each keystroke handler writes `<cwd><tab><line>` into it and
+returns, which is one `write()` into a pipe buffer and nothing else. The daemon
+owns the debounce, the cache lookup, the request and the hint row on `/dev/tty`,
+and exits when the shell that owns the write end goes away.
 
 The binary does the rest. It drops history lines carrying a credential prefix,
 hashes the line, directory and model into a cache key, and returns straight away
@@ -145,8 +153,10 @@ Nothing runs: the command sits in your prompt waiting for you.
 Two deliberate properties:
 
 - **No user data reaches the shell.** The binary `chdir`s into its runtime
-  directory first, so the `system()` string is a compile-time constant of
-  relative literal paths.
+  directory first, so the `system()` string — the one `curl` invocation — is a
+  compile-time constant of relative literal paths. The directory listing is read
+  with `getdents64` rather than by shelling out to `ls`, so a directory name
+  never reaches a command line at all.
 - **The API key never appears in `ps`.** It lives in a mode-0600 `curl -K` file
   created with `O_EXCL|O_NOFOLLOW`, unlinked after the request.
 

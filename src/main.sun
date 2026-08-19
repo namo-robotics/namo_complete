@@ -24,6 +24,12 @@ function main() i32 {
     return 0;
   }
 
+  // Live hints: fork off the daemon and give the shell its prompt back. See
+  // live.sun for why none of that work can happen in the shell itself.
+  if (cfg.daemon) {
+    return daemon_run(alloc, cfg);
+  }
+
   // Too little to go on: not worth a round trip. Borrow the field rather than
   // assigning it: `var subject = cfg.query` would move the String out of the
   // Config object, leaving the field empty for build_context later.
@@ -100,7 +106,8 @@ manifest {
         "prompt.sun",
         "redact.sun",
         "client.sun",
-        "cache.sun"
+        "cache.sun",
+        "live.sun"
     ]
     moons: ["stdlib.moon"]
 }

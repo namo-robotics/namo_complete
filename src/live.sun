@@ -1,0 +1,631 @@
+// live.sun - the as-you-type hint daemon.
+//
+// Bash blanks the prompt line before it runs a `bind -x` command and repaints
+// it afterwards, so however long the handler takes is a hole in the line being
+// typed into: a single fork is enough to see it flicker. The keystroke path in
+// namo_live.bash therefore does exactly one thing -- write "<cwd>\t<line>" into
+// a FIFO, which is one write() into a pipe buffer -- and everything that
+// debounces, reads a cache, calls the API or paints the screen happens over
+// here, in a process forked once per shell.
+//
+// Started with NAMO_DAEMON=1 and the FIFO path in NAMO_FIFO. Exits when the
+// FIFO reports end-of-input, which is what happens when the shell holding the
+// write end goes away.
+
+public module namo {
+  using sun;
+
+  extern "C" function fork() i32;
+  extern "C" function setpgid(pid: i32, pgid: i32) i32;
+  extern "C" function dup2(oldfd: i32, newfd: i32) i32;
+  extern "C" function poll(fds: raw_ptr<u8>, nfds: i64, timeout: i64) i32;
+  extern "C" function getdents64(fd: i32, buf: raw_ptr<u8>, count: i64) i64;
+  extern "C" function getpid() i32;
+
+  var REC_OK: i32 = 0;
+  var REC_TIMEOUT: i32 = 1;
+  var REC_EOF: i32 = 2;
+
+  var POLLIN: u8 = 1;
+  var DENTS_BUF: i64 = 32768;
+  var FIFO_BUF: i64 = 4096;
+  var TABLE_MAX: i64 = 256;
+
+  public class Live {
+    public var ttyfd: i32;
+    public var fifofd: i32;
+    // Bytes read from the FIFO that do not yet make up a whole record.
+    public var pending: String;
+    // What the hint row is showing right now. Repainting the row with what it
+    // already shows is a visible blink of its own, so an unchanged hint costs
+    // nothing.
+    public var screen: String;
+    // Newest hint, kept while it still extends the typed line.
+    public var last: String;
+    // line -> hint, so a keystroke that lands on a line we have already
+    // answered repaints without touching the disk.
+    public var keys: Vec<String>;
+    public var vals: Vec<String>;
+    // Allocated once: this loop runs on every keystroke for the life of the
+    // shell, so the buffers it needs are not built per call.
+    public var chunk: ContiguousBuffer<u8>;
+    public var pfd: ContiguousBuffer<u8>;
+
+    public function init(alloc: ref HeapAllocator) {
+      this.ttyfd = -1;
+      this.fifofd = -1;
+      this.pending = String(alloc, "");
+      this.screen = String(alloc, "");
+      this.last = String(alloc, "");
+      this.keys = Vec<String>(alloc, 32);
+      this.vals = Vec<String>(alloc, 32);
+      this.chunk = ContiguousBuffer<u8>(alloc, FIFO_BUF);
+      this.pfd = ContiguousBuffer<u8>(alloc, 8);
+    }
+  }
+
+  // ------------------------------------------------------------------------
+  // Hint table
+  // ------------------------------------------------------------------------
+
+  function table_find(st: ref Live, line: ref String) i64 {
+    for (var i: i64 = 0; i < st.keys.size(); i = i + 1) {
+      if (st.keys.get_unchecked(i).equals(line)) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  function table_put(alloc: ref HeapAllocator, st: ref Live, line: ref String, hint: ref String) void {
+    var at = table_find(st, line);
+    if (at >= 0) {
+      st.vals.set_unchecked(at, hint.clone(alloc));
+      return;
+    }
+    if (st.keys.size() >= TABLE_MAX) {
+      st.keys.clear();
+      st.vals.clear();
+    }
+    st.keys.push(line.clone(alloc));
+    st.vals.push(hint.clone(alloc));
+  }
+
+  // ------------------------------------------------------------------------
+  // Terminal
+  // ------------------------------------------------------------------------
+
+  // Absolute positioning to the last row. A newline would scroll the screen
+  // when the prompt sits at the bottom, invalidating the saved cursor.
+  function paint(alloc: ref HeapAllocator, st: ref Live, row: ref String) void {
+    if (st.screen.equals(row)) {
+      return;
+    }
+    var esc = String(alloc, "");
+    esc.append_char(27);
+    esc.append("7");
+    esc.append_char(27);
+    esc.append("[999;1H");
+    esc.append_char(27);
+    esc.append("[2K");
+    if (row.length() > 0) {
+      esc.append_char(27);
+      esc.append("[2m");
+      esc.append(row);
+      esc.append_char(27);
+      esc.append("[0m");
+    }
+    esc.append_char(27);
+    esc.append("8");
+    write_str(alloc, st.ttyfd, esc);
+    st.screen = row.clone(alloc);
+  }
+
+  function clear_row(alloc: ref HeapAllocator, st: ref Live) void {
+    var blank = String(alloc, "");
+    paint(alloc, st, blank);
+  }
+
+  // Decide what the row should show for `line` and put it there. Reads only
+  // the in-memory table, so this is safe to run on every single keystroke.
+  function render(alloc: ref HeapAllocator, cfg: ref Config, st: ref Live, line: ref String) void {
+    if (line.length() < cfg.hint_min) {
+      st.last = String(alloc, "");
+      clear_row(alloc, st);
+      return;
+    }
+
+    var hint = String(alloc, "");
+    var at = table_find(st, line);
+    if (at >= 0) {
+      hint = st.vals.get_unchecked(at).clone(alloc);
+    } else {
+      // A hint the user is typing straight into stays up instead of blinking
+      // off and back on with every character that confirms it.
+      if (st.last.length() > 0 and st.last.starts_with(line)) {
+        hint = st.last.clone(alloc);
+      }
+    }
+
+    if (hint.length() > 0 and hint.equals(line) == false) {
+      var row = String(alloc, "");
+      row.append(cfg.hint_prefix);
+      row.append(hint);
+      row.append(cfg.hint_suffix);
+      paint(alloc, st, row);
+    } else {
+      clear_row(alloc, st);
+    }
+  }
+
+  // ------------------------------------------------------------------------
+  // Directory listing
+  // ------------------------------------------------------------------------
+
+  // `ls -1A | head` without the fork, over the directory the line was typed in
+  // rather than the one this process happens to be sitting in. Sorted, so the
+  // context the model sees does not depend on directory order.
+  public function list_dir(alloc: ref HeapAllocator, path: ref String, limit: i64) String {
+    var out = String(alloc, "");
+    var flags: i32 = O_RDONLY | O_DIRECTORY;
+    var fd: i32 = open_path(alloc, path, flags, 0);
+    if (fd < 0) {
+      return out;
+    }
+
+    var names = Vec<String>(alloc, 64);
+    var buf = ContiguousBuffer<u8>(alloc, DENTS_BUF);
+    var reading: bool = true;
+    while (reading) {
+      var n: i64 = unsafe { getdents64(fd, buf.rawData(), DENTS_BUF); };
+      if (n <= 0) {
+        reading = false;
+      } else {
+        var off: i64 = 0;
+        while (off < n) {
+          // struct linux_dirent64: d_reclen is the little-endian u16 at offset
+          // 16, d_name the NUL-terminated bytes from offset 19.
+          var lo: i64 = buf.get_unchecked(off + 16);
+          var hi: i64 = buf.get_unchecked(off + 17);
+          var reclen: i64 = lo + hi * 256;
+          if (reclen <= 0) {
+            off = n;
+          } else {
+            var name = String(alloc, "");
+            var i: i64 = off + 19;
+            while (i < n and buf.get_unchecked(i) != 0) {
+              name.append_char(buf.get_unchecked(i));
+              i = i + 1;
+            }
+            var keep: bool = name.length() > 0;
+            if (name.equals_literal(".") or name.equals_literal("..")) {
+              keep = false;
+            }
+            if (names.size() >= 4096) {
+              keep = false;
+            }
+            if (keep) {
+              names.push(name);
+            }
+            off = off + reclen;
+          }
+        }
+      }
+    }
+    close_fd(fd);
+
+    var want: i64 = names.size();
+    if (limit > 0 and want > limit) {
+      want = limit;
+    }
+
+    // Selection sort, stopped at `want`: taking the first N of a sorted
+    // listing costs N passes, not a full sort of a directory that may hold
+    // thousands of entries.
+    var used = ContiguousBuffer<u8>(alloc, names.size() + 1);
+    for (var u: i64 = 0; u < names.size(); u = u + 1) {
+      used.set_unchecked(u, 0);
+    }
+
+    for (var picked: i64 = 0; picked < want; picked = picked + 1) {
+      var best: i64 = -1;
+      for (var j: i64 = 0; j < names.size(); j = j + 1) {
+        if (used.get_unchecked(j) == 0) {
+          if (best < 0) {
+            best = j;
+          } else {
+            var cand = names.get_unchecked(j).clone(alloc);
+            var held = names.get_unchecked(best).clone(alloc);
+            if (cand.compare(held) < 0) {
+              best = j;
+            }
+          }
+        }
+      }
+      if (best < 0) {
+        picked = want;
+      } else {
+        used.set_unchecked(best, 1);
+        // The listing rides inline in the prompt, so it is bounded by bytes
+        // as well as by count.
+        if (out.length() < 512) {
+          if (out.length() > 0) {
+            out.append(" ");
+          }
+          out.append(names.get_unchecked(best));
+        }
+      }
+    }
+    return out;
+  }
+
+  // ------------------------------------------------------------------------
+  // FIFO records: "<cwd>\t<line>\n"
+  // ------------------------------------------------------------------------
+
+  function rec_cwd(alloc: ref HeapAllocator, rec: ref String) String {
+    var out = String(alloc, "");
+    var found = rec.find_char(CH_TAB);
+    var idx: i64 = match found {
+      Option.Some(v) => v,
+      Option.None => -1
+    };
+    if (idx < 0) {
+      return out;
+    }
+    for (var i: i64 = 0; i < idx; i = i + 1) {
+      out.append_char(rec.at(i));
+    }
+    return out;
+  }
+
+  function rec_line(alloc: ref HeapAllocator, rec: ref String) String {
+    var out = String(alloc, "");
+    var found = rec.find_char(CH_TAB);
+    var idx: i64 = match found {
+      Option.Some(v) => v,
+      Option.None => -1
+    };
+    if (idx < 0) {
+      return out;
+    }
+    for (var i: i64 = idx + 1; i < rec.length(); i = i + 1) {
+      out.append_char(rec.at(i));
+    }
+    return out;
+  }
+
+  function arm_poll(st: ref Live) void {
+    unsafe { _store<i32>(st.pfd.rawData(), 0, st.fifofd); };
+    st.pfd.set_unchecked(4, POLLIN);
+    st.pfd.set_unchecked(5, 0);
+    st.pfd.set_unchecked(6, 0);
+    st.pfd.set_unchecked(7, 0);
+  }
+
+  function take_record(alloc: ref HeapAllocator, st: ref Live, out: ref String) bool {
+    var found = st.pending.find_char(CH_NL);
+    var idx: i64 = match found {
+      Option.Some(v) => v,
+      Option.None => -1
+    };
+    if (idx < 0) {
+      return false;
+    }
+    out.clear();
+    for (var i: i64 = 0; i < idx; i = i + 1) {
+      out.append_char(st.pending.at(i));
+    }
+    var rest = String(alloc, "");
+    for (var j: i64 = idx + 1; j < st.pending.length(); j = j + 1) {
+      rest.append_char(st.pending.at(j));
+    }
+    st.pending = rest;
+    return true;
+  }
+
+  // One record, or REC_TIMEOUT after `timeout_ms` (negative blocks forever),
+  // or REC_EOF once the shell that owns the write end is gone.
+  function next_record(alloc: ref HeapAllocator, st: ref Live, timeout_ms: i64, out: ref String) i32 {
+    var tries: i64 = 0;
+    while (tries < 64) {
+      tries = tries + 1;
+      if (take_record(alloc, st, out)) {
+        return REC_OK;
+      }
+      arm_poll(st);
+      var pr: i32 = unsafe { poll(st.pfd.rawData(), 1, timeout_ms); };
+      if (pr <= 0) {
+        return REC_TIMEOUT;
+      }
+      var rev: u8 = st.pfd.get_unchecked(6);
+      // POLLHUP or POLLERR without POLLIN: nothing more is coming.
+      if ((rev & POLLIN) == 0) {
+        return REC_EOF;
+      }
+      var n: i64 = read_chunk(st.fifofd, st.chunk, FIFO_BUF);
+      if (n <= 0) {
+        return REC_EOF;
+      }
+      for (var k: i64 = 0; k < n; k = k + 1) {
+        st.pending.append_char(st.chunk.get_unchecked(k));
+      }
+    }
+    return REC_TIMEOUT;
+  }
+
+  function input_waiting(st: ref Live) bool {
+    if (st.pending.contains_char(CH_NL)) {
+      return true;
+    }
+    arm_poll(st);
+    var pr: i32 = unsafe { poll(st.pfd.rawData(), 1, 0); };
+    return pr > 0;
+  }
+
+  // ------------------------------------------------------------------------
+  // Serving one line
+  // ------------------------------------------------------------------------
+
+  // The paid call. Everything it needs beyond the line itself comes from the
+  // shell's history snapshot and from the directory the line was typed in.
+  function live_call(alloc: ref HeapAllocator, cfg: ref Config, key: ref String) Vec<String> {
+    var out = Vec<String>(alloc, 4);
+    if (cfg.api_key.length() == 0) {
+      return out;
+    }
+    if (cfg.min_gap > 0 and rate_limit_ok(alloc, cfg, cfg.min_gap) == false) {
+      return out;
+    }
+
+    // `fc` is a shell builtin, so the shell is the only thing that can read
+    // its own history; it drops a snapshot at every prompt for us to pick up.
+    var history = Vec<String>(alloc, 8);
+    if (cfg.history_lines > 0 and cfg.histfile.length() > 0) {
+      try {
+        var raw = read_file(alloc, cfg.histfile);
+        history = parse_history(alloc, raw, cfg.history_lines);
+      } catch (e: IError) {
+        history = Vec<String>(alloc, 8);
+      }
+    }
+
+    var listing = String(alloc, "");
+    if (cfg.send_ls) {
+      listing = list_dir(alloc, cfg.cwd, cfg.ls_limit);
+    }
+
+    var context = build_context(alloc, cfg, history, listing);
+    var body = build_body(alloc, cfg, context);
+
+    var reply = Reply(alloc);
+    try {
+      reply = call_api(alloc, cfg, body);
+    } catch (e: IError) {
+      return out;
+    }
+    if (reply.failed) {
+      return out;
+    }
+    if (reply.suggestions.size() == 0) {
+      return out;
+    }
+
+    cache_store(alloc, cfg, key, reply.suggestions);
+    for (var i: i64 = 0; i < reply.suggestions.size(); i = i + 1) {
+      out.push(reply.suggestions.get_unchecked(i).clone(alloc));
+    }
+    return out;
+  }
+
+  // network=false stays local (a cache read, ~2ms); network=true may pay for
+  // an API call. Either way the answer lands in the table and the row is
+  // repainted from it.
+  function serve(alloc: ref HeapAllocator, cfg: ref Config, st: ref Live, rec: ref String, network: bool) void {
+    var line = rec_line(alloc, rec);
+    if (line.length() < cfg.hint_min) {
+      return;
+    }
+    if (network == false and table_find(st, line) >= 0) {
+      render(alloc, cfg, st, line);
+      return;
+    }
+
+    var cwd = rec_cwd(alloc, rec);
+    cfg.set_target(alloc, line, cwd);
+
+    var key = cache_key(alloc, cfg);
+    var hit = cache_lookup(alloc, cfg, key);
+    if (hit.size() == 0 and network) {
+      hit = live_call(alloc, cfg, key);
+    }
+
+    if (hit.size() > 0) {
+      var top = hit.get_unchecked(0).clone(alloc);
+      if (top.equals(line) == false) {
+        table_put(alloc, st, line, top);
+        st.last = top.clone(alloc);
+      }
+    }
+
+    // Newer keystrokes are already queued: this answer is for a line the user
+    // has moved past, and painting it would fight the round about to run.
+    if (network and input_waiting(st)) {
+      return;
+    }
+    render(alloc, cfg, st, line);
+  }
+
+  // ------------------------------------------------------------------------
+  // The loop
+  // ------------------------------------------------------------------------
+
+  // Blocks on the FIFO, so an idle shell costs nothing at all. A record means
+  // a keystroke; a short gap means a look at the cache; a debounce interval of
+  // silence means the user has stopped and the request is worth paying for.
+  function live_loop(alloc: ref HeapAllocator, cfg: ref Config, st: ref Live) i32 {
+    var cur = String(alloc, "");
+    var msg = String(alloc, "");
+    var quiet_ms: i64 = cfg.quiet_ms;
+    var debounce_ms: i64 = cfg.debounce_ms;
+
+    var running: bool = true;
+    while (running) {
+      if (next_record(alloc, st, -1, cur) != REC_OK) {
+        running = false;
+      } else {
+        render(alloc, cfg, st, rec_line(alloc, cur));
+
+        // Coalesce the burst: mid-word keystrokes are not worth a lookup each.
+        var settled: bool = false;
+        while (settled == false) {
+          var q: i32 = next_record(alloc, st, quiet_ms, msg);
+          if (q == REC_OK) {
+            cur.clear();
+            cur.append(msg);
+            render(alloc, cfg, st, rec_line(alloc, cur));
+          } else {
+            settled = true;
+            if (q == REC_EOF) {
+              running = false;
+            }
+          }
+        }
+
+        if (running) {
+          serve(alloc, cfg, st, cur, false);
+
+          var idle: bool = false;
+          while (idle == false and running) {
+            var d: i32 = next_record(alloc, st, debounce_ms, msg);
+            if (d == REC_TIMEOUT) {
+              idle = true;
+            } else {
+              if (d == REC_EOF) {
+                running = false;
+              } else {
+                cur.clear();
+                cur.append(msg);
+                render(alloc, cfg, st, rec_line(alloc, cur));
+
+                var quiet2: bool = false;
+                while (quiet2 == false) {
+                  var r: i32 = next_record(alloc, st, quiet_ms, msg);
+                  if (r == REC_OK) {
+                    cur.clear();
+                    cur.append(msg);
+                    render(alloc, cfg, st, rec_line(alloc, cur));
+                  } else {
+                    quiet2 = true;
+                    if (r == REC_EOF) {
+                      running = false;
+                    }
+                  }
+                }
+                if (running) {
+                  serve(alloc, cfg, st, cur, false);
+                }
+              }
+            }
+          }
+
+          if (running and idle) {
+            serve(alloc, cfg, st, cur, true);
+          }
+        }
+      }
+    }
+    return 0;
+  }
+
+  // ------------------------------------------------------------------------
+  // Startup
+  // ------------------------------------------------------------------------
+
+  // So the shell can tell at the next prompt whether we are still here,
+  // without a fork: `read -r pid < file` and `kill -0` are both builtins.
+  function write_pid(alloc: ref HeapAllocator, cfg: ref Config, pid: i32) void {
+    if (cfg.pidfile.length() == 0) {
+      return;
+    }
+    var s = String(alloc, "");
+    s.append(pid);
+    s.append("\n");
+    try {
+      write_file(alloc, cfg.pidfile, s, MODE_0600);
+    } catch (e: IError) {
+      // Without the pid file the shell simply never respawns us.
+    }
+  }
+
+  public function daemon_run(alloc: ref HeapAllocator, cfg: ref Config) i32 {
+    if (cfg.fifo.length() == 0) {
+      return 0;
+    }
+
+    var pid: i32 = unsafe { fork(); };
+    if (pid < 0) {
+      return 1;
+    }
+    if (pid > 0) {
+      // The shell called us synchronously; hand it back its prompt at once.
+      // The pid goes down here rather than in the child, so that it is already
+      // on disk when this returns: the shell checks it at the next prompt, and
+      // a check that lost the race would spawn a second daemon onto the same
+      // FIFO and the two would split the records between them.
+      write_pid(alloc, cfg, pid);
+      return 0;
+    }
+
+    // Our own process group. Terminal-generated signals go to the foreground
+    // group, and Ctrl-C must not take the hint row with it. setsid() would do
+    // that too, but it also drops the controlling terminal -- and /dev/tty is
+    // the one thing we cannot do without.
+    unsafe { setpgid(0, 0); };
+
+    // Everything the shell had open came with us through fork+exec, and one of
+    // those descriptors is the *write* end of our own FIFO: the shell opens it
+    // read-write so that it never blocks on its own helper. Holding a copy of
+    // it would mean the FIFO always has a writer, so the read below would never
+    // reach end-of-file and this process would outlive the shell it draws for.
+    // Nothing inherited is of any use to us, so drop all of it.
+    for (var fd: i32 = 3; fd < 256; fd = fd + 1) {
+      close_fd(fd);
+    }
+
+    // The inherited descriptors point at the user's terminal, where a stray
+    // byte would land in the middle of the line being typed.
+    var devnull = String(alloc, "/dev/null");
+    var nullfd: i32 = open_path(alloc, devnull, O_RDWR, 0);
+    if (nullfd >= 0) {
+      unsafe { dup2(nullfd, 0); };
+      unsafe { dup2(nullfd, 1); };
+      unsafe { dup2(nullfd, 2); };
+      if (nullfd > 2) {
+        close_fd(nullfd);
+      }
+    }
+
+    var st = Live(alloc);
+    st.ttyfd = open_path(alloc, cfg.tty_path, O_WRONLY | O_CREAT, MODE_0600);
+    if (st.ttyfd < 0) {
+      return 0;
+    }
+    // Read-only, so that when the shell closes its end we see end-of-file and
+    // stop rather than outliving the shell we were drawing for.
+    st.fifofd = open_path(alloc, cfg.fifo, O_RDONLY, 0);
+    if (st.fifofd < 0) {
+      close_fd(st.ttyfd);
+      return 0;
+    }
+
+    var rc = live_loop(alloc, cfg, st);
+    clear_row(alloc, st);
+    close_fd(st.fifofd);
+    close_fd(st.ttyfd);
+    if (cfg.pidfile.length() > 0) {
+      remove_path(alloc, cfg.pidfile);
+    }
+    return rc;
+  }
+}

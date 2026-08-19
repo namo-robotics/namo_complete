@@ -156,6 +156,23 @@ are reachable (`main(argc, argv)` — `src/driver.cpp` checks `mainArgCount == 2
 but the parameter types are undocumented; every example in the docs uses bare
 `main()`. We used environment variables instead, partly for this reason.
 
+Moving the as-you-type watcher out of bash and into the binary (`src/live.sun`)
+added `fork`, `setpgid`, `dup2`, `poll`, `getpid` and `getdents64` to that list.
+Two of those are more than convenience gaps:
+
+- **No directory enumeration.** Nothing in the stdlib walks a directory, and
+  `getdents64` hands back a packed `struct linux_dirent64` that has to be
+  stepped through by byte offset (`d_reclen` is the u16 at 16, `d_name` starts
+  at 19) because the FFI cannot describe a C struct. It works, but it puts
+  Linux-specific record parsing in application code.
+- **No `poll`/`select`.** Waiting on a descriptor with a timeout is the entire
+  shape of a debounce loop. `struct pollfd` is built by hand in a
+  `ContiguousBuffer<u8>`, filled with `_store<i32>` and individual byte writes,
+  and read back the same way.
+
+A `sun.process` module with `fork`/`poll`, and a `read_dir(path)` returning
+`Vec<String>`, would delete most of `src/live.sun`'s FFI block.
+
 ### 10. No string utilities — **largely fixed in `d1b779771504`**
 
 At the time of writing, `String` had no `split`, `substring`, `trim`, `replace`,
@@ -194,6 +211,12 @@ place, so the obvious `var t = s.trim(alloc);` type-errors on `void`; and
   with no deprecation window, which broke this repo's build outright. A
   changelog entry, or a `sun` release note listing stdlib renames, would make
   compiler upgrades cheaper.
+- **No integer narrowing conversion.** There is no cast and no truncating
+  intrinsic from `i64` to `i32`; `_bitcast<T>` only covers same-width
+  reinterpretation. `poll(2)`'s timeout is an `int`, so `src/live.sun` declares
+  the parameter `i64` and relies on the SysV rule that the callee reads only the
+  low half of the register. That is correct, but the language should not make
+  knowing it a prerequisite for calling libc.
 - **`_static_ptr_data<T>` / `_static_ptr_len<T>` are documented as discouraged
   intrinsics**, yet they are the only way to work with a `static_ptr` parameter
   — which the stdlib's own public API hands you routinely.
@@ -207,3 +230,7 @@ JSON module round-tripped quoting, backslashes, newlines, and `\u` escapes
 correctly with no fuss; `extern "C"` against libc worked identically under JIT
 and static-musl AOT; and a statically linked 1.3 MB binary with no runtime
 dependencies is exactly the right deployment story for a shell integration.
+`fork` and `poll` over the FFI worked first try in a statically linked binary,
+and the allocator held flat at 1052 KB RSS across 100k iterations of
+String/Vec/ContiguousBuffer churn — which is what made a long-lived daemon a
+reasonable thing to write at all.

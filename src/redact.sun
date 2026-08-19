@@ -1,9 +1,13 @@
 // redact.sun - decide what leaves the machine.
 //
-// stdin carries two sections separated by a sentinel line: recent history
-// first, then a directory listing. Bash gathers both, which keeps directory
-// enumeration out of Sun (no opendir FFI) and, more importantly, keeps a
-// user-controlled path out of any command string.
+// The interactive path (Alt-O / Alt-A / Alt-G) hands us both sections on
+// stdin, separated by a sentinel line: recent history first, then a directory
+// listing. The live daemon reads the same history out of the snapshot file the
+// shell refreshes at each prompt and enumerates the directory itself, so it
+// calls parse_history directly.
+//
+// Either way the redaction below is the only thing between the shell history
+// and the network, so it is applied in one place for both callers.
 
 public module namo {
   using sun;
@@ -27,7 +31,7 @@ public module namo {
     var lines = split_lines(alloc, raw);
 
     var in_ls: bool = false;
-    var hist = Vec<String>(alloc, 16);
+    var hist_raw = String(alloc, "");
 
     for (var i: i64 = 0; i < lines.size(); i = i + 1) {
       var line = lines.get_unchecked(i);
@@ -42,24 +46,40 @@ public module namo {
             out.listing.append(line);
           }
         } else {
-          // A line carrying a known credential prefix is dropped entirely
-          // rather than partially masked.
-          if (looks_secret(line) == false) {
-            hist.push(line.clone(alloc));
-          }
+          hist_raw.append(line);
+          hist_raw.append("\n");
         }
       }
     }
+    out.history = parse_history(alloc, hist_raw, keep);
 
-    // Keep only the most recent `keep` commands.
+    return out;
+  }
+
+  // History lines carrying a known credential prefix are dropped entirely
+  // rather than partially masked; the rest is trimmed to the most recent
+  // `keep` commands.
+  public function parse_history(alloc: ref HeapAllocator, raw: ref String, keep: i64) Vec<String> {
+    var out = Vec<String>(alloc, 16);
+    if (keep <= 0) {
+      return out;
+    }
+    var lines = split_lines(alloc, raw);
+
+    var hist = Vec<String>(alloc, 16);
+    for (var i: i64 = 0; i < lines.size(); i = i + 1) {
+      var line = lines.get_unchecked(i);
+      if (looks_secret(line) == false) {
+        hist.push(line.clone(alloc));
+      }
+    }
+
     var start: i64 = 0;
     if (hist.size() > keep) {
       start = hist.size() - keep;
     }
-    if (keep > 0) {
-      for (var j: i64 = start; j < hist.size(); j = j + 1) {
-        out.history.push(hist.get_unchecked(j).clone(alloc));
-      }
+    for (var j: i64 = start; j < hist.size(); j = j + 1) {
+      out.push(hist.get_unchecked(j).clone(alloc));
     }
     return out;
   }

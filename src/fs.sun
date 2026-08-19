@@ -22,6 +22,8 @@ public module namo {
   public var O_EXCL: i32 = 128;
   public var O_TRUNC: i32 = 512;
   public var O_NOFOLLOW: i32 = 131072;
+  public var O_RDWR: i32 = 2;
+  public var O_DIRECTORY: i32 = 65536;
 
   public var MODE_0600: i32 = 384;
   public var MODE_0700: i32 = 448;
@@ -137,6 +139,32 @@ public module namo {
   public function eprint_lit(alloc: ref HeapAllocator, lit: static_ptr<u8>) void {
     var s = String(alloc, lit);
     eprint(alloc, s);
+  }
+
+  // Thin wrappers so other files in this module can reach libc I/O without
+  // redeclaring the externs: `live.sun` needs a raw fd for the FIFO, the
+  // terminal and a directory, none of which fit the read/write-a-whole-file
+  // shape above.
+  public function open_path(alloc: ref HeapAllocator, path: ref String, flags: i32, mode: i32) i32 {
+    var c = to_cstr(alloc, path);
+    return unsafe { open(c.rawData(), flags, mode); };
+  }
+
+  public function close_fd(fd: i32) void {
+    unsafe { close(fd); };
+  }
+
+  public function write_str(alloc: ref HeapAllocator, fd: i32, s: ref String) void {
+    var n: i64 = s.length();
+    if (n == 0) {
+      return;
+    }
+    var c = to_cstr(alloc, s);
+    unsafe { write(fd, c.rawData(), n); };
+  }
+
+  public function read_chunk(fd: i32, buf: ref ContiguousBuffer<u8>, n: i64) i64 {
+    return unsafe { read(fd, buf.rawData(), n); };
   }
 
   public function file_exists(alloc: ref HeapAllocator, path: ref String) bool {

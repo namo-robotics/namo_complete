@@ -20,11 +20,25 @@ public module namo {
     public var history_lines: i64;
     public var max_suggestions: i64;
     public var cache_ttl: i64;
+    public var ls_limit: i64;
+    public var hint_min: i64;
     public var min_gap: i64;
     public var use_cache: bool;
     public var send_ls: bool;
     public var disabled: bool;
     public var cache_only: bool;
+
+    // Live-hint daemon (see live.sun). Empty paths mean "not launched by the
+    // shell integration", which is the normal state for a one-shot run.
+    public var daemon: bool;
+    public var fifo: String;
+    public var histfile: String;
+    public var pidfile: String;
+    public var tty_path: String;
+    public var hint_prefix: String;
+    public var hint_suffix: String;
+    public var debounce_ms: i64;
+    public var quiet_ms: i64;
 
     public function init(alloc: ref HeapAllocator) {
       this.line = env(alloc, "NAMO_LINE");
@@ -40,6 +54,8 @@ public module namo {
       );
 
       this.history_lines = env_int(alloc, "NAMO_HISTORY_LINES", 50);
+      this.ls_limit = env_int(alloc, "NAMO_LS_LIMIT", 40);
+      this.hint_min = env_int(alloc, "NAMO_HINT_MIN", 3);
       this.max_suggestions = env_int(alloc, "NAMO_MAX_SUGGESTIONS", 3);
       this.cache_ttl = env_int(alloc, "NAMO_CACHE_TTL", 900);
       this.min_gap = env_int(alloc, "NAMO_MIN_GAP", 1);
@@ -47,6 +63,18 @@ public module namo {
       this.send_ls = env_int(alloc, "NAMO_NO_LS", 0) == 0;
       this.disabled = env_int(alloc, "NAMO_DISABLE", 0) != 0;
       this.cache_only = env_int(alloc, "NAMO_CACHE_ONLY", 0) != 0;
+
+      this.daemon = env_int(alloc, "NAMO_DAEMON", 0) != 0;
+      this.fifo = env(alloc, "NAMO_FIFO");
+      this.histfile = env(alloc, "NAMO_HISTFILE");
+      this.pidfile = env(alloc, "NAMO_PIDFILE");
+      // Overridable so the test suite can watch what would have been drawn.
+      this.tty_path = env_or(alloc, "NAMO_TTY", "/dev/tty");
+      this.hint_prefix = env_or(alloc, "NAMO_HINT_PREFIX", "hint: ");
+      this.hint_suffix = env_or(alloc, "NAMO_HINT_SUFFIX", "  (Alt-O / Alt-A for more)");
+      // Documented in seconds, used in milliseconds by poll(2).
+      this.debounce_ms = env_ms(alloc, "NAMO_DEBOUNCE", 200);
+      this.quiet_ms = env_ms(alloc, "NAMO_QUIET", 50);
 
       // Runtime dir holds the API key for the duration of one call, so it
       // must be user-private. XDG_RUNTIME_DIR is tmpfs mode 0700.
@@ -69,6 +97,14 @@ public module namo {
       this.cache_dir = cd;
     }
 
+    // Point the config at one line from the daemon's FIFO, so cache_key and
+    // build_context -- both written against a one-shot run -- can be reused
+    // unchanged for every keystroke.
+    public function set_target(alloc: ref HeapAllocator, line: ref String, cwd: ref String) void {
+      this.line = line.clone(alloc);
+      this.cwd = cwd.clone(alloc);
+    }
+
     public function is_ask() bool {
       return this.mode.equals_literal("ask");
     }
@@ -81,6 +117,49 @@ public module namo {
       p.append(name);
       return p;
     }
+  }
+
+  // Seconds as a decimal ("0.2", ".05", "1") to whole milliseconds. Anything
+  // that is not a plain decimal number falls back rather than half-parsing.
+  public function env_ms(alloc: ref HeapAllocator, name: static_ptr<u8>, fallback: i64) i64 {
+    var raw = env(alloc, name);
+    raw.trim();
+    if (raw.length() == 0) {
+      return fallback;
+    }
+    var whole: i64 = 0;
+    var frac: i64 = 0;
+    var scale: i64 = 100;
+    var seen_dot: bool = false;
+    var seen_digit: bool = false;
+    for (var i: i64 = 0; i < raw.length(); i = i + 1) {
+      var c: u8 = raw.at(i);
+      if (c == 46) {
+        if (seen_dot) {
+          return fallback;
+        }
+        seen_dot = true;
+      } else {
+        if (c < 48 or c > 57) {
+          return fallback;
+        }
+        seen_digit = true;
+        var d: i64 = c;
+        d = d - 48;
+        if (seen_dot) {
+          if (scale > 0) {
+            frac = frac + d * scale;
+            scale = scale / 10;
+          }
+        } else {
+          whole = whole * 10 + d;
+        }
+      }
+    }
+    if (seen_digit == false) {
+      return fallback;
+    }
+    return whole * 1000 + frac;
   }
 
   public function env_int(alloc: ref HeapAllocator, name: static_ptr<u8>, fallback: i64) i64 {
