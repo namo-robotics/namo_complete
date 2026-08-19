@@ -44,12 +44,10 @@ case $- in *i*) ;; *) return 0 ;; esac
 : "${NAMO_TIMEOUT:=10}"
 : "${NAMO_DYM:=1}"
 
-for _namo_v in NAMO_HINT_MIN NAMO_HINT_PREFIX NAMO_HINT_SUFFIX NAMO_DYM_PREFIX \
-               NAMO_DEBOUNCE NAMO_QUIET NAMO_HISTORY_LINES NAMO_LS_LIMIT; do
-  # shellcheck disable=SC2163  # exporting the *named* variable is the point
-  [ -n "${!_namo_v+set}" ] && export "$_namo_v"
-done
-unset _namo_v
+# Exporting one that is unset puts nothing in the daemon's environment, so
+# these carry the user's value or nothing at all.
+export NAMO_HINT_MIN NAMO_HINT_PREFIX NAMO_HINT_SUFFIX NAMO_DYM_PREFIX \
+       NAMO_DEBOUNCE NAMO_QUIET NAMO_HISTORY_LINES NAMO_LS_LIMIT
 
 _namo_find_binary() {
   if [[ "$NAMO_BIN" == */* ]]; then
@@ -269,12 +267,7 @@ _namo_on_backspace_key() {
   _namo_send_line "$READLINE_LINE"
 }
 
-_NAMO_PUNCT=(' ' '-' '_' '.' '/' '=' ',' ':' '+' '@' '%' '~')
-
-for _namo_c in {a..z} {A..Z} {0..9}; do
-  bind -x "\"$_namo_c\": _namo_on_printable_key $_namo_c" 2>/dev/null
-done
-for _namo_c in "${_NAMO_PUNCT[@]}"; do
+for _namo_c in {a..z} {A..Z} {0..9} ' ' '-' '_' '.' '/' '=' ',' ':' '+' '@' '%' '~'; do
   bind -x "\"$_namo_c\": _namo_on_printable_key \"$_namo_c\"" 2>/dev/null
 done
 unset _namo_c
@@ -291,54 +284,44 @@ _namo_pick_and_insert() {
   local out=$1 force=${2:-0}
   [[ -z "${out//[[:space:]]/}" ]] && return 0
 
-  local -a cands=(); local line
-  while IFS= read -r line; do
-    [[ -n "${line//[[:space:]]/}" ]] && cands+=("$line")
-  done <<<"$out"
+  local -a cands
+  mapfile -t cands <<<"${out%$'\n'}"
   (( ${#cands[@]} )) || return 0
 
   # Alt-O takes the top candidate; Alt-A and ask mode (force) open the list.
-  local pick="${cands[0]}"
+  local chosen="${cands[0]}" flag cmd desc i k
   if [[ "$force" == 1 ]] && (( ${#cands[@]} > 1 )); then
     printf '\n'
-    local i rest desc
     for i in "${!cands[@]}"; do
-      rest="${cands[$i]#*$'\t'}"
-      desc="${rest#*$'\t'}"
-      printf '  %d) %s\n' "$((i + 1))" "${rest%%$'\t'*}"
+      IFS=$'\t' read -r flag cmd desc <<<"${cands[$i]}"
+      printf '  %d) %s\n' "$((i + 1))" "$cmd"
       [[ -n "$desc" ]] && printf '     \033[2m%s\033[0m\n' "$desc"
     done
-    local k
     read -rsn1 -p "  select [1-${#cands[@]}]: " k
     printf '\n'
     # Anything that is not one of the offered numbers cancels: no insertion,
     # straight back to the regular prompt with the line as it was.
     if ! [[ "$k" =~ ^[1-9]$ ]] || (( k > ${#cands[@]} )); then
-      _namo_clear_hint_row ""
+      _namo_clear_hint_row
       return 0
     fi
-    pick="${cands[$((k - 1))]}"
+    chosen="${cands[$((k - 1))]}"
   fi
 
-  local flag="${pick%%$'\t'*}"
-  pick="${pick#*$'\t'}"
-  pick="${pick%%$'\t'*}"
-  [[ -n "$pick" ]] || return 0
+  IFS=$'\t' read -r flag cmd desc <<<"$chosen"
+  [[ -n "$cmd" ]] || return 0
 
   if [[ "$flag" == '!' ]]; then
     local yn
-    printf '\n  \033[33mdestructive:\033[0m %s\n' "$pick"
+    printf '\n  \033[33mdestructive:\033[0m %s\n' "$cmd"
     read -rsn1 -p "  insert anyway? [y/N] " yn
     printf '\n'
     [[ "$yn" == [yY] ]] || return 0
   fi
 
-  # A newline in READLINE_LINE submits immediately -- never let one through.
-  pick="${pick%%$'\n'*}"; pick="${pick//$'\r'/}"
-
-  READLINE_LINE="$pick"
+  READLINE_LINE="$cmd"
   READLINE_POINT=${#READLINE_LINE}
-  _namo_clear_hint_row ""
+  _namo_clear_hint_row
 }
 
 # Alt-G reads its question here rather than handing the terminal back to its
@@ -360,14 +343,6 @@ _namo_read_question() {
         [[ -n "$q" ]] && { q="${q%?}"; printf '\b \b' >/dev/tty; } ;;
       $'\025')                                                 # Ctrl-U
         q=""; printf '\r\033[K\033[36mask>\033[0m ' >/dev/tty ;;
-      $'\027')                                                 # Ctrl-W
-        # No extglob: trailing spaces off, then the last run of non-spaces.
-        local trimmed="${q%"${q##*[! ]}"}"
-        case "$trimmed" in
-          *' '*) q="${trimmed% *} " ;;
-          *)     q="" ;;
-        esac
-        printf '\r\033[K\033[36mask>\033[0m %s' "$q" >/dev/tty ;;
       *)                  q+="$ch"; printf '%s' "$ch" >/dev/tty ;;
     esac
   done
@@ -375,10 +350,10 @@ _namo_read_question() {
   _NAMO_QUESTION="$q"
 }
 
-_namo_key_request() {  # mode, force_picker
+_namo_key_request() {  # mode ("c" or "a"), show_picker
   local mode=$1 force=$2
 
-  if [[ "$mode" == ask ]]; then
+  if [[ "$mode" == a ]]; then
     _namo_read_question || return 0
     [[ -z "${_NAMO_QUESTION//[[:space:]]/}" ]] && return 0
     _namo_ask_daemon a "$_NAMO_QUESTION" || return 0
@@ -390,9 +365,9 @@ _namo_key_request() {  # mode, force_picker
   _namo_pick_and_insert "$_NAMO_REPLY_OUT" "$force"
 }
 
-_namo_on_complete_key()     { _namo_key_request complete 0; }
-_namo_on_alternatives_key() { _namo_key_request complete 1; }
-_namo_on_ask_key()          { _namo_key_request ask 1; }
+_namo_on_complete_key()     { _namo_key_request c 0; }
+_namo_on_alternatives_key() { _namo_key_request c 1; }
+_namo_on_ask_key()          { _namo_key_request a 1; }
 
 _namo_bind_key() { bind -x "\"$1\": $2" 2>/dev/null; bind -m vi-insert -x "\"$1\": $2" 2>/dev/null; }
 _namo_bind_key "$NAMO_KEY" _namo_on_complete_key

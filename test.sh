@@ -299,7 +299,7 @@ done
 res=$(bash -i -c '
   source shell/namo_complete.bash 2>/dev/null
   READLINE_LINE="git com"; READLINE_POINT=7
-  _namo_pick_and_insert "$(printf "git commit\ngit commit --amend\ngit commit -a")" </dev/null
+  _namo_pick_and_insert "$(printf -- "-\tgit commit\t\n-\tgit commit --amend\t\n-\tgit commit -a\t")" </dev/null
   echo "R=[$READLINE_LINE]"
 ' 2>/dev/null | grep '^R=')
 [ "$res" = 'R=[git commit]' ] && ok "top suggestion accepted without a picker" \
@@ -309,7 +309,7 @@ res=$(bash -i -c '
 res=$(bash -i -c '
   source shell/namo_complete.bash 2>/dev/null
   READLINE_LINE="git com"; READLINE_POINT=7
-  _namo_pick_and_insert "$(printf "git commit\ngit commit --amend\ngit commit -a")" 1 <<<"3"
+  _namo_pick_and_insert "$(printf -- "-\tgit commit\t\n-\tgit commit --amend\t\n-\tgit commit -a\t")" 1 <<<"3"
   echo "R=[$READLINE_LINE]"
 ' 2>/dev/null | grep '^R=')
 [ "$res" = 'R=[git commit -a]' ] && ok "Alt-A path lists alternatives and selects #3" \
@@ -321,7 +321,7 @@ res=$(bash -i -c '
   READLINE_LINE="git com"; READLINE_POINT=7
   # here-string, not a pipe: a pipe would run _namo_pick_and_insert in a subshell and
   # its READLINE_LINE assignment would be discarded.
-  _namo_pick_and_insert "$(printf "git commit\ngit commit --amend\ngit commit -a")" 1 <<<"q"
+  _namo_pick_and_insert "$(printf -- "-\tgit commit\t\n-\tgit commit --amend\t\n-\tgit commit -a\t")" 1 <<<"q"
   echo "R=[$READLINE_LINE]"
 ' 2>/dev/null | grep '^R=')
 [ "$res" = 'R=[git com]' ] && ok "picker cancels on a non-numeric key" \
@@ -601,7 +601,7 @@ res=$(bash -i -c '
                             || bad "live key handlers wrong (got $res)"
 
 # Live hints are the point of the tool: they must be on with no opt-in.
-printf '%s' "$binds" | grep -q '"a" "_namo_on_printable_key a"' \
+printf '%s' "$binds" | grep -q '"a" "_namo_on_printable_key' \
   && ok "live hints active on source, no opt-in" || bad "live hints not enabled by default"
 printf '%s' "$binds" | grep -q '"\\C-?" "_namo_on_backspace_key"' \
   && ok "backspace routed through the live handler" || bad "backspace not rebound"
