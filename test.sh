@@ -132,6 +132,58 @@ payload | env NAMO_LINE='cached probe xyz' NAMO_CWD="$PWD" "$BIN" >/dev/null 2>&
                           || ok "second identical call served from cache"
 
 # --------------------------------------------------------------------------
+head_ "2b. prose is dropped, commands survive"
+# --------------------------------------------------------------------------
+# A second mock whose reply text is whatever is in /tmp/namo_text.txt: the
+# model sometimes explains itself instead of staying silent, and an
+# explanation must never reach the hint row.
+PORT2=$((PORT + 1))
+cat > /tmp/namo_mock2.py <<PY
+import http.server, json
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get('content-length', 0)))
+        r = {"id":"m","type":"message","role":"assistant","model":"claude-haiku-4-5",
+             "content":[{"type":"text","text":open('/tmp/namo_text.txt').read()}],
+             "stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}
+        o = json.dumps(r).encode()
+        self.send_response(200); self.send_header('content-type','application/json')
+        self.send_header('content-length', str(len(o))); self.end_headers(); self.wfile.write(o)
+    def log_message(self, *a): pass
+http.server.HTTPServer(('127.0.0.1', $PORT2), H).serve_forever()
+PY
+python3 /tmp/namo_mock2.py & MOCK2_PID=$!
+sleep 1.2
+trap 'cleanup; kill "$MOCK2_PID" 2>/dev/null' EXIT
+
+say() { NAMO_ENDPOINT="http://127.0.0.1:$PORT2/v1/messages" NAMO_CACHE=0 \
+        NAMO_MAX_SUGGESTIONS=10 NAMO_LINE="${2:-git com}" NAMO_CWD="$PWD" "$BIN" </dev/null 2>/dev/null; }
+
+printf 'I cannot produce a useful completion for this input. The line "dfdfff" does not appear to be a valid bash command.\n' > /tmp/namo_text.txt
+out=$(say); rc=$?
+[ -z "$out" ] && [ "$rc" = 0 ] && ok "refusal prose produces no suggestion" \
+                              || bad "refusal prose leaked: $out"
+
+printf 'The line you typed does not look like a bash command\n' > /tmp/namo_text.txt
+out=$(say)
+[ -z "$out" ] && ok "plain sentence produces no suggestion" || bad "sentence leaked: $out"
+
+printf -- '- git push\n# a comment\n```\n1) ls -la\n' > /tmp/namo_text.txt
+out=$(say)
+[ -z "$out" ] && ok "markdown and comments dropped" || bad "markup leaked: $out"
+
+printf 'git commit -m "msg"\ncd ..\ngit add .\necho hello world\nSorry, I have nothing for you\n' > /tmp/namo_text.txt
+n=$(say | grep -c .)
+[ "$n" = 4 ] && ok "real commands survive the filter (dots, echo)" \
+             || bad "expected 4 commands through the filter, got $n"
+
+printf 'du -sh *\tshow directory sizes\nI cannot help with that request\n' > /tmp/namo_text.txt
+out=$(NAMO_MODE=ask NAMO_QUERY='how big are these dirs' say)
+[ "$out" = "$(printf 'du -sh *\tshow directory sizes')" ] \
+  && ok "ask mode keeps COMMAND<TAB>DESCRIPTION, drops the apology" \
+  || bad "ask mode filter: $out"
+
+# --------------------------------------------------------------------------
 head_ "3. bash integration"
 # --------------------------------------------------------------------------
 res=$(bash -i -c '

@@ -14,10 +14,10 @@
 
 case $- in *i*) ;; *) return 0 ;; esac
 
-: "${NAMO_DEBOUNCE:=0.4}"
+: "${NAMO_DEBOUNCE:=0.2}"
 : "${NAMO_QUIET:=0.05}"
 : "${NAMO_HINT_MIN:=3}"
-: "${NAMO_HINT_PREFIX:=~ }"
+: "${NAMO_HINT_PREFIX:=hint: }"
 : "${NAMO_HINT_SUFFIX:=  (Alt-O / Alt-A for more)}"
 
 # The watcher's history snapshot lives here, so the directory must be private.

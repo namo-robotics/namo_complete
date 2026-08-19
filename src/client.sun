@@ -120,7 +120,15 @@ public module namo {
         }
         var cand = lines.get_unchecked(i).clone(alloc);
         if (cand.length() > 0) {
-          reply.suggestions.push(cand);
+          // Ask mode answers "COMMAND<TAB>DESCRIPTION", so only the command
+          // half is judged. A line that does not read like a command is
+          // dropped rather than shown; see looks_like_command.
+          var parts = cand.split(alloc, CH_TAB);
+          var head = parts.get_unchecked(0).clone(alloc);
+          head.trim();
+          if (looks_like_command(alloc, head)) {
+            reply.suggestions.push(cand);
+          }
         }
       }
     } catch (e: IError) {

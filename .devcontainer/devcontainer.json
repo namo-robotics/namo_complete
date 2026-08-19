@@ -18,8 +18,22 @@
   // Pass the API key through without baking it into the image.
   "containerEnv": {
     "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
-    "SUN_PATH": "/usr/lib/sun"
+    "SUN_PATH": "/usr/lib/sun",
+
+    // Pulls ~/.claude.json (account + onboarding state) inside ~/.claude, so
+    // the single volume below covers it too. Without this it sits beside the
+    // directory, outside the volume, and every rebuild re-runs login.
+    "CLAUDE_CONFIG_DIR": "/home/dev/.claude"
   },
+
+  // Claude Code's credentials are container-home state, so a rebuild loses
+  // them. A named volume survives rebuilds -- and unlike a host $HOME bind it
+  // exposes nothing of the host, so the isolation rule below still holds.
+  // Credentials only; the settings this repo relies on come from the project
+  // itself (/workspace/.claude/settings.json), not from anything in here.
+  "mounts": [
+    "source=namo-claude-config,target=/home/dev/.claude,type=volume"
+  ],
 
   // Drop privileges the container has no use for. Deliberately absent:
   //   - a docker.sock mount (would hand out host root)
@@ -29,8 +43,6 @@
     "--cap-drop=ALL",
     "--security-opt=no-new-privileges"
   ],
-
-  "postCreateCommand": ".devcontainer/verify.sh",
 
   "customizations": {
     "vscode": {

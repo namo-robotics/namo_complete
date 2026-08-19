@@ -60,6 +60,144 @@ public module namo {
     return h;
   }
 
+  function is_alpha(c: u8) bool {
+    if (c >= 97 and c <= 122) {
+      return true;
+    }
+    return c >= 65 and c <= 90;
+  }
+
+  // Punctuation that is everywhere in shell syntax and almost nowhere in an
+  // English sentence: - / = $ | * ~ ; > <
+  function has_shell_punct(s: ref String) bool {
+    for (var i: i64 = 0; i < s.length(); i = i + 1) {
+      var c: u8 = s.at(i);
+      if (c == 45 or c == 47 or c == 61 or c == 36 or c == 124) {
+        return true;
+      }
+      if (c == 42 or c == 126 or c == 59 or c == 62 or c == 60) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // English function words. Two of them in a line that carries no shell
+  // punctuation is what separates a sentence from a command.
+  function is_stopword(w: ref String) bool {
+    if (w.equals_literal("the") or w.equals_literal("a") or w.equals_literal("an")) {
+      return true;
+    }
+    if (w.equals_literal("is") or w.equals_literal("are") or w.equals_literal("was")) {
+      return true;
+    }
+    if (w.equals_literal("to") or w.equals_literal("be") or w.equals_literal("of")) {
+      return true;
+    }
+    if (w.equals_literal("it") or w.equals_literal("this") or w.equals_literal("that")) {
+      return true;
+    }
+    if (w.equals_literal("not") or w.equals_literal("no") or w.equals_literal("any")) {
+      return true;
+    }
+    if (w.equals_literal("does") or w.equals_literal("do") or w.equals_literal("can")) {
+      return true;
+    }
+    if (w.equals_literal("i") or w.equals_literal("you") or w.equals_literal("your")) {
+      return true;
+    }
+    if (w.equals_literal("there") or w.equals_literal("appear") or w.equals_literal("valid")) {
+      return true;
+    }
+    return false;
+  }
+
+  // The sentences the model falls back on when it has nothing to offer.
+  function sounds_like_refusal(low: ref String) bool {
+    if (low.contains("i cannot") or low.contains("i can't") or low.contains("i am unable")) {
+      return true;
+    }
+    if (low.contains("i'm unable") or low.contains("unable to") or low.contains("i don't")) {
+      return true;
+    }
+    if (low.contains("sorry") or low.contains("as an ai") or low.contains("no valid")) {
+      return true;
+    }
+    if (low.contains("does not appear") or low.contains("there is no")) {
+      return true;
+    }
+    if (low.contains("please provide") or low.contains("not a valid")) {
+      return true;
+    }
+    return false;
+  }
+
+  // True when the line reads like something bash could run. The model is told
+  // to stay silent when it has nothing useful, but it sometimes answers with a
+  // sentence instead ("I cannot produce a useful completion ..."). A sentence
+  // in the hint row is worse than an empty row, so it is dropped here -- once,
+  // before caching, so every caller sees the same filtered set.
+  public function looks_like_command(alloc: ref HeapAllocator, cmd: ref String) bool {
+    if (cmd.length() == 0) {
+      return false;
+    }
+
+    // Markdown fences and bullets, comments, list markers, quoted prose: a
+    // command line never starts this way.
+    var first: u8 = cmd.at(0);
+    if (first == 35 or first == 96 or first == 42 or first == 45) {
+      return false;
+    }
+    if (first == 124 or first == 62 or first == 60 or first == 91) {
+      return false;
+    }
+    if (first == 34 or first == 39 or first == 63 or first == 33) {
+      return false;
+    }
+    // Numbered list: "1) ls -la", "2. cd src".
+    if (first >= 48 and first <= 57 and cmd.length() > 1) {
+      var second: u8 = cmd.at(1);
+      if (second == 41 or second == 46) {
+        return false;
+      }
+    }
+
+    // Sentence-ending punctuation. `git add .` and `cd ..` end in a dot too,
+    // hence the letter test rather than a bare '.'.
+    var last: u8 = cmd.at(cmd.length() - 1);
+    if (last == 63 or last == 33 or last == 58) {
+      return false;
+    }
+    if (last == 46 and cmd.length() > 1) {
+      if (is_alpha(cmd.at(cmd.length() - 2))) {
+        return false;
+      }
+    }
+
+    var low = cmd.clone(alloc);
+    low.to_lower();
+    if (sounds_like_refusal(low)) {
+      return false;
+    }
+
+    // Anything else long and wordy: several English function words with none
+    // of the punctuation a real command line carries.
+    if (has_shell_punct(cmd) == false) {
+      var words = low.split(alloc, CH_SP);
+      var stops: i64 = 0;
+      for (var i: i64 = 0; i < words.size(); i = i + 1) {
+        var w = words.get_unchecked(i);
+        if (is_stopword(w)) {
+          stops = stops + 1;
+        }
+      }
+      if (words.size() >= 5 and stops >= 2) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   // True when the line carries a known credential prefix. Only these are
   // matched: keyword heuristics ("password", "token", `export `) dropped far
   // too much ordinary history to be worth the recall.

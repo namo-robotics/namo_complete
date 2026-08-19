@@ -20,7 +20,7 @@ disappears. Accept it with **Alt-O**, or press
 
 ```
 $ git com
-  ~ git commit -m "..."  (Alt-O)     <- hint, while you type
+  hint: git commit -m "..."  (Alt-O) <- hint, while you type
 $ git commit -m "..."                <- after Alt-O
 
 $ <Alt-G>
@@ -72,7 +72,7 @@ material.
 
 ## Live hints
 
-The hint appears ~400ms after you stop typing. Always on — there is no switch;
+The hint appears ~200ms after you stop typing. Always on — there is no switch;
 `NAMO_DISABLE=1` turns the whole tool off.
 
 Sourcing the shell file also adds a prompt hook that starts every prompt on a
@@ -97,8 +97,9 @@ request and repaints when it lands.
 | `NAMO_MODEL` | `claude-haiku-4-5` | Any Claude model |
 | `NAMO_BIN` | `namo_complete` | Binary path, if not on `PATH` |
 | `NAMO_KEY` / `NAMO_ALT_KEY` / `NAMO_ASK_KEY` | `\eo` / `\ea` / `\eg` | Bindings, `bind` syntax |
-| `NAMO_DEBOUNCE` | `0.4` | Idle seconds before a live request |
+| `NAMO_DEBOUNCE` | `0.2` | Idle seconds before a live request |
 | `NAMO_HINT_MIN` | `3` | Minimum characters before hinting |
+| `NAMO_HINT_PREFIX` | `hint: ` | Text in front of the hint row |
 | `NAMO_TIMEOUT` | `10` | Seconds before giving up |
 | `NAMO_HISTORY_LINES` | `50` | History commands sent; `0` disables |
 | `NAMO_LS_LIMIT` / `NAMO_NO_LS` | `40` / `0` | Directory listing |
