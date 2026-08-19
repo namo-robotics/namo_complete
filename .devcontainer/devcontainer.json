@@ -35,6 +35,17 @@
     "source=namo-claude-config,target=/home/dev/.claude,type=volume"
   ],
 
+  // Git auth reaches this container WITHOUT any credential file crossing the
+  // boundary, so there is deliberately no ~/.ssh mount here:
+  //   - SSH: VS Code forwards the host ssh-agent socket and sets SSH_AUTH_SOCK.
+  //     Private keys stay on the host; the container can ask for signatures
+  //     while it is attached, and loses that the moment it detaches. The image
+  //     supplies openssh-client + GitHub's host keys (see Dockerfile).
+  //   - HTTPS: VS Code installs its own git credential helper, which proxies
+  //     to the host's.
+  // Both need the host ssh-agent running with the key added (`ssh-add -l` on
+  // the host) before the window is attached.
+
   // Drop privileges the container has no use for. Deliberately absent:
   //   - a docker.sock mount (would hand out host root)
   //   - any host $HOME / ~/.ssh / ~/.aws mount
@@ -52,7 +63,18 @@
       ],
       "settings": {
         "terminal.integrated.defaultProfile.linux": "bash",
-        "files.eol": "\n"
+        "files.eol": "\n",
+
+        // Prompt-free Claude Code, scoped to this container.
+        //
+        // A VS Code-owned session ignores "defaultMode": "bypassPermissions"
+        // from .claude/settings.json unless the host also allows it -- that is
+        // what the first setting does. Because both live in devcontainer.json
+        // they apply to windows attached to this container and nowhere else,
+        // which is the containment the old require-devcontainer.sh hook used to
+        // enforce, now enforced by where the setting is written instead.
+        "claudeCode.allowDangerouslySkipPermissions": true,
+        "claudeCode.initialPermissionMode": "bypassPermissions"
       }
     }
   }

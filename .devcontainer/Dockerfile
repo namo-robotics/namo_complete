@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         jq \
         git \
+        openssh-client \
         bash \
         less \
         file \
@@ -62,11 +63,9 @@ RUN if getent group ${USER_GID} >/dev/null; then \
     && mkdir -p /workspace \
     && chown -R ${USER_UID}:${USER_GID} /workspace /home/${USERNAME}
 
-# The marker .claude/hooks/require-devcontainer.sh looks for. The repo's
-# .claude/settings.json turns Claude Code's permission prompts off, and that
-# hook blocks every tool call unless this file is present -- so the prompt-free
-# setting takes effect in here and nowhere else. Written as root, before the
-# USER switch, so nothing running in the container can forge it later.
+# Marker for anything that needs to assert "we are inside the dev container".
+# Written as root, before the USER switch, so nothing running in the container
+# can forge it later.
 RUN touch /etc/namo-devcontainer
 
 USER ${USERNAME}
@@ -79,5 +78,23 @@ ENV XDG_CACHE_HOME=/home/${USERNAME}/.cache \
 
 RUN mkdir -p /home/${USERNAME}/.cache /home/${USERNAME}/.runtime /home/${USERNAME}/.local/bin \
     && chmod 700 /home/${USERNAME}/.runtime
+
+# Git over SSH. No private key ever enters this container: VS Code forwards the
+# host's ssh-agent socket and sets SSH_AUTH_SOCK, so signing happens on the host
+# and only the signature crosses in. All this image needs is the ssh client
+# (installed above) plus GitHub's host keys, so the first connection does not
+# fail host-key verification with nobody around to answer the prompt.
+#
+# Keys are GitHub's published set (https://api.github.com/meta -> .ssh_keys),
+# pinned here rather than ssh-keyscan'd at build time so the value is reviewable
+# in the diff instead of trusted-on-first-use from whatever answered at build.
+RUN mkdir -p /home/${USERNAME}/.ssh \
+    && chmod 700 /home/${USERNAME}/.ssh \
+    && printf '%s\n' \
+        'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' \
+        'github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=' \
+        'github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=' \
+        > /home/${USERNAME}/.ssh/known_hosts \
+    && chmod 600 /home/${USERNAME}/.ssh/known_hosts
 
 CMD ["bash"]
