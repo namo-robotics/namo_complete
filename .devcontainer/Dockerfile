@@ -80,14 +80,4 @@ ENV XDG_CACHE_HOME=/home/${USERNAME}/.cache \
 RUN mkdir -p /home/${USERNAME}/.cache /home/${USERNAME}/.runtime /home/${USERNAME}/.local/bin \
     && chmod 700 /home/${USERNAME}/.runtime
 
-# Claude Code's config dir. devcontainer.json mounts a named volume here so the
-# OAuth credentials survive a rebuild; this mkdir is what makes that volume come
-# up owned by ${USERNAME}, since Docker seeds a new volume from whatever the
-# image has at the mount point (and creates it root-owned if that is nothing).
-# Deliberately empty otherwise: the prompt-free settings live in the repo, at
-# /workspace/.claude/settings.json, where a PreToolUse hook holds them to this
-# container. Do not put a settings.json in here -- it would be unguarded, and
-# the volume would pin its first version forever.
-RUN mkdir -p /home/${USERNAME}/.claude
-
 CMD ["bash"]

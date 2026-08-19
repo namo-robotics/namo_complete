@@ -1,24 +1,6 @@
 {
   "permissions": {
-    "allow": [
-      "Skill(update-config)",
-      "Skill(update-config:*)"
-    ],
     "defaultMode": "bypassPermissions"
-  },
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/require-devcontainer.sh\" || exit 2",
-            "statusMessage": "Checking dev container"
-          }
-        ]
-      }
-    ]
   },
   "skipDangerousModePermissionPrompt": true
 }
