@@ -152,8 +152,7 @@ thing that can; the binary owns everything else.
 ```mermaid
 flowchart LR
     subgraph bash["bash, interactive shell"]
-        RL["namo_complete.bash<br>Alt-O / Alt-A / Alt-G<br>command_not_found_handle<br>the picker, READLINE_LINE"]
-        LV["namo_live.bash<br>every printable key<br>PROMPT_COMMAND"]
+        RL["namo_complete.bash<br>every printable key<br>Alt-O / Alt-A / Alt-G<br>PROMPT_COMMAND, PS0<br>command_not_found_handle<br>the picker, READLINE_LINE"]
     end
 
     subgraph bin["namo_complete: one static binary"]
@@ -168,24 +167,29 @@ flowchart LR
     DISK[("cache dir + runtime dir")]
     API(["Claude Messages API"])
 
-    RL -->|"complete this / answer this,<br>or a line bash could not find"| LV
     RL -->|"READLINE_LINE"| TTY
-    LV -->|"keystrokes, requests, corrections:<br>one write into a FIFO"| DAE
-    DAE -->|"answers, down the reply FIFO"| LV
-    LV -->|"history snapshot"| DISK
+    RL -->|"keystrokes, requests, corrections:<br>one write into a FIFO"| DAE
+    DAE -->|"answers, down the reply FIFO"| RL
+    RL -->|"history snapshot"| DISK
     DAE -->|"hint row and did-you-mean row"| TTY
     CORE -->|"read and write"| DISK
     CORE -->|"exec curl, key on its stdin"| API
 ```
 
-**The shell half** is two files, and `namo_complete.bash` sources the other.
-It holds the three key bindings, the numbered picker, and the one thing only a
-shell can do: assign `READLINE_LINE`. It also gathers history, because `fc` is a
-builtin and no other process can read a shell's history. `namo_live.bash` is
-separate because it is intrusive — it rebinds every printable key, which is the
-only way to notice that the line changed, and it costs paste speed, undo
-granularity and vi command mode. Keeping it in its own file keeps that cost
-visible and removable.
+**The shell half** is one file, and it is deliberately thin: it does the things
+only bash can do and nothing else. `READLINE_LINE` — the line you are typing —
+exists only inside a `bind -x` handler, and assigning to it is the only way to
+put a command in a prompt without running it. `fc` is a builtin, so this is the
+only process that can read the shell's own history; it leaves the daemon a
+snapshot at every prompt. `bind`, `PROMPT_COMMAND`, `PS0` and
+`command_not_found_handle` are bash's too. Everything else — what to send, what
+to keep out of it, which suggestions are worth stopping on, what the hint says
+and where it goes — is the daemon's.
+
+Rebinding every printable key is the intrusive part, and the only way to notice
+that the line changed: it costs paste speed, undo granularity, byte-wise UTF-8
+and vi command mode. Every function the file defines is named `_namo_*`, because
+sourcing it puts them in the same namespace as everything else the shell has.
 
 **The binary half** is one executable, and an interactive shell only ever runs
 it once. `NAMO_DAEMON=1` starts the daemon at the first prompt; it holds the
@@ -210,8 +214,7 @@ and your prompt come back before anything is asked of anyone. `printf` and
 
 | File | Owns |
 | --- | --- |
-| [`shell/namo_complete.bash`](shell/namo_complete.bash) | Bindings, the picker, `READLINE_LINE`, `command_not_found_handle` |
-| [`shell/namo_live.bash`](shell/namo_live.bash) | Per-key handlers, both FIFOs, the prompt hook, requests to the daemon |
+| [`shell/namo_complete.bash`](shell/namo_complete.bash) | All of the shell side: bindings, the picker, `READLINE_LINE`, both FIFOs, the prompt hook, `command_not_found_handle` |
 | [`src/main.sun`](src/main.sun) | One-shot run: mode, the too-short guard, cache, output |
 | [`src/live.sun`](src/live.sun) | The daemon: FIFO records, debounce, replies, hint row, directory listing |
 | [`src/config.sun`](src/config.sun) | Every setting, from the environment only; the three modes |
@@ -219,7 +222,7 @@ and your prompt come back before anything is asked of anyone. `printf` and
 | [`src/redact.sun`](src/redact.sun) | Dropping history lines that carry a credential prefix |
 | [`src/client.sun`](src/client.sun) | `exec`ing curl, the key on its stdin, parsing the reply |
 | [`src/cache.sun`](src/cache.sun) | Cache key, lookup, store, and the minimum gap between calls |
-| [`src/fs.sun`](src/fs.sun) / [`src/util.sun`](src/util.sun) | Files and descriptors / lines, hashing, "does this read like a command" |
+| [`src/fs.sun`](src/fs.sun) / [`src/util.sun`](src/util.sun) | Files and descriptors / lines, hashing, "does this read like a command", "is this one to stop on", picking a line out of `history 1` |
 
 Three things cross a process boundary, and nothing else does: history goes into
 a file the daemon reads, settings go through the environment when the daemon is

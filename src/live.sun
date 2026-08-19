@@ -486,11 +486,38 @@ public module namo {
   // here is that nobody is waiting for it. Paid immediately rather than
   // debounced: the line is finished, there is no next keystroke to wait for.
   function serve_dym(alloc: ref HeapAllocator, cfg: ref Config, st: ref Live, rec: ref String) void {
-    var marked = rec_line(alloc, rec);
-    var typed = String(alloc, "");
-    for (var i: i64 = 1; i < marked.length(); i = i + 1) {
-      typed.append_char(marked.at(i));
+    // The record is a knock on the door; the line itself is in the file the
+    // handler wrote, as "<word> TAB <fallback> TAB <what `history 1` printed>".
+    // Reading it here rather than in the shell keeps the picking-apart -- the
+    // history number, the first-word check -- in one place with a test.
+    if (cfg.dymfile.length() == 0) {
+      return;
     }
+    var content = String(alloc, "");
+    try {
+      content = read_file(alloc, cfg.dymfile);
+    } catch (e: IError) {
+      return;
+    }
+    remove_path(alloc, cfg.dymfile);
+
+    var fields = content.split(alloc, CH_TAB);
+    if (fields.size() < 3) {
+      return;
+    }
+    var word = fields.get_unchecked(0).clone(alloc);
+    var fallback = fields.get_unchecked(1).clone(alloc);
+    var raw = String(alloc, "");
+    for (var f: i64 = 2; f < fields.size(); f = f + 1) {
+      if (f > 2) {
+        raw.append_char(CH_TAB);
+      }
+      raw.append(fields.get_unchecked(f));
+    }
+    word.trim();
+    fallback.trim();
+
+    var typed = history_line(alloc, raw, word, fallback);
     typed.trim();
     if (typed.length() == 0) {
       return;
@@ -577,10 +604,36 @@ public module namo {
     msg.append_char(CH_TAB);
     msg.append(items.size());
     msg.append_char(CH_NL);
+
+    // <id> TAB <flag> TAB <command> TAB <description>. Ask mode answers
+    // "COMMAND TAB DESCRIPTION" and completion answers a bare command; both
+    // are split here, so the shell has a field to read rather than a string
+    // to parse. The flag is "!" for a command worth stopping on before it
+    // goes anywhere near a prompt -- that judgement is ours too.
     for (var i: i64 = 0; i < items.size(); i = i + 1) {
+      var parts = items.get_unchecked(i).split(alloc, CH_TAB);
+      var cmd = String(alloc, "");
+      var desc = String(alloc, "");
+      if (parts.size() > 0) {
+        cmd = parts.get_unchecked(0).clone(alloc);
+      }
+      if (parts.size() > 1) {
+        desc = parts.get_unchecked(1).clone(alloc);
+      }
+      cmd.trim();
+      desc.trim();
+
       msg.append(id);
       msg.append_char(CH_TAB);
-      msg.append(items.get_unchecked(i));
+      if (looks_destructive(alloc, cmd)) {
+        msg.append("!");
+      } else {
+        msg.append("-");
+      }
+      msg.append_char(CH_TAB);
+      msg.append(cmd);
+      msg.append_char(CH_TAB);
+      msg.append(desc);
       msg.append_char(CH_NL);
     }
     var written: i64 = st.reply.write(msg);

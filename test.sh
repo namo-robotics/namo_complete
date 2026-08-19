@@ -240,13 +240,13 @@ res=$(bash -i -c '
   export NAMO_TTY=/tmp/namo_t3_tty NAMO_MAX_SUGGESTIONS=1 NAMO_CACHE=0
   export NAMO_BIN='"$PWD/$BIN"'   # resolved when the file is sourced now
   source shell/namo_complete.bash
-  _namo_live_prompt_hook                      # what a prompt would do
+  _namo_on_prompt                      # what a prompt would do
   READLINE_LINE="git com"; READLINE_POINT=7
-  _namo_complete </dev/null
+  _namo_on_complete_key </dev/null
   echo "LINE=$READLINE_LINE POINT=$READLINE_POINT"
   _NAMO_BIN_PATH=/nonexistent/namo_complete
   READLINE_LINE="git com"; READLINE_POINT=7
-  _namo_complete </dev/null
+  _namo_on_complete_key </dev/null
   echo "AGAIN=$READLINE_LINE"
 ' 2>/dev/null | grep -E '^LINE=|^AGAIN=')
 rm -f /tmp/namo_t3_tty
@@ -265,10 +265,10 @@ res=$(bash -i -c '
   export NAMO_TTY=/tmp/namo_t3_tty NAMO_MAX_SUGGESTIONS=1 NAMO_CACHE=0
   export NAMO_BIN='"$PWD/$BIN"'
   source shell/namo_complete.bash
-  _namo_live_prompt_hook
+  _namo_on_prompt
   printf "%s\t%s\n%s\t%s\n" 99 1 99 "stale answer" >&"$_NAMO_RFD"
   READLINE_LINE="git com"; READLINE_POINT=7
-  _namo_complete </dev/null
+  _namo_on_complete_key </dev/null
   echo "LINE=$READLINE_LINE"
 ' 2>/dev/null | grep '^LINE=')
 rm -f /tmp/namo_t3_tty
@@ -299,7 +299,7 @@ done
 res=$(bash -i -c '
   source shell/namo_complete.bash 2>/dev/null
   READLINE_LINE="git com"; READLINE_POINT=7
-  _namo_choose "$(printf "git commit\ngit commit --amend\ngit commit -a")" </dev/null
+  _namo_pick_and_insert "$(printf "git commit\ngit commit --amend\ngit commit -a")" </dev/null
   echo "R=[$READLINE_LINE]"
 ' 2>/dev/null | grep '^R=')
 [ "$res" = 'R=[git commit]' ] && ok "top suggestion accepted without a picker" \
@@ -309,7 +309,7 @@ res=$(bash -i -c '
 res=$(bash -i -c '
   source shell/namo_complete.bash 2>/dev/null
   READLINE_LINE="git com"; READLINE_POINT=7
-  _namo_choose "$(printf "git commit\ngit commit --amend\ngit commit -a")" 1 <<<"3"
+  _namo_pick_and_insert "$(printf "git commit\ngit commit --amend\ngit commit -a")" 1 <<<"3"
   echo "R=[$READLINE_LINE]"
 ' 2>/dev/null | grep '^R=')
 [ "$res" = 'R=[git commit -a]' ] && ok "Alt-A path lists alternatives and selects #3" \
@@ -319,9 +319,9 @@ res=$(bash -i -c '
 res=$(bash -i -c '
   source shell/namo_complete.bash 2>/dev/null
   READLINE_LINE="git com"; READLINE_POINT=7
-  # here-string, not a pipe: a pipe would run _namo_choose in a subshell and
+  # here-string, not a pipe: a pipe would run _namo_pick_and_insert in a subshell and
   # its READLINE_LINE assignment would be discarded.
-  _namo_choose "$(printf "git commit\ngit commit --amend\ngit commit -a")" 1 <<<"q"
+  _namo_pick_and_insert "$(printf "git commit\ngit commit --amend\ngit commit -a")" 1 <<<"q"
   echo "R=[$READLINE_LINE]"
 ' 2>/dev/null | grep '^R=')
 [ "$res" = 'R=[git com]' ] && ok "picker cancels on a non-numeric key" \
@@ -332,7 +332,7 @@ res=$(bash -i -c '
 res=$(bash -i -c '
   source shell/namo_complete.bash 2>/dev/null
   READLINE_LINE="x"; READLINE_POINT=1
-  _namo_choose "$(printf "du -sh *\tShow sizes\nls -lhS\tSort by size")" 1 <<<"2"
+  _namo_pick_and_insert "$(printf -- "-\tdu -sh *\tShow sizes\n-\tls -lhS\tSort by size")" 1 <<<"2"
   echo "R=[$READLINE_LINE]"
 ' 2>/dev/null)
 printf '%s' "$res" | grep -q 'Sort by size' \
@@ -345,7 +345,7 @@ printf '%s' "$res" | grep -q '^R=\[ls -lhS\]$' \
 res=$(bash -i -c '
   source shell/namo_complete.bash 2>/dev/null
   READLINE_LINE="clean up"; READLINE_POINT=8
-  _namo_choose "rm -rf build" <<<"n"
+  _namo_pick_and_insert "$(printf -- "!\trm -rf build\t")" <<<"n"
   echo "R=[$READLINE_LINE]"
 ' 2>/dev/null | grep '^R=')
 [ "$res" = 'R=[clean up]' ] && ok "destructive suggestion held for confirmation" \
@@ -437,11 +437,16 @@ printf 'git status\nls -la\n' > "$CT/hist"
 exec {CFD}<>"$CT/fifo"
 rm -f /tmp/namo_reqs.log
 NAMO_DAEMON=1 NAMO_FIFO="$CT/fifo" NAMO_HISTFILE="$CT/hist" NAMO_PIDFILE="$CT/pid" \
-  NAMO_TTY="$CT/tty" NAMO_DEBOUNCE=0.2 NAMO_QUIET=0.05 NAMO_CACHE=0 \
-  "$BIN" </dev/null >/dev/null 2>&1
+  NAMO_DYMFILE="$CT/dym" NAMO_TTY="$CT/tty" NAMO_DEBOUNCE=0.2 NAMO_QUIET=0.05 \
+  NAMO_CACHE=0 "$BIN" </dev/null >/dev/null 2>&1
 sleep 0.3
 
-printf '%s\t\001%s\n' "$PWD" "gti bisect" >&$CFD
+# What command_not_found_handle leaves behind: the word bash could not find,
+# the words it would have run, and the line as `history 1` prints it. Picking
+# that apart is the daemon's job (history_line, util.sun).
+dym_file() { printf '%s\t%s\t  512  %s\n' "$1" "$2" "$3" > "$CT/dym"; }
+dym_file gti "gti bisect" "gti bisect"
+printf '%s\t\001\n' "$PWD" >&$CFD
 sleep 1.6
 grep -q 'did you mean: git status' "$CT/tty" \
   && ok "the correction is drawn in the hint row" \
@@ -466,7 +471,8 @@ sleep 1.2                      # long enough for the hint itself to be painted
 grep -q 'hint: ' "$CT/tty" && ok "a typed line still gets its hint" \
                            || bad "no hint painted for a typed line"
 before=$(dym_rows)
-printf '%s\t\001%s\n' "$PWD" "gti rebase" >&$CFD
+dym_file gti "gti rebase" "gti rebase"
+printf '%s\t\001\n' "$PWD" >&$CFD
 sleep 1.8
 [ "$(dym_rows)" = "$before" ] \
   && ok "a correction never lands on top of a hint for a line being typed" \
@@ -476,18 +482,32 @@ sleep 1.8
 # line) and the correction follows it, both inside the daemon's debounce
 # window rather than at the top of its loop.
 before=$(dym_rows)
+dym_file gti "gti rebase" "gti rebase"
 printf '%s\t%s\n' "$PWD" "git co" >&$CFD
 printf '%s\t%s\n' "$PWD" "" >&$CFD
-printf '%s\t\001%s\n' "$PWD" "gti rebase" >&$CFD
+printf '%s\t\001\n' "$PWD" >&$CFD
 sleep 1.8
 [ "$(dym_rows)" -gt "$before" ] \
   && ok "a correction arriving mid-debounce is still served" \
   || bad "correction swallowed by the debounce window"
 unset -f dym_rows
 
+# The history entry belongs to some earlier command (HISTCONTROL=ignorespace
+# and friends): the first word does not match, so the words bash passed the
+# handler are used instead.
+before=$(dym_rows)
+rm -f /tmp/namo_reqs.log
+dym_file grpe "grpe -r FIXME lib" "  17  cd /workspace"
+printf '%s\t\001\n' "$PWD" >&$CFD
+sleep 1.8
+grep -q '<typed>grpe -r FIXME lib</typed>' /tmp/namo_reqs.log 2>/dev/null \
+  && ok "an unrecorded line falls back to the words bash passed in" \
+  || bad "wrong line corrected when the history entry was somebody else's"
+
 exec {CFD}>&-
 sleep 0.4
 rm -rf "$CT"
+unset -f dym_file
 
 # ---- and through a real shell ----
 if command -v script >/dev/null 2>&1; then
@@ -572,18 +592,18 @@ per=$(( ($(date +%s%N) - start) / 10000000 ))
 res=$(bash -i -c '
   source shell/namo_complete.bash 2>/dev/null
   READLINE_LINE=""; READLINE_POINT=0
-  for c in g i t " " c o; do _namo_key "$c"; done
-  _namo_backspace
-  READLINE_POINT=3; _namo_key "X"
+  for c in g i t " " c o; do _namo_on_printable_key "$c"; done
+  _namo_on_backspace_key
+  READLINE_POINT=3; _namo_on_printable_key "X"
   echo "R=[$READLINE_LINE|$READLINE_POINT]"
 ' 2>/dev/null | grep '^R=')
 [ "$res" = 'R=[gitX c|4]' ] && ok "live key handlers edit the buffer correctly" \
                             || bad "live key handlers wrong (got $res)"
 
 # Live hints are the point of the tool: they must be on with no opt-in.
-printf '%s' "$binds" | grep -q '"a" "_namo_key a"' \
+printf '%s' "$binds" | grep -q '"a" "_namo_on_printable_key a"' \
   && ok "live hints active on source, no opt-in" || bad "live hints not enabled by default"
-printf '%s' "$binds" | grep -q '"\\C-?" "_namo_backspace"' \
+printf '%s' "$binds" | grep -q '"\\C-?" "_namo_on_backspace_key"' \
   && ok "backspace routed through the live handler" || bad "backspace not rebound"
 res=$(bash -i -c '
   source shell/namo_complete.bash 2>/dev/null
@@ -603,7 +623,7 @@ source "$PWD/shell/namo_complete.bash"
 PS1='T\$ '
 RCEOF
   daemons_before=$(pgrep -x namo_complete 2>/dev/null | sort | tr '\n' ' ')
-  jobnoise=$(printf 'READLINE_LINE=""; READLINE_POINT=0; for c in g i t " " c o; do _namo_key "$c"; done\nsleep 1\nexit\n' \
+  jobnoise=$(printf 'READLINE_LINE=""; READLINE_POINT=0; for c in g i t " " c o; do _namo_on_printable_key "$c"; done\nsleep 1\nexit\n' \
     | script -qec "bash --rcfile /tmp/namo_rc_test.sh -i" /dev/null 2>&1 \
     | tr -d '\r' | grep -acE '^\[[0-9]+\][[:space:]]+[0-9]+')
   [ "$jobnoise" = 0 ] && ok "no job-control noise while typing" \
@@ -680,8 +700,8 @@ n=${hdr#*$'\t'}
   && ok "reply header names the request and the number of answers ($n)" \
   || bad "bad reply header: $(printf '%s' "$hdr" | cat -v)"
 first=""; IFS= read -r -t 5 -u "$RFD" first
-[ "$first" = "$(printf '42\tgit commit -m "msg"')" ] \
-  && ok "candidates come back one per line, id first" \
+[ "$first" = "$(printf '42\t-\tgit commit -m "msg"\t')" ] \
+  && ok "candidates come back split, with the verdict in front" \
   || bad "bad reply line: $(printf '%s' "$first" | cat -v)"
 for (( i = 1; i < n; i++ )); do IFS= read -r -t 5 -u "$RFD" _; done
 
@@ -746,8 +766,8 @@ tar -C "$PKGTMP/x" -xzf "$PKGTMP/$PNAME.tar.gz"
 [ -x "$PKGTMP/prefix/bin/namo_complete" ] \
   && ok "installs a runnable binary into the prefix" || bad "binary not installed"
 [ -f "$PKGTMP/prefix/share/namo_complete/namo_complete.bash" ] && \
-[ -f "$PKGTMP/prefix/share/namo_complete/namo_live.bash" ] \
-  && ok "installs both shell files" || bad "shell integration not installed"
+[ ! -e "$PKGTMP/prefix/share/namo_complete/namo_live.bash" ] \
+  && ok "the shell side is one file" || bad "namo_live.bash is still being installed"
 
 out=$(env -u ANTHROPIC_API_KEY NAMO_LINE='gi' NAMO_CWD="$PWD" \
         "$PKGTMP/prefix/bin/namo_complete" </dev/null 2>&1); rc=$?
@@ -769,7 +789,7 @@ BASHRC="$PKGTMP/bashrc2" "$PKGTMP/x/$PNAME/install.sh" --prefix "$PKGTMP/p3" --n
 
 res=$(NAMO_BIN="$PKGTMP/prefix/bin/namo_complete" bash -i -c '
   source '"$PKGTMP"'/prefix/share/namo_complete/namo_complete.bash 2>/dev/null
-  _namo_resolve_bin' 2>/dev/null)
+  _namo_find_binary' 2>/dev/null)
 [ "$res" = "$PKGTMP/prefix/bin/namo_complete" ] \
   && ok "integration resolves the installed binary" || bad "bin resolution failed ($res)"
 rm -rf "$PKGTMP"

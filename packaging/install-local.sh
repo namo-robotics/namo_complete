@@ -34,7 +34,6 @@ mkdir -p "$BIN_DIR" "$SHARE_DIR"
 
 install -m 0755 "$HERE/bin/namo_complete"                      "$BIN_DIR/namo_complete"
 install -m 0644 "$HERE/share/namo_complete/namo_complete.bash" "$SHARE_DIR/"
-install -m 0644 "$HERE/share/namo_complete/namo_live.bash"     "$SHARE_DIR/"
 [ -f "$HERE/VERSION" ] && install -m 0644 "$HERE/VERSION" "$SHARE_DIR/VERSION"
 
 printf 'installed:\n  %s\n  %s/namo_complete.bash\n' "$BIN_DIR/namo_complete" "$SHARE_DIR"

@@ -198,6 +198,80 @@ public module namo {
     return true;
   }
 
+  // A command one keystroke from running, in someone else's prompt. The shell
+  // used to carry this list; it lives here so there is one copy of it, and so
+  // the tests can reach it.
+  public function looks_destructive(alloc: ref HeapAllocator, cmd: ref String) bool {
+    var low = cmd.clone(alloc);
+    low.to_lower();
+    low.trim();
+    if (low.starts_with("sudo ")) {
+      return true;
+    }
+    if (low.contains("rm -rf")) {
+      return true;
+    }
+    if (low.contains("rm -fr")) {
+      return true;
+    }
+    if (low.contains("mkfs")) {
+      return true;
+    }
+    if (low.contains("dd if=")) {
+      return true;
+    }
+    if (low.contains("> /dev/")) {
+      return true;
+    }
+    if (low.contains("| sh")) {
+      return true;
+    }
+    if (low.contains("| bash")) {
+      return true;
+    }
+    return false;
+  }
+
+  // What `history 1` prints, turned back into the line the user typed:
+  //
+  //     "  512  grpe -r TODO *.md"  ->  "grpe -r TODO *.md"
+  //
+  // The shell hands over the whole line rather than picking it apart itself,
+  // along with the word bash could not find and the words it would use if the
+  // line was never recorded at all -- HISTCONTROL=ignorespace, HISTIGNORE and
+  // `set +o history` all leave entry 1 belonging to some earlier command, and
+  // the first word is what gives that away.
+  public function history_line(alloc: ref HeapAllocator, raw: ref String, word: ref String, fallback: ref String) String {
+    var line = raw.clone(alloc);
+    line.trim();
+
+    var i: i64 = 0;
+    while (i < line.length() and line.at(i) >= 48 and line.at(i) <= 57) {
+      i = i + 1;
+    }
+    var typed = String(alloc, "");
+    if (i > 0) {
+      for (var k: i64 = i; k < line.length(); k = k + 1) {
+        typed.append_char(line.at(k));
+      }
+    } else {
+      typed = line.clone(alloc);
+    }
+    typed.trim();
+
+    var first = String(alloc, "");
+    for (var j: i64 = 0; j < typed.length(); j = j + 1) {
+      if (is_space(typed.at(j))) {
+        break;
+      }
+      first.append_char(typed.at(j));
+    }
+    if (first.equals(word) == false) {
+      return fallback.clone(alloc);
+    }
+    return typed;
+  }
+
   // True when the line carries a known credential prefix. Only these are
   // matched: keyword heuristics ("password", "token", `export `) dropped far
   // too much ordinary history to be worth the recall.

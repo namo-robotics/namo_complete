@@ -21,8 +21,7 @@ rm -rf "${OUT:?}/$NAME"
 mkdir -p "$OUT/$NAME/bin" "$OUT/$NAME/share/namo_complete"
 
 install -m 0755 bin/namo_complete          "$OUT/$NAME/bin/"
-install -m 0644 shell/namo_complete.bash \
-                shell/namo_live.bash       "$OUT/$NAME/share/namo_complete/"
+install -m 0644 shell/namo_complete.bash   "$OUT/$NAME/share/namo_complete/"
 install -m 0644 README.md LICENSE          "$OUT/$NAME/"
 install -m 0755 packaging/install-local.sh "$OUT/$NAME/install.sh"
 printf '%s\n' "$VERSION" > "$OUT/$NAME/VERSION"

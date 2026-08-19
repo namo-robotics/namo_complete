@@ -35,6 +35,7 @@ public module namo {
     public var daemon: bool;
     public var fifo: String;
     public var reply: String;
+    public var dymfile: String;
     public var histfile: String;
     public var pidfile: String;
     public var tty_path: String;
@@ -72,6 +73,8 @@ public module namo {
       this.fifo = env_str(alloc, "NAMO_FIFO");
       // Where answers to the shell's own requests go back. See live.sun.
       this.reply = env_str(alloc, "NAMO_REPLY");
+      // Where command_not_found_handle leaves a line for us; see live.sun.
+      this.dymfile = env_str(alloc, "NAMO_DYMFILE");
       this.histfile = env_str(alloc, "NAMO_HISTFILE");
       this.pidfile = env_str(alloc, "NAMO_PIDFILE");
       // Overridable so the test suite can watch what would have been drawn.
