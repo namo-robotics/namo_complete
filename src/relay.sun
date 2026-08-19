@@ -1,0 +1,368 @@
+// relay.sun - the output recorder.
+//
+// The model completes a command line much better when it can see what the last
+// one printed: the branch `git status` named, the file the compiler complained
+// about, the "failed to push some refs". Bash cannot hand that over -- when it
+// runs a command the child inherits the terminal itself, and the bytes go from
+// the program to the kernel to the terminal without the shell ever seeing them.
+// The only way to see them is to be the thing on the other end of the shell's
+// stdout.
+//
+// A pipe would do that, and would also make isatty(1) false for every command
+// that runs: no colour from ls or grep, no pager from git, no progress bars. So
+// this is a pty instead. The shell's stdout and stderr are a pty slave -- still
+// a terminal, as far as anything it runs can tell -- and this process holds the
+// master, copies everything through to the real terminal, and keeps the last
+// few lines of it for the daemon to send as context.
+//
+// Started with NAMO_RELAY=1, and by NAMO_OUTPUT lines -- 0 turns it off. It is
+// the one part of this program that puts itself between you and your terminal.
+
+public module namo {
+  using sun;
+  using sun.io;
+  using sun.process;
+
+  // The pty, and the window size that has to be copied onto it. struct winsize
+  // is four u16: rows, cols, and two pixel fields nothing here uses.
+  extern "C" function posix_openpt(flags: i32) i32;
+  extern "C" function grantpt(fd: i32) i32;
+  extern "C" function unlockpt(fd: i32) i32;
+  extern "C" function ptsname(fd: i32) raw_ptr<u8>;
+  extern "C" function ioctl(fd: i32, req: u64, arg: raw_ptr<u8>) i32;
+  extern "C" function read(fd: i32, buf: raw_ptr<u8>, n: i64) i64;
+  extern "C" function strlen(s: raw_ptr<u8>) i64;
+
+  var O_RDWR_NOCTTY: i32 = 258;      // O_RDWR | O_NOCTTY
+  var TIOCGWINSZ: u64 = 21523;
+  var TIOCSWINSZ: u64 = 21524;
+
+  var RELAY_BUF: i64 = 4096;
+  // Two markers down the captured stream, and neither ever reaches the screen.
+  // RS is written by PS0, after Enter and before the command runs: everything
+  // before it was the prompt and the line being typed, which the history
+  // already carries -- and with a hint daemon rebinding every key, the line
+  // being typed arrives here once per keystroke. US is written by the prompt
+  // hook, when the command is done: what lies between them is its output.
+  var MARK_START: u8 = 30;
+  var MARK_FLUSH: u8 = 31;
+  var MAX_LINE: i64 = 400;
+
+  function from_cstr(alloc: ref HeapAllocator, p: raw_ptr<u8>) String {
+    var out = String(alloc, "");
+    if (p == null) {
+      return out;
+    }
+    var n: i64 = unsafe { strlen(p); };
+    for (var i: i64 = 0; i < n; i = i + 1) {
+      out.append_char(unsafe { _load<u8>(p, i); });
+    }
+    return out;
+  }
+
+  // Whatever the real terminal is set to, the pty is set to as well: a program
+  // asking its own stdout how wide the screen is has to get the right answer.
+  function copy_winsize(alloc: ref HeapAllocator, tty_fd: i32, master: i32) void {
+    var ws = ContiguousBuffer<u16>(alloc, 4);
+    ws.set_unchecked(0, 0); ws.set_unchecked(1, 0);
+    ws.set_unchecked(2, 0); ws.set_unchecked(3, 0);
+    var got: i32 = unsafe { ioctl(tty_fd, TIOCGWINSZ, ws.rawData()); };
+    if (got != 0) {
+      return;
+    }
+    var set: i32 = unsafe { ioctl(master, TIOCSWINSZ, ws.rawData()); };
+  }
+
+  // ------------------------------------------------------------------------
+  // The last few lines
+  // ------------------------------------------------------------------------
+
+  public class Recorder {
+    public var lines: Vec<String>;   // whole lines, oldest first
+    public var pending: String;      // bytes since the last newline
+    public var keep: i64;
+    public var dirty: bool;
+
+    public function init(alloc: ref HeapAllocator, keep: i64) {
+      this.lines = Vec<String>(alloc, 16);
+      this.pending = String(alloc, "");
+      this.keep = keep;
+      this.dirty = false;
+    }
+  }
+
+  // Colour, cursor moves and the rest are for a terminal to act on, not for a
+  // model to read: they are dropped here rather than sent and paid for.
+  function strip_escapes(alloc: ref HeapAllocator, line: ref String) String {
+    var out = String(alloc, "");
+    var i: i64 = 0;
+    while (i < line.length()) {
+      var c: u8 = line.at(i);
+      if (c == 27) {
+        i = i + 1;
+        // CSI: ESC [ ... final byte in @-~. Anything else: drop the pair.
+        if (i < line.length() and line.at(i) == 91) {
+          i = i + 1;
+          while (i < line.length() and line.at(i) < 64) {
+            i = i + 1;
+          }
+        }
+        i = i + 1;
+      } else {
+        if (c == 13) {
+          // Mid-line, a carriage return means the line is being drawn again
+          // -- readline repaints that way, and only the last state matters.
+          // At the end it is just the pty's own newline translation.
+          if (i + 1 < line.length()) {
+            out.clear();
+          }
+          i = i + 1;
+        } else {
+          if (c == 8) {
+            out.pop();
+            i = i + 1;
+          } else {
+            out.append_char(c);
+            i = i + 1;
+          }
+        }
+      }
+    }
+    return out;
+  }
+
+  function tail_of(alloc: ref HeapAllocator, lines: ref Vec<String>, keep: i64) Vec<String> {
+    var out = Vec<String>(alloc, 16);
+    var from: i64 = lines.size() - keep;
+    if (from < 0) {
+      from = 0;
+    }
+    for (var i: i64 = from; i < lines.size(); i = i + 1) {
+      out.push(lines.get_unchecked(i).clone(alloc));
+    }
+    return out;
+  }
+
+  function record_line(alloc: ref HeapAllocator, rec: ref Recorder, raw: ref String) void {
+    var line = strip_escapes(alloc, raw);
+    line.trim_end();
+    if (line.length() == 0) {
+      return;
+    }
+    // The same filter the history gets: a line with a credential prefix in it
+    // is dropped whole rather than trimmed.
+    if (looks_secret(line)) {
+      return;
+    }
+    if (line.length() > MAX_LINE) {
+      line = line.substr(alloc, 0, MAX_LINE);
+    }
+    rec.lines.push(line.clone(alloc));
+    rec.dirty = true;
+    // Only the tail is ever sent, so a command that prints a million lines
+    // costs the same as one that prints ten. Compacted in batches rather than
+    // per line: this runs on everything the terminal shows.
+    if (rec.lines.size() >= rec.keep * 2) {
+      rec.lines = tail_of(alloc, rec.lines, rec.keep);
+    }
+  }
+
+  function record_byte(alloc: ref HeapAllocator, rec: ref Recorder, c: u8) void {
+    if (c == CH_NL) {
+      record_line(alloc, rec, rec.pending);
+      rec.pending = String(alloc, "");
+    } else {
+      if (rec.pending.length() < MAX_LINE * 2) {
+        rec.pending.append_char(c);
+      }
+    }
+  }
+
+  function reset_record(alloc: ref HeapAllocator, rec: ref Recorder) void {
+    rec.lines = Vec<String>(alloc, 16);
+    rec.pending = String(alloc, "");
+    rec.dirty = false;
+  }
+
+  function flush_record(alloc: ref HeapAllocator, cfg: ref Config, rec: ref Recorder) void {
+    if (cfg.outfile.length() == 0) {
+      return;
+    }
+    var keep = tail_of(alloc, rec.lines, rec.keep);
+    var out = String(alloc, "");
+    for (var i: i64 = 0; i < keep.size(); i = i + 1) {
+      out.append(keep.get_unchecked(i));
+      out.append("\n");
+    }
+    try {
+      write_file(alloc, cfg.outfile, out);
+    } catch (e: IError) {
+      // The daemon simply sends no output section this time.
+    }
+    rec.lines = Vec<String>(alloc, 16);
+    rec.dirty = false;
+  }
+
+  // ------------------------------------------------------------------------
+  // The loop
+  // ------------------------------------------------------------------------
+
+  function relay_loop(alloc: ref HeapAllocator, cfg: ref Config, master: i32, tty: ref File, shell_pid: i32) i32 {
+    var rec = Recorder(alloc, cfg.output_lines);
+    var poller = Poller(alloc);
+    var buf = ContiguousBuffer<u8>(alloc, RELAY_BUF);
+    var through = ContiguousBuffer<u8>(alloc, RELAY_BUF);
+
+    var running: bool = true;
+    while (running) {
+      poller.clear();
+      poller.add_read(master);
+      var ready: i32 = 0;
+      try {
+        ready = poller.wait(250);
+      } catch (e: IError) {
+        ready = 0;
+      }
+
+      if (ready > 0 and poller.is_readable(0)) {
+        var n: i64 = unsafe { read(master, buf.rawData(), RELAY_BUF); };
+        if (n <= 0) {
+          // The shell closed its end, or the pty went away with it.
+          running = false;
+        } else {
+          // Straight through to the real terminal, minus the markers -- they
+          // are ours, and the screen must never see them.
+          // In order: a marker means what came before it is over. Taking the
+          // markers out in one pass and the bytes in another would record the
+          // tail of the last command as the head of the next one, whenever
+          // both landed in the same read.
+          var out = String(alloc, "");
+          for (var i: i64 = 0; i < n; i = i + 1) {
+            var c: u8 = buf.get_unchecked(i);
+            if (c == MARK_START) {
+              // A command is starting: everything so far was the prompt and
+              // the keystrokes that led to it.
+              reset_record(alloc, rec);
+            } else {
+              if (c == MARK_FLUSH) {
+                flush_record(alloc, cfg, rec);
+              } else {
+                out.append_char(c);
+                record_byte(alloc, rec, c);
+              }
+            }
+          }
+          if (out.length() > 0) {
+            var w: i64 = tty.write(out);
+          }
+        }
+      } else {
+        // Idle: the window may have been resized, and the shell may be gone.
+        copy_winsize(alloc, tty.get_fd(), master);
+        if (shell_pid > 0) {
+          // Signal 0 asks the question without sending anything.
+          try {
+            kill(shell_pid, 0);
+          } catch (e: IError) {
+            running = false;
+          }
+        }
+      }
+    }
+
+    if (rec.dirty) {
+      flush_record(alloc, cfg, rec);
+    }
+    return 0;
+  }
+
+  // ------------------------------------------------------------------------
+  // Startup
+  // ------------------------------------------------------------------------
+
+  // Same shape as the daemon: the pty and both files are ready before the
+  // shell gets its prompt back, because the very next thing it does is open
+  // the slave and point its own stdout at it.
+  public function relay_run(alloc: ref HeapAllocator, cfg: ref Config) i32 {
+    if (cfg.ptsfile.length() == 0 or cfg.outfile.length() == 0) {
+      return 0;
+    }
+
+    var master: i32 = unsafe { posix_openpt(O_RDWR_NOCTTY); };
+    if (master < 0) {
+      return 1;
+    }
+    var g: i32 = unsafe { grantpt(master); };
+    var u: i32 = unsafe { unlockpt(master); };
+    if (g != 0 or u != 0) {
+      return 1;
+    }
+    var slave = from_cstr(alloc, unsafe { ptsname(master); });
+    if (slave.length() == 0) {
+      return 1;
+    }
+
+    var shell_pid: i32 = cfg.shell_pid;
+
+    var child: i32 = 0;
+    try {
+      child = fork();
+    } catch (e: IError) {
+      return 1;
+    }
+    if (child > 0) {
+      // The parent tells the shell where to point its stdout, and that the
+      // relay exists, then gets out of the way.
+      var path = slave.clone(alloc);
+      path.append("\n");
+      try {
+        write_file(alloc, cfg.ptsfile, path);
+      } catch (e: IError) {
+        return 1;
+      }
+      var pid = String(alloc, "");
+      pid.append(child);
+      pid.append("\n");
+      try {
+        write_file(alloc, cfg.relay_pidfile, pid);
+      } catch (e: IError) {
+        return 1;
+      }
+      return 0;
+    }
+
+    try {
+      set_pgid(0, 0);
+    } catch (e: IError) {
+      // Already a group leader; not fatal.
+    }
+
+    // Everything inherited goes, except the master -- and the shell's own copy
+    // of the daemon's FIFO would keep that FIFO alive forever otherwise.
+    for (var fd: i32 = 3; fd < MAX_INHERITED_FD; fd = fd + 1) {
+      if (fd != master) {
+        close_fd(fd);
+      }
+    }
+    silence_std_streams();
+
+    var tty = File();
+    try {
+      tty.open(cfg.tty_path.c_str(), FileMode.Write);
+    } catch (e: IError) {
+      return 0;
+    }
+    // The slave, held open here as well: without it the master reports
+    // hang-up in the moment between this process starting and the shell
+    // opening its end, and the loop would stop before it began.
+    var keep_slave = File();
+    try {
+      keep_slave.open(slave.c_str(), FileMode.Write);
+    } catch (e: IError) {
+      return 0;
+    }
+    copy_winsize(alloc, tty.get_fd(), master);
+
+    return relay_loop(alloc, cfg, master, tty, shell_pid);
+  }
+}

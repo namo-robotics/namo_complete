@@ -34,6 +34,23 @@ public module namo {
       ctx.append("</ls>\n");
     }
 
+    // What the last command printed, if the relay is recording. Read here so
+    // that both shapes of the binary send the same context for the same shell.
+    if (cfg.outfile.length() > 0) {
+      var recorded = String(alloc, "");
+      try {
+        recorded = read_file(alloc, cfg.outfile);
+      } catch (e: IError) {
+        recorded = String(alloc, "");
+      }
+      recorded.trim();
+      if (recorded.length() > 0) {
+        ctx.append("<output>\n");
+        ctx.append(recorded);
+        ctx.append("\n</output>\n");
+      }
+    }
+
     if (history.size() > 0) {
       ctx.append("<history>\n");
       for (var i: i64 = 0; i < history.size(); i = i + 1) {

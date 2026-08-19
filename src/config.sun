@@ -36,6 +36,13 @@ public module namo {
     public var fifo: String;
     public var reply: String;
     public var dymfile: String;
+    // Output capture (relay.sun). NAMO_OUTPUT names the line count; 0 is off.
+    public var relay: bool;
+    public var output_lines: i64;
+    public var ptsfile: String;
+    public var outfile: String;
+    public var relay_pidfile: String;
+    public var shell_pid: i32;
     public var histfile: String;
     public var pidfile: String;
     public var tty_path: String;
@@ -75,6 +82,13 @@ public module namo {
       this.reply = env_str(alloc, "NAMO_REPLY");
       // Where command_not_found_handle leaves a line for us; see live.sun.
       this.dymfile = env_str(alloc, "NAMO_DYMFILE");
+
+      this.relay = env_int(alloc, "NAMO_RELAY", 0) != 0;
+      this.output_lines = env_int(alloc, "NAMO_OUTPUT", 10);
+      this.ptsfile = env_str(alloc, "NAMO_PTSFILE");
+      this.outfile = env_str(alloc, "NAMO_OUTFILE");
+      this.relay_pidfile = env_str(alloc, "NAMO_RELAY_PIDFILE");
+      this.shell_pid = _convert<i32>(env_int(alloc, "NAMO_SHELL_PID", 0));
       this.histfile = env_str(alloc, "NAMO_HISTFILE");
       this.pidfile = env_str(alloc, "NAMO_PIDFILE");
       // Overridable so the test suite can watch what would have been drawn.

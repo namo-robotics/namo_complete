@@ -79,6 +79,7 @@ See [what gets sent to Anthropic](#what-gets-sent-to-anthropic) first.
 | --- | --- | --- |
 | The partial command line | always | — |
 | A command bash could not find | always | `NAMO_DYM=0` |
+| What the last command printed | last 10 lines | `NAMO_OUTPUT=0` |
 | Current directory path | always | — |
 | Filenames in that directory | 40 | `NAMO_NO_LS=1` |
 | Recent shell history | 50 commands | `NAMO_HISTORY_LINES=0` |
@@ -120,6 +121,39 @@ typing into. So the keystroke path does one thing: write the line into a FIFO.
 Everything else runs in a daemon the binary forks once per shell, which
 debounces, reads the cache, makes the request and draws the hint row itself.
 
+## Output capture
+
+On by default: the last 10 lines of what the previous command printed are sent
+along with everything else, which is the difference between guessing at your
+next command and reading the error you just got. `NAMO_OUTPUT` — set before the
+integration is sourced — changes the line count, and `NAMO_OUTPUT=0` turns the
+capture off entirely:
+
+```
+$ git push
+ ! [rejected]        main -> main (fetch first)
+error: failed to push some refs to 'origin'
+$ git p
+  hint: git pull --rebase origin main   <- the hint now knows why
+```
+
+Bash cannot hand that over. When it runs a command the child inherits the
+terminal and writes to it directly; the shell never sees the bytes, and there is
+no hook that copies them. The only way to see them is to be on the other end of
+the shell's stdout — and if that end is a pipe, every command loses `isatty(1)`,
+which means no colour from `ls`, no pager from `git log`, no progress bars.
+
+So it is a pty. The shell points its stdout and stderr
+at a pty ([src/relay.sun](src/relay.sun)) and a third process copies everything
+through to the real terminal, keeping the last N lines as it goes. Commands
+still see a terminal, colour still works, `less` still pages. What is kept has
+its escape sequences stripped, is capped per line, and goes through the same
+credential filter as your history. The recording starts when a command starts,
+so the prompt and the line you typed are not in it.
+
+The cost is a second helper process, and a copy of everything your terminal
+shows passing through it. `NAMO_OUTPUT=0` buys that back.
+
 ## Configuration
 
 | Variable | Default | Meaning |
@@ -133,6 +167,7 @@ debounces, reads the cache, makes the request and draws the hint row itself.
 | `NAMO_HINT_PREFIX` | `hint: ` | Text in front of the hint row |
 | `NAMO_TIMEOUT` | `10` | Seconds before giving up |
 | `NAMO_DYM` / `NAMO_DYM_PREFIX` | `1` / `did you mean: ` | "did you mean" after *command not found*, and the text in front of it |
+| `NAMO_OUTPUT` | `10` | Lines of the last command's output to send. `0` records nothing; see [output capture](#output-capture) |
 | `NAMO_HISTORY_LINES` | `50` | History commands sent; `0` disables |
 | `NAMO_LS_LIMIT` / `NAMO_NO_LS` | `40` / `0` | Directory listing |
 | `NAMO_MAX_SUGGESTIONS` | `3` | Candidates requested |
@@ -146,8 +181,9 @@ directory + model. Deleting the directory is safe at any time.
 
 ## Architecture
 
-Three processes and one binary. Bash owns the line, because readline is the only
-thing that can; the binary owns everything else.
+Two processes and one binary, or three with output capture on. Bash owns the
+line, because readline is the only thing that can; the binary owns everything
+else.
 
 ```mermaid
 flowchart LR
@@ -157,9 +193,11 @@ flowchart LR
 
     subgraph bin["namo_complete: one static binary"]
         DAE["live daemon<br>live.sun<br>one per shell"]
+        REL["output relay<br>relay.sun<br>unless NAMO_OUTPUT=0"]
         ONE["one-shot run<br>main.sun<br>run.sh, tests, scripts"]
         CORE["config - redact - prompt<br>cache - client - fs - util"]
         DAE --> CORE
+        REL --> CORE
         ONE --> CORE
     end
 
@@ -172,6 +210,9 @@ flowchart LR
     DAE -->|"answers, down the reply FIFO"| RL
     RL -->|"history snapshot"| DISK
     DAE -->|"hint row and did-you-mean row"| TTY
+    RL -->|"stdout, through a pty"| REL
+    REL -->|"everything, verbatim"| TTY
+    REL -->|"the last N lines"| DISK
     CORE -->|"read and write"| DISK
     CORE -->|"exec curl, key on its stdin"| API
 ```
@@ -217,6 +258,7 @@ and your prompt come back before anything is asked of anyone. `printf` and
 | [`shell/namo_complete.bash`](shell/namo_complete.bash) | All of the shell side: bindings, the picker, `READLINE_LINE`, both FIFOs, the prompt hook, `command_not_found_handle` |
 | [`src/main.sun`](src/main.sun) | One-shot run: mode, the too-short guard, cache, output |
 | [`src/live.sun`](src/live.sun) | The daemon: FIFO records, debounce, replies, hint row, directory listing |
+| [`src/relay.sun`](src/relay.sun) | Output capture: the pty, the copy through to the terminal, the last N lines |
 | [`src/config.sun`](src/config.sun) | Every setting, from the environment only; the three modes |
 | [`src/prompt.sun`](src/prompt.sun) | The three system prompts, the context block, the JSON body |
 | [`src/redact.sun`](src/redact.sun) | Dropping history lines that carry a credential prefix |
@@ -301,10 +343,14 @@ Two deliberate properties:
   a one-line `-K -` config; everything else — the endpoint, the fixed headers,
   the path of the request body — rides in argv, where it is harmless.
 
-The binary is statically linked; `curl` is its only runtime dependency. Nothing
-in [`src/`](src/) declares an `extern "C"` or opens an `unsafe` block: processes,
-polling, directories, the environment and the clock all come from Sun's standard
-library.
+The binary is statically linked; `curl` is its only runtime dependency.
+Processes, polling, directories, the environment and the clock all come from
+Sun's standard library, and only one file reaches past it:
+[`relay.sun`](src/relay.sun) declares `extern "C"` for `posix_openpt`,
+`grantpt`, `unlockpt`, `ptsname`, `ioctl` and `read`, because allocating a pty
+and setting its window size is the one thing the stdlib cannot do — and without
+a pty, capturing output would cost every command its `isatty(1)`. Nothing else
+in [`src/`](src/) declares an extern or opens an `unsafe` block.
 
 ## Development
 

@@ -748,6 +748,107 @@ kill -0 "$dpid" 2>/dev/null && bad "daemon outlived the shell that owned the FIF
 rm -rf "$DT"
 
 # --------------------------------------------------------------------------
+head_ "5c. output capture (on by default)"
+# --------------------------------------------------------------------------
+# The shell's stdout on the far side of a pty, so that what a command printed
+# can be sent as context without every command losing isatty(1).
+RT=$(mktemp -d)
+NAMO_RELAY=1 NAMO_OUTPUT=3 NAMO_PTSFILE="$RT/pts" NAMO_OUTFILE="$RT/out" \
+  NAMO_RELAY_PIDFILE="$RT/pid" NAMO_TTY="$RT/tty" NAMO_SHELL_PID=$$ \
+  "$BIN" </dev/null >/dev/null 2>&1
+sleep 0.4
+pts=$(cat "$RT/pts" 2>/dev/null)
+[ -n "$pts" ] && [ -c "$pts" ] && ok "relay allocates a pty and names it ($pts)" \
+                              || bad "no pty allocated"
+relaypid=$(cat "$RT/pid" 2>/dev/null)
+{ [ -n "$relaypid" ] && kill -0 "$relaypid" 2>/dev/null; } \
+  && ok "relay detaches and records its pid" || bad "relay did not start"
+
+# What a command run under it would print: a start marker, output, a flush.
+{ printf '\036'
+  printf 'one\ntwo\n\033[32mthree\033[0m\nexport TOK=ghp_LEAKED\nfour\n'
+  printf '\037'; } > "$pts"
+sleep 0.6
+
+grep -q 'three' "$RT/tty" && ok "output reaches the real terminal" \
+                          || bad "output never reached the terminal"
+grep -q "$(printf '\033')\[32m" "$RT/tty" \
+  && ok "colour passes through untouched" || bad "colour was stripped on the way out"
+LC_ALL=C grep -q "$(printf '\036')\|$(printf '\037')" "$RT/tty" \
+  && bad "a marker reached the screen" || ok "markers never reach the screen"
+
+recorded=$(cat "$RT/out" 2>/dev/null)
+[ "$recorded" = "$(printf 'two\nthree\nfour')" ] \
+  && ok "only the last NAMO_OUTPUT lines are kept, escapes stripped" \
+  || bad "recorded wrong: $(printf '%s' "$recorded" | tr '\n' '|')"
+printf '%s' "$recorded" | grep -q 'ghp_LEAKED' \
+  && bad "SECRET LEAKED from captured output" \
+  || ok "credential line dropped from output too"
+
+# The line before the start marker belongs to the prompt, not the command.
+: > "$RT/out"
+{ printf 'stale typing echo\n\036'; printf 'fresh output\n\037'; } > "$pts"
+sleep 0.6
+[ "$(cat "$RT/out")" = "fresh output" ] \
+  && ok "recording starts where the command does" \
+  || bad "the prompt line was recorded as output: $(cat "$RT/out")"
+
+kill "$relaypid" 2>/dev/null
+
+# The context the model gets, from the one-shot path.
+printf 'on branch main\nnothing to commit\n' > "$RT/ctx"
+rm -f /tmp/namo_req.json
+payload | env NAMO_OUTFILE="$RT/ctx" NAMO_LINE='git ad' NAMO_CWD="$PWD" \
+              NAMO_CACHE=0 "$BIN" >/dev/null 2>&1
+grep -q '<output>' /tmp/namo_req.json \
+  && ok "recorded output is sent as its own block" || bad "<output> block missing"
+python3 - <<'PYO' && ok "the block holds what the command printed" || bad "wrong output block"
+import json
+c = json.load(open('/tmp/namo_req.json'))['messages'][0]['content']
+body = c.split('<output>')[1].split('</output>')[0]
+assert 'on branch main' in body and 'nothing to commit' in body, body
+PYO
+rm -f /tmp/namo_req.json
+payload | env NAMO_LINE='git ad' NAMO_CWD="$PWD" NAMO_CACHE=0 "$BIN" >/dev/null 2>&1
+grep -q '<output>' /tmp/namo_req.json \
+  && bad "an <output> block was sent with capture off" \
+  || ok "nothing sent when capture is off"
+rm -rf "$RT"
+
+# ...and through a real shell, where the point is that nothing about the
+# terminal changes.
+if command -v script >/dev/null 2>&1; then
+  cat > /tmp/namo_rc_out.sh <<RCEOF
+export NAMO_BIN="$PWD/$BIN"
+export NAMO_MIN_GAP=0 NAMO_DEBOUNCE=0.3 NAMO_CACHE=0
+export NAMO_ENDPOINT="$NAMO_ENDPOINT"
+export ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
+export NAMO_OUTPUT=5
+source "$PWD/shell/namo_complete.bash"
+PS1='T\$ '
+RCEOF
+  rm -f /tmp/namo_reqs.log
+  daemons_before=$(pgrep -x namo_complete 2>/dev/null | sort | tr '\n' ' ')
+  cap=$(printf '[ -t 1 ] && echo ISATTY_OK\nprintf "zzprobe output\\n"\nzzq com\nexit\n' \
+    | script -qec "bash --rcfile /tmp/namo_rc_out.sh -i" /dev/null 2>&1 | tr -d '\r')
+  printf '%s' "$cap" | grep -q 'ISATTY_OK' \
+    && ok "commands still see a terminal on stdout" \
+    || bad "isatty(1) is false with capture on -- the pty is not working"
+  printf '%s' "$cap" | grep -q 'zzprobe output' \
+    && ok "their output still reaches the screen" || bad "output lost on the way out"
+  sleep 0.5
+  grep -q 'zzprobe output' /tmp/namo_reqs.log 2>/dev/null \
+    && ok "and is sent to the model with the next line" \
+    || bad "captured output never reached a request"
+  sleep 1
+  daemons_after=$(pgrep -x namo_complete 2>/dev/null | sort | tr '\n' ' ')
+  [ "$daemons_before" = "$daemons_after" ] \
+    && ok "no relay or daemon left behind by an exited shell" \
+    || bad "a helper outlived its shell"
+  rm -f /tmp/namo_rc_out.sh
+fi
+
+# --------------------------------------------------------------------------
 head_ "6. packaging"
 # --------------------------------------------------------------------------
 # Build the release tarball the same way .github/workflows/release.yml does,

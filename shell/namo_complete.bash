@@ -6,28 +6,32 @@
 #   Alt-A   the same, but let me pick from the alternatives
 #   Alt-G   I describe the command in English, you write it
 #
-# ...and a dim hint appears under your line as you type, and a mistyped command
-# gets a "did you mean" in the same place.
+# A dim hint also appears under your line as you type, and a command bash
+# cannot find gets a "did you mean" in the same row.
 #
-# All of it goes through one long-running copy of the namo binary -- the daemon
-# -- started at the first prompt and talked to through two FIFOs: requests down
-# one, answers back on the other. Nothing here starts a process, because bash
-# blanks the line you are typing before it runs a key handler and repaints it
-# afterwards, so anything a handler waits for is a visible hole in your line. A
-# keystroke is one write() into a pipe; a key press is that write and a read.
+# None of the thinking happens here. One long-running copy of the namo binary
+# -- the daemon -- starts at the first prompt, and this file talks to it down
+# two FIFOs: what you are typing goes one way, answers come back the other.
+# Nothing here starts a process, because bash blanks the line you are typing
+# before it runs a key handler and repaints it afterwards, so anything a
+# handler waits for is a visible hole in your line. A keystroke is one write
+# into a pipe; a key press is that write and a read.
 #
-# So this file is deliberately thin. It does the things only bash can do:
+# What is left is the things only bash can do:
 #
 #   * READLINE_LINE, the line you are typing, exists only inside a `bind -x`
-#     handler, and assigning to it is the only way to put a command in someone's
+#     handler, and assigning to it is the only way to put a command in your
 #     prompt without running it.
 #   * `fc` is a builtin, so this is the only process that can read the shell's
 #     own history. It leaves the daemon a snapshot at every prompt.
-#   * `bind`, PROMPT_COMMAND, PS0, and command_not_found_handle are all bash's.
+#   * `bind`, PROMPT_COMMAND, PS0 and command_not_found_handle are bash's.
+#   * `exec` points this shell's stdout at a pty, so that a second helper can
+#     copy it through to the terminal and keep the last few lines your commands
+#     printed. On by default; NAMO_OUTPUT=0 turns it off.
 #
-# Everything else belongs to the daemon: what to send, what to keep out of it,
-# what is worth stopping on before it reaches your prompt, what the hint says,
-# and where on the screen it goes. See src/live.sun.
+# Everything else -- what to send, what to keep out of it, which suggestions
+# are worth stopping on, what the hint says and where it goes -- belongs to the
+# binary. See src/live.sun and src/relay.sun.
 #
 # Nothing here ever executes a command. The only thing that reaches your line
 # is a candidate you picked, and it sits there until you press Enter.
@@ -43,6 +47,7 @@ case $- in *i*) ;; *) return 0 ;; esac
 : "${NAMO_ASK_KEY:=\eg}"
 : "${NAMO_TIMEOUT:=10}"
 : "${NAMO_DYM:=1}"
+: "${NAMO_OUTPUT:=10}"
 
 # Exporting one that is unset puts nothing in the daemon's environment, so
 # these carry the user's value or nothing at all.
@@ -72,11 +77,15 @@ _NAMO_REPLYFIFO="$_NAMO_DIR/live_reply.$$"
 _NAMO_HISTFILE="$_NAMO_DIR/live_hist.$$"
 _NAMO_PIDFILE="$_NAMO_DIR/live_pid.$$"
 _NAMO_DYMFILE="$_NAMO_DIR/live_dym.$$"
+_NAMO_PTSFILE="$_NAMO_DIR/live_pts.$$"
+_NAMO_OUTFILE="$_NAMO_DIR/live_out.$$"
+_NAMO_RELAY_PIDFILE="$_NAMO_DIR/live_relay.$$"
 
 _NAMO_WFD=""   # write end of the request FIFO, held open by this shell
 _NAMO_RFD=""   # read end of the reply FIFO, likewise
 _NAMO_REQ_ID=0
 _NAMO_OFF=""   # set if the plumbing could not be built; everything goes quiet
+_NAMO_TTYFD="" # dup of the real terminal, to fall back on if the relay dies
 
 # Resolved once. Doing it per prompt would be a command substitution, and this
 # is the only value the prompt hook needs from outside the shell.
@@ -84,7 +93,8 @@ _NAMO_BIN_PATH=$(_namo_find_binary) || _NAMO_OFF=1
 
 _namo_on_exit() {
   rm -f "$_NAMO_FIFO" "$_NAMO_REPLYFIFO" "$_NAMO_HISTFILE" "$_NAMO_PIDFILE" \
-        "$_NAMO_DYMFILE" 2>/dev/null
+        "$_NAMO_DYMFILE" "$_NAMO_PTSFILE" "$_NAMO_OUTFILE" \
+        "$_NAMO_RELAY_PIDFILE" 2>/dev/null
   return 0
 }
 trap _namo_on_exit EXIT
@@ -93,6 +103,7 @@ trap _namo_on_exit EXIT
 # races with a start-up we just asked for. Both `read` and `kill` are builtins.
 _namo_daemon_is_running() {
   local pid=""
+  [ -s "$_NAMO_PIDFILE" ] || return 1
   { read -r pid; } < "$_NAMO_PIDFILE" 2>/dev/null || return 1
   [ -n "$pid" ] || return 1
   kill -0 "$pid" 2>/dev/null
@@ -122,9 +133,57 @@ _namo_daemon_ensure() {
   # background job, no "[1] 12345" notice, nothing to disown.
   NAMO_DAEMON=1 NAMO_FIFO="$_NAMO_FIFO" NAMO_REPLY="$_NAMO_REPLYFIFO" \
     NAMO_HISTFILE="$_NAMO_HISTFILE" NAMO_PIDFILE="$_NAMO_PIDFILE" \
-    NAMO_DYMFILE="$_NAMO_DYMFILE" \
+    NAMO_DYMFILE="$_NAMO_DYMFILE" NAMO_OUTFILE="$_NAMO_OUTFILE" \
     "$_NAMO_BIN_PATH" </dev/null >/dev/null 2>&1
   _namo_daemon_is_running
+}
+
+# ---------------------------------------------------------------------------
+# Output capture (on unless NAMO_OUTPUT=0)
+#
+# Bash never sees what a command prints: the child inherits the terminal and
+# writes to it directly. To record it, something has to be on the other end of
+# this shell's stdout -- and if that something is a pipe, every command loses
+# isatty(1) and with it colour and pagers. So it is a pty: `exec > "$pts"`
+# below leaves the shell writing to a terminal, which the relay copies through
+# to the real one while keeping the last NAMO_OUTPUT lines. See src/relay.sun.
+# ---------------------------------------------------------------------------
+
+_namo_relay_is_running() {
+  local pid=""
+  [ -s "$_NAMO_RELAY_PIDFILE" ] || return 1
+  { read -r pid; } < "$_NAMO_RELAY_PIDFILE" 2>/dev/null || return 1
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null
+}
+
+_namo_capture_ensure() {
+  (( NAMO_OUTPUT > 0 )) || return 0
+  # Only when stdout is already a terminal. A shell whose output is a pipe or a
+  # file is being read by something -- a script, a harness -- and putting a pty
+  # in front of it would send that output to the terminal instead.
+  [ -t 1 ] || return 0
+  [ -n "$_NAMO_OFF" ] && return 1
+  _namo_relay_is_running && return 0
+
+  if [ -z "$_NAMO_TTYFD" ]; then
+    # Kept for the life of the shell: if the relay ever dies, this is the only
+    # way back to a terminal that still exists.
+    { exec {_NAMO_TTYFD}>&1; } 2>/dev/null || return 1
+  else
+    exec >&"$_NAMO_TTYFD" 2>&1
+  fi
+
+  NAMO_RELAY=1 NAMO_OUTPUT="$NAMO_OUTPUT" NAMO_SHELL_PID=$$ \
+    NAMO_PTSFILE="$_NAMO_PTSFILE" NAMO_OUTFILE="$_NAMO_OUTFILE" \
+    NAMO_RELAY_PIDFILE="$_NAMO_RELAY_PIDFILE" \
+    "$_NAMO_BIN_PATH" </dev/null >/dev/null 2>&1
+  _namo_relay_is_running || return 1
+
+  local pts=""
+  { read -r pts; } < "$_NAMO_PTSFILE" 2>/dev/null || return 1
+  [ -n "$pts" ] || return 1
+  exec > "$pts" 2>&1
 }
 
 # Hand the current line to the daemon and return. One write() into a pipe
@@ -213,9 +272,14 @@ _namo_reserve_hint_row() {
 # the start of the very row the hint is in: erasing it here is what keeps a
 # stale hint out of the command's output. (PROMPT_COMMAND is too late -- by
 # then the output has been written over it.)
+#
+# It is also where the recording of a command's output starts, when there is
+# one: everything before this point was the prompt and the line being typed.
+_NAMO_PS0=$'\033[2K'
+(( NAMO_OUTPUT > 0 )) && _NAMO_PS0=$'\036'"$_NAMO_PS0"
 case "${PS0:-}" in
   *$'\033[2K'*) ;;
-  *) PS0="${PS0:-}"$'\033[2K' ;;
+  *) PS0="${PS0:-}$_NAMO_PS0" ;;
 esac
 
 # Between commands: make sure the daemon is still there, drop the hint, refresh
@@ -225,6 +289,10 @@ esac
 # would otherwise leave this shell writing into a pipe with nobody draining it.
 _namo_on_prompt() {
   _namo_daemon_ensure || _NAMO_OFF=1
+  _namo_capture_ensure
+  # The command is done: this is what it printed. The relay writes those lines
+  # down and takes the marker back out again, so the screen never sees it.
+  (( NAMO_OUTPUT > 0 )) && printf '\037'
   _namo_send_line ""
   { fc -ln -"${NAMO_HISTORY_LINES:-50}"; } > "$_NAMO_HISTFILE" 2>/dev/null
   # After the snapshot, so the line is corrected against a history that already

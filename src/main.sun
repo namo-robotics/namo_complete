@@ -30,6 +30,12 @@ function main() i32 {
     return daemon_run(alloc, cfg);
   }
 
+  // Output capture: the shell's stdout on the other side of a pty. See
+  // relay.sun for why it is a pty and not a pipe.
+  if (cfg.relay) {
+    return relay_run(alloc, cfg);
+  }
+
   // Too little to go on: not worth a round trip. Borrow the field rather than
   // assigning it: `var subject = cfg.query` would move the String out of the
   // Config object, leaving the field empty for build_context later.
@@ -112,7 +118,8 @@ manifest {
         "redact.sun",
         "client.sun",
         "cache.sun",
-        "live.sun"
+        "live.sun",
+        "relay.sun"
     ]
     moons: ["stdlib.moon"]
 }
