@@ -196,8 +196,9 @@ then publishes the tarball and `SHA256SUMS`. `install.sh` resolves the newest
 
 ## Notes on Sun
 
-Compiler and stdlib gaps this project hit, including two miscompiles, are
-written up in [SUN_FEEDBACK.md](SUN_FEEDBACK.md).
+Compiler and stdlib gaps this project hit are written up in
+[SUN_FEEDBACK.md](SUN_FEEDBACK.md) as ready-to-file issue drafts — each with a
+standalone reproducer, re-run against the current compiler.
 
 ## License
 
