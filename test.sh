@@ -24,7 +24,7 @@ pass=0; fail=0
 ok()   { printf '  \033[32mPASS\033[0m  %s\n' "$1"; pass=$((pass+1)); }
 bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; fail=$((fail+1)); }
 head_() { printf '\n\033[1m%s\033[0m\n' "$1"; }
-cleanup() { [ -n "$MOCK_PID" ] && kill "$MOCK_PID" 2>/dev/null; rm -f /tmp/namo_req.json; }
+cleanup() { [ -n "$MOCK_PID" ] && kill "$MOCK_PID" 2>/dev/null; rm -f /tmp/namo_req.json /tmp/namo_reqs.log; }
 trap cleanup EXIT
 
 # Keep the developer's real cache out of the way.
@@ -63,14 +63,25 @@ head_ "2. end-to-end against a mock API"
 command -v python3 >/dev/null 2>&1 || { echo "  (skipped: python3 not found)"; exit 0; }
 
 cat > /tmp/namo_mock.py <<PY
-import http.server, json
+import http.server, json, time
 class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get('content-length', 0)))
         open('/tmp/namo_req.json','wb').write(body)
+        # Every request, appended: a pty test cannot rely on being the last
+        # caller, since the live daemon is asking for its own hints throughout.
+        open('/tmp/namo_reqs.log','ab').write(body + b'\\n')
         open('/tmp/namo_hdr.txt','w').write(str(self.headers))
+        # Correction mode gets its own answer, so a "did you mean" test cannot
+        # pass on a completion that happened to be in flight.
+        if b'<typed>' in body:
+            # Slow on purpose: the shell must not be waiting for this.
+            time.sleep(1.0)
+            txt = "git status"
+        else:
+            txt = "git commit -m \\"msg\\"\\ngit commit --amend\\ngit commit -a"
         r = {"id":"m","type":"message","role":"assistant","model":"claude-haiku-4-5",
-             "content":[{"type":"text","text":"git commit -m \\"msg\\"\\ngit commit --amend\\ngit commit -a"}],
+             "content":[{"type":"text","text":txt}],
              "stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}
         o = json.dumps(r).encode()
         self.send_response(200); self.send_header('content-type','application/json')
@@ -85,14 +96,12 @@ export ANTHROPIC_API_KEY='sk-ant-TESTKEY-must-not-leak'
 export NAMO_ENDPOINT="http://127.0.0.1:$PORT/v1/messages"
 export NAMO_MIN_GAP=0   # the 1s throttle would otherwise starve these tests
 
+# Only history now: the binary lists the working directory itself.
 payload() {
   echo 'git status'
   echo 'export GITHUB_TOKEN=ghp_SECRETVALUE'
   echo 'git commit -m "fix the password reset flow"'
   echo 'ls -la'
-  echo '%%NAMO_LS%%'
-  echo 'README.md'
-  echo 'src'
 }
 
 out=$(payload | env NAMO_LINE='git com' NAMO_CWD="$PWD" NAMO_CACHE=0 "$BIN" 2>/dev/null)
@@ -106,8 +115,16 @@ grep -q 'git status' /tmp/namo_req.json \
 grep -q 'fix the password reset flow' /tmp/namo_req.json \
   && ok "keyword-only line kept; prefixes are the whole filter" \
   || bad "keyword-only line dropped"
-grep -q '<ls>' /tmp/namo_req.json \
-  && ok "directory listing sent in its own tag" || bad "listing tag missing"
+python3 - <<'PY' && ok "listing gathered by the binary on the one-shot path" \
+                || bad "one-shot listing wrong"
+import json
+c = json.load(open('/tmp/namo_req.json'))['messages'][0]['content']
+assert '<ls>' in c, c
+names = c.split('<ls>')[1].split('</ls>')[0].split()
+assert 'README.md' in names and 'src' in names, names
+assert '.' not in names and '..' not in names, names
+assert names == sorted(names), names
+PY
 grep -qi "x-api-key: sk-ant-TESTKEY" /tmp/namo_hdr.txt \
   && ok "api key sent as a header" || bad "api key header missing"
 grep -rl 'sk-ant-TESTKEY' "$XDG_RUNTIME_DIR" >/dev/null 2>&1 \
@@ -130,6 +147,35 @@ rm -f /tmp/namo_req.json
 payload | env NAMO_LINE='cached probe xyz' NAMO_CWD="$PWD" "$BIN" >/dev/null 2>&1
 [ -f /tmp/namo_req.json ] && bad "cache miss: second call hit the API" \
                           || ok "second identical call served from cache"
+
+# --------------------------------------------------------------------------
+head_ "2c. the api key never reaches the process table"
+# --------------------------------------------------------------------------
+# curl is exec'd directly and gets its x-api-key header on stdin (-K -), so the
+# key is in no argv anywhere. A listener that accepts and then says nothing
+# holds curl open long enough to look at `ps`.
+PORT3=$((PORT + 2))
+python3 - <<PY3 & STALL_PID=$!
+import socket
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.1', $PORT3)); s.listen(8)
+held = []
+while True:
+    c, _ = s.accept()
+    held.append(c)
+PY3
+sleep 1
+NAMO_ENDPOINT="http://127.0.0.1:$PORT3/v1/messages" NAMO_CACHE=0 \
+  NAMO_LINE='process table probe' NAMO_CWD="$PWD" "$BIN" </dev/null >/dev/null 2>&1 &
+probe=$!
+sleep 1
+# The bracket keeps the pattern from matching this grep's own command line.
+seen=$(ps -ww -eo args 2>/dev/null | grep -c '[s]k-ant-TESTKEY')
+kill "$probe" "$STALL_PID" 2>/dev/null
+wait "$probe" 2>/dev/null
+[ "${seen:-1}" = 0 ] && ok "api key absent from every command line" \
+                     || bad "api key visible in the process table ($seen matches)"
 
 # --------------------------------------------------------------------------
 head_ "2b. prose is dropped, commands survive"
@@ -186,17 +232,60 @@ out=$(NAMO_MODE=ask NAMO_QUERY='how big are these dirs' say)
 # --------------------------------------------------------------------------
 head_ "3. bash integration"
 # --------------------------------------------------------------------------
+# Alt-O goes through the daemon: the shell writes a request into the FIFO and
+# reads the answer back, so a key press starts no process at all. The second
+# call proves it -- by then the path to the binary is a lie, and the answer
+# still comes.
 res=$(bash -i -c '
+  export NAMO_TTY=/tmp/namo_t3_tty NAMO_MAX_SUGGESTIONS=1 NAMO_CACHE=0
+  export NAMO_BIN='"$PWD/$BIN"'   # resolved when the file is sourced now
   source shell/namo_complete.bash
-  NAMO_BIN=./bin/namo_complete
+  _namo_live_prompt_hook                      # what a prompt would do
   READLINE_LINE="git com"; READLINE_POINT=7
-  NAMO_MAX_SUGGESTIONS=1 NAMO_CACHE=0 _namo_complete </dev/null
+  _namo_complete </dev/null
   echo "LINE=$READLINE_LINE POINT=$READLINE_POINT"
-' 2>/dev/null | grep '^LINE=')
+  _NAMO_BIN_PATH=/nonexistent/namo_complete
+  READLINE_LINE="git com"; READLINE_POINT=7
+  _namo_complete </dev/null
+  echo "AGAIN=$READLINE_LINE"
+' 2>/dev/null | grep -E '^LINE=|^AGAIN=')
+rm -f /tmp/namo_t3_tty
+printf '%s' "$res" | grep -q '^AGAIN=git commit' \
+  && ok "a key press starts no process: answered with no binary to run" \
+  || bad "the key path still needs the binary ($(printf '%s' "$res" | grep '^AGAIN='))"
+res=$(printf '%s' "$res" | grep '^LINE=')
 case "$res" in
   "LINE=git commit"*"POINT="*) ok "readline buffer rewritten ($res)" ;;
   *) bad "readline not rewritten (got: $res)" ;;
 esac
+
+# An answer this shell gave up waiting for must not be handed back as if it
+# were the next one: every line of a reply carries the request id.
+res=$(bash -i -c '
+  export NAMO_TTY=/tmp/namo_t3_tty NAMO_MAX_SUGGESTIONS=1 NAMO_CACHE=0
+  export NAMO_BIN='"$PWD/$BIN"'
+  source shell/namo_complete.bash
+  _namo_live_prompt_hook
+  printf "%s\t%s\n%s\t%s\n" 99 1 99 "stale answer" >&"$_NAMO_RFD"
+  READLINE_LINE="git com"; READLINE_POINT=7
+  _namo_complete </dev/null
+  echo "LINE=$READLINE_LINE"
+' 2>/dev/null | grep '^LINE=')
+rm -f /tmp/namo_t3_tty
+printf '%s' "$res" | grep -q 'stale answer' \
+  && bad "a stale reply was taken for the answer" \
+  || ok "replies are matched to the request that asked ($res)"
+
+# Alt-G reads its question with builtins only -- no stty, no line discipline.
+res=$(bash -i -c '
+  source shell/namo_complete.bash 2>/dev/null
+  READLINE_LINE=""
+  typed=$(printf "how big\010\010\010big are these")
+  _namo_read_question <<< "$typed"
+  echo "Q=[$_NAMO_QUESTION]"' 2>/dev/null | grep '^Q=')
+[ "$res" = 'Q=[how big are these]' ] \
+  && ok "the question reader handles typing and backspace" \
+  || bad "question reader wrong (got $res)"
 
 
 # keybindings must survive hosts that steal Ctrl-G (VS Code = "Go to Line")
@@ -289,6 +378,175 @@ payload | env NAMO_LINE='cache probe one' NAMO_CWD="$PWD" "$BIN" >/dev/null 2>&1
 [ -f /tmp/namo_req.json ] \
   && ok "ask and complete keys do not collide" \
   || bad "completion wrongly reused the ask-mode cache entry"
+
+# --------------------------------------------------------------------------
+head_ "4b. did you mean (command not found)"
+# --------------------------------------------------------------------------
+# A third mode: bash could not find the command, so the line is corrected
+# rather than completed. The shell prints bash's message and hands the prompt
+# straight back; the answer is drawn by the daemon whenever it arrives.
+rm -f /tmp/namo_req.json
+out=$(payload | env NAMO_MODE=dym NAMO_QUERY='gti status' \
+        NAMO_CWD="$PWD" NAMO_CACHE=0 "$BIN" 2>/dev/null)
+[ "$out" = 'git status' ] && ok "correction mode returns the fixed line" \
+                          || bad "correction mode returned '$out'"
+grep -q '<typed>gti status</typed>' /tmp/namo_req.json \
+  && ok "the typed line is sent in a <typed> tag" || bad "<typed> tag missing"
+grep -q '<line>\|<request>' /tmp/namo_req.json \
+  && bad "correction mode sent a completion or ask tag too" \
+  || ok "correction mode omits the <line> and <request> tags"
+python3 - <<'PYX' && ok "correction mode uses the correction prompt" || bad "wrong system prompt"
+import json
+d=json.load(open('/tmp/namo_req.json'))
+assert 'correct bash command lines' in d['system'], d['system'][:80]
+assert 'output nothing at all' in d['system'], "the model is not allowed to stay silent"
+assert d['max_tokens'] == 150, d['max_tokens']
+PYX
+
+# Three modes, three cache namespaces.
+rm -f /tmp/namo_req.json
+payload | env NAMO_MODE=dym NAMO_QUERY='cache probe two' NAMO_CWD="$PWD" "$BIN" >/dev/null 2>&1
+rm -f /tmp/namo_req.json
+payload | env NAMO_MODE=ask NAMO_QUERY='cache probe two' NAMO_CWD="$PWD" "$BIN" >/dev/null 2>&1
+[ -f /tmp/namo_req.json ] && ok "correction and ask keys do not collide" \
+                          || bad "ask wrongly reused the correction cache entry"
+
+# An existing handler keeps its message and its exit status.
+res=$(bash -i -c '
+  command_not_found_handle(){ echo "PREV:[$*]"; return 42; }
+  source shell/namo_complete.bash 2>/dev/null
+  nosuchcmd_zz; echo "rc=$?"' 2>&1)
+printf '%s' "$res" | grep -q 'PREV:\[nosuchcmd_zz\]' \
+  && ok "an existing command-not-found handler still runs" \
+  || bad "pre-existing handler lost"
+printf '%s' "$res" | grep -q 'rc=42' && ok "its exit status is passed through" \
+                                     || bad "handler exit status swallowed"
+res=$(bash -i -c '
+  source shell/namo_complete.bash 2>/dev/null
+  nosuchcmd_zz; echo "rc=$?"' 2>&1)
+printf '%s' "$res" | grep -q 'nosuchcmd_zz: command not found' \
+  && ok "bash's own message still comes first" || bad "command-not-found message lost"
+printf '%s' "$res" | grep -q 'rc=127' && ok "status 127 preserved" || bad "status not 127"
+
+# ---- the daemon side of it, driven directly ----
+# A correction rides the same FIFO as every keystroke, marked with a leading
+# SOH, and must never be mistaken for a line being typed.
+CT=$(mktemp -d)
+mkfifo -m 600 "$CT/fifo"
+printf 'git status\nls -la\n' > "$CT/hist"
+exec {CFD}<>"$CT/fifo"
+rm -f /tmp/namo_reqs.log
+NAMO_DAEMON=1 NAMO_FIFO="$CT/fifo" NAMO_HISTFILE="$CT/hist" NAMO_PIDFILE="$CT/pid" \
+  NAMO_TTY="$CT/tty" NAMO_DEBOUNCE=0.2 NAMO_QUIET=0.05 NAMO_CACHE=0 \
+  "$BIN" </dev/null >/dev/null 2>&1
+sleep 0.3
+
+printf '%s\t\001%s\n' "$PWD" "gti bisect" >&$CFD
+sleep 1.6
+grep -q 'did you mean: git status' "$CT/tty" \
+  && ok "the correction is drawn in the hint row" \
+  || bad "no correction row drawn"
+grep -q 'Alt-O' "$CT/tty" \
+  && bad "the correction row offers Alt-O, which would run a completion" \
+  || ok "the correction row carries no Alt-O suffix"
+grep -q '<typed>gti bisect</typed>' /tmp/namo_reqs.log \
+  && ok "the daemon asks in correction mode" || bad "daemon did not ask for a correction"
+grep -q '<line>.\?gti bisect' /tmp/namo_reqs.log \
+  && bad "the correction record was also completed as a typed line" \
+  || ok "a correction is never treated as something being typed"
+
+# Regression: the correction is posted by the prompt hook, so it can land in
+# any of the daemon's waits -- coalesce, debounce -- not just the idle one.
+# The row belongs to the failed command and to nothing else: a correction that
+# arrives while a hint for a line being typed is up is dropped, not painted
+# over it. The daemon holds this file open, so it is counted, not truncated.
+dym_rows() { grep -o 'did you mean' "$CT/tty" 2>/dev/null | grep -c . ; }
+printf '%s\t%s\n' "$PWD" "git co" >&$CFD
+sleep 1.2                      # long enough for the hint itself to be painted
+grep -q 'hint: ' "$CT/tty" && ok "a typed line still gets its hint" \
+                           || bad "no hint painted for a typed line"
+before=$(dym_rows)
+printf '%s\t\001%s\n' "$PWD" "gti rebase" >&$CFD
+sleep 1.8
+[ "$(dym_rows)" = "$before" ] \
+  && ok "a correction never lands on top of a hint for a line being typed" \
+  || bad "correction painted over the hint row mid-typing"
+
+# The real sequence: Enter clears the row (the prompt hook pushes an empty
+# line) and the correction follows it, both inside the daemon's debounce
+# window rather than at the top of its loop.
+before=$(dym_rows)
+printf '%s\t%s\n' "$PWD" "git co" >&$CFD
+printf '%s\t%s\n' "$PWD" "" >&$CFD
+printf '%s\t\001%s\n' "$PWD" "gti rebase" >&$CFD
+sleep 1.8
+[ "$(dym_rows)" -gt "$before" ] \
+  && ok "a correction arriving mid-debounce is still served" \
+  || bad "correction swallowed by the debounce window"
+unset -f dym_rows
+
+exec {CFD}>&-
+sleep 0.4
+rm -rf "$CT"
+
+# ---- and through a real shell ----
+if command -v script >/dev/null 2>&1; then
+  cat > /tmp/namo_rc_dym.sh <<RCEOF
+export NAMO_BIN="$PWD/$BIN"
+export NAMO_MIN_GAP=0 NAMO_DEBOUNCE=0.3
+export NAMO_ENDPOINT="$NAMO_ENDPOINT"
+export ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
+source "$PWD/shell/namo_complete.bash"
+PS1='T\$ '
+RCEOF
+  runpty() { script -qec "bash --rcfile /tmp/namo_rc_dym.sh -i" /dev/null 2>&1 | tr -d '\r'; }
+  ms_now() { echo $(( $(date +%s%N) / 1000000 )); }
+
+  # The mock holds a correction for a full second. A session that types one and
+  # leaves must not have waited for it: nothing in the shell is watching.
+  rm -f /tmp/namo_reqs.log
+  t0=$(ms_now); printf 'NAMO_DYM=0\nnosuchcmd_zz\nexit\n' | runpty >/dev/null
+  base=$(( $(ms_now) - t0 ))
+  t0=$(ms_now); res=$(printf 'gti diff\nexit\n' | runpty); dym=$(( $(ms_now) - t0 ))
+  [ $(( dym - base )) -lt 500 ] \
+    && ok "prompt returns immediately: ${dym}ms vs ${base}ms baseline, 1000ms call" \
+    || bad "the shell waited for the correction (${dym}ms vs ${base}ms baseline)"
+  printf '%s' "$res" | grep -q 'gti: command not found' \
+    && ok "bash's message is printed at once" || bad "error message missing"
+  # The shell left before the answer did; the daemon is still in the call.
+  sleep 1.5
+  grep -q '<typed>gti diff</typed>' /tmp/namo_reqs.log 2>/dev/null \
+    && ok "the correction is still asked for after the shell has moved on" \
+    || bad "typed line not sent"
+
+  # The words bash hands the handler have been globbed; the history list has
+  # what was actually typed.
+  rm -f /tmp/namo_reqs.log
+  printf 'grpe -r TODO *.md\nsleep 1.4\nexit\n' | runpty >/dev/null
+  grep -q '<typed>grpe -r TODO \*.md</typed>' /tmp/namo_reqs.log 2>/dev/null \
+    && ok "globs are sent unexpanded, as typed" \
+    || bad "the glob was expanded before it reached the model"
+
+  # A line the history list never recorded still has to reach the model.
+  rm -f /tmp/namo_reqs.log
+  printf 'HISTCONTROL=ignorespace\n grpe -r TODO src\nsleep 1.4\nexit\n' | runpty >/dev/null
+  grep -q '<typed>grpe -r TODO src</typed>' /tmp/namo_reqs.log 2>/dev/null \
+    && ok "unrecorded line (HISTCONTROL=ignorespace) still corrected" \
+    || bad "wrong line sent when it was kept out of the history list"
+
+  rm -f /tmp/namo_reqs.log
+  printf 'NAMO_DYM=0\nnosuchcmd_zz\nsleep 1.4\nexit\n' | runpty >/dev/null
+  grep -q '<typed>' /tmp/namo_reqs.log 2>/dev/null \
+    && bad "NAMO_DYM=0 still asked" || ok "NAMO_DYM=0 turns it off"
+
+  rm -f /tmp/namo_rc_dym.sh
+  unset -f runpty ms_now
+  # A daemon still holding a slow correction would show up as a leak in the
+  # next section, which counts the daemons that outlive their shell.
+  sleep 1.5
+else
+  echo "  (skipped pty tests: 'script' not available)"
+fi
 
 # --------------------------------------------------------------------------
 head_ "5. live hints"
@@ -384,13 +642,14 @@ head_ "5b. the live daemon"
 # row all live inside the binary now (src/live.sun); the shell only writes
 # "<cwd><tab><line>" into a pipe. These drive that side of it directly.
 DT=$(mktemp -d)
-mkfifo -m 600 "$DT/fifo"
+mkfifo -m 600 "$DT/fifo" "$DT/reply"
 printf 'git status\nexport TOK=ghp_LIVELEAK\n' > "$DT/hist"
 exec {DFD}<>"$DT/fifo"
 rm -f /tmp/namo_req.json
 
-NAMO_DAEMON=1 NAMO_FIFO="$DT/fifo" NAMO_HISTFILE="$DT/hist" NAMO_PIDFILE="$DT/pid" \
-  NAMO_TTY="$DT/tty" NAMO_DEBOUNCE=0.2 NAMO_QUIET=0.05 "$BIN" </dev/null >/dev/null 2>&1
+NAMO_DAEMON=1 NAMO_FIFO="$DT/fifo" NAMO_REPLY="$DT/reply" NAMO_HISTFILE="$DT/hist" \
+  NAMO_PIDFILE="$DT/pid" NAMO_TTY="$DT/tty" NAMO_DEBOUNCE=0.2 NAMO_QUIET=0.05 \
+  "$BIN" </dev/null >/dev/null 2>&1
 dpid=$(cat "$DT/pid" 2>/dev/null)
 { [ -n "$dpid" ] && kill -0 "$dpid" 2>/dev/null; } \
   && ok "daemon detaches and records its pid before returning" \
@@ -399,8 +658,40 @@ dpid=$(cat "$DT/pid" 2>/dev/null)
 printf '%s\t%s\n' "$PWD" "live daemon probe" >&"$DFD"
 sleep 1.2
 grep -q 'hint: ' "$DT/tty" && ok "hint painted after the debounce" || bad "no hint painted"
+# One row below the cursor, never on it: the row the prompt hook reserves.
+# Absolute positioning would put it at the bottom of the screen, which is the
+# line being typed as soon as the prompt gets there.
+grep -q "$(printf '\033')\[1B" "$DT/tty" \
+  && ok "hint row placed one row below the cursor" || bad "hint row not positioned"
 grep -q "$(printf '\033')\[999;1H" "$DT/tty" \
-  && ok "hint row addressed absolutely, no newline emitted" || bad "hint row not positioned"
+  && bad "hint row still addressed absolutely" || ok "no absolute jump to the last row"
+[ "$(tr -dc '\n' < "$DT/tty" | wc -c)" = 0 ] \
+  && ok "no newline emitted while drawing" \
+  || bad "the hint row emitted a newline, which scrolls the screen"
+
+# The other direction: a request the shell waits for. STX marks it, the answer
+# comes back down the reply FIFO labelled with the id that asked.
+exec {RFD}<>"$DT/reply"
+# A line of its own, so nothing another test cached can answer this one.
+printf '%s\t\002%s\t%s\t%s\n' "$PWD" 42 c "zzprobe com" >&"$DFD"
+hdr=""; IFS= read -r -t 5 -u "$RFD" hdr
+n=${hdr#*$'\t'}
+[ "${hdr%%$'\t'*}" = 42 ] && [ "$n" -ge 1 ] 2>/dev/null \
+  && ok "reply header names the request and the number of answers ($n)" \
+  || bad "bad reply header: $(printf '%s' "$hdr" | cat -v)"
+first=""; IFS= read -r -t 5 -u "$RFD" first
+[ "$first" = "$(printf '42\tgit commit -m "msg"')" ] \
+  && ok "candidates come back one per line, id first" \
+  || bad "bad reply line: $(printf '%s' "$first" | cat -v)"
+for (( i = 1; i < n; i++ )); do IFS= read -r -t 5 -u "$RFD" _; done
+
+# A line too short to be worth a round trip is still answered, with nothing.
+printf '%s\t\002%s\t%s\t%s\n' "$PWD" 43 c "gi" >&"$DFD"
+hdr=""; IFS= read -r -t 5 -u "$RFD" hdr
+[ "$hdr" = "$(printf '43\t0')" ] \
+  && ok "a request too short to serve gets an empty answer, not silence" \
+  || bad "short request answered with: $(printf '%s' "$hdr" | cat -v)"
+exec {RFD}>&-
 
 grep -q 'ghp_LIVELEAK' /tmp/namo_req.json \
   && bad "SECRET LEAKED from the live path" \

@@ -4,12 +4,24 @@ Each section below is a self-contained issue body, ready to file against the
 [Sun](https://namo-robotics.github.io/sun/) repository — repro, observed
 behaviour, expectation, impact. They come out of writing
 [`namo_complete`](https://github.com/namo-robotics/namo_complete), an
-LLM-powered bash completion tool: ~1900 lines of Sun, an FFI-heavy program with
-a network client, a file cache and a long-lived daemon.
+LLM-powered bash completion tool: ~1650 lines of Sun with a network client, a
+file cache and a long-lived daemon.
 
 Every repro is standalone, and every one was re-run against the build named in
-its Environment line before this was written. Items fixed in earlier compiler
-builds have been dropped along with the workarounds they forced.
+its Environment line before this was written. Items fixed in earlier builds have
+been dropped along with the workarounds they forced.
+
+The `46190fcbc286` stdlib closed three of them outright, and they are gone from
+the list below: `String.c_str()` ended the hand-rolled C-string bridge, the
+`sun.io` path parameters moved from `static_ptr<u8>` to `raw_ptr<u8>`, and
+`sun.process` / `sun.env` / `sun.time` plus `read_dir` and `Poller` covered
+every process, directory and environment call this program had been making
+through the FFI. Between them they deleted two source files and every
+`extern "C"` declaration and every `unsafe` block in the project — it now
+compiles with none of either. A fourth item, "no narrowing conversion between
+integer types", was withdrawn rather than fixed: `_convert<i32>` truncates
+correctly and always did, on this build and the one before it. The issue was
+wrong.
 
 Ordered by severity: compiler crashes, then things that shaped the
 architecture, then papercuts.
@@ -18,7 +30,7 @@ architecture, then papercuts.
 
 ## 1. Compiler crashes (SIGTRAP, no diagnostic) when a `void` result is bound to an inferred `var`
 
-**Environment:** `sun 0.dev (14b37d81f2ae)`, x86_64 Linux, `sun -c` (static AOT).
+**Environment:** `sun 0.dev (46190fcbc286)`, x86_64 Linux, `sun -c` (static AOT).
 
 Assigning the result of a `void` function to a `var` without a type annotation
 crashes the compiler. There is no diagnostic at all — no error, no partial
@@ -68,7 +80,7 @@ crash with no file, no line and no message.
 
 ## 2. Method calls skip arity checking and fail in the LLVM verifier
 
-**Environment:** `sun 0.dev (14b37d81f2ae)`, x86_64 Linux, `sun -c` (static AOT).
+**Environment:** `sun 0.dev (46190fcbc286)`, x86_64 Linux, `sun -c` (static AOT).
 
 Passing the wrong number of arguments to a **method** is not caught by overload
 resolution. It reaches code generation and fails in the LLVM verifier, with a
@@ -95,7 +107,8 @@ manifest { moons: ["stdlib.moon"] }
 
 ```
 Incorrect number of arguments passed to called function!
-  call void @"$d8d0890e$_sun_String_trim"(ptr %method.closure1, %"$d8d0890e$_sun_HeapAllocator_struct" %move.val)
+  call void @"$f25b09f5$_sun_String_trim"(ptr %method.closure1, %"$f25b09f5$_sun_HeapAllocator_struct" %move.val)
+Error: Function verification failed: main
 ```
 
 **Expected:** what the free-function path already gives. The identical mistake
@@ -119,50 +132,23 @@ calls, not to arity checking in general.
 
 **Impact:** the error names no file and no line, so on a multi-file build
 (`manifest { suns: [...] }`) there is nothing to bisect from but the mangled
-name. This is a likely mistake whenever an API changes shape — a method that
-used to take an allocator and no longer does, say — which is exactly when a
-clear message matters most.
+name. This is exactly the mistake an API change provokes — a method that used to
+take an allocator and no longer does, say — which is when a clear message
+matters most. Porting this project to the `46190fcbc286` stdlib, where
+`File.open` changed shape, was that situation.
 
 ---
 
-## 3. `static_ptr<u8>` parameters make core stdlib APIs unusable for computed values
+## 3. `Error` cannot carry a computed message
 
-**Environment:** `sun 0.dev (14b37d81f2ae)`, x86_64 Linux.
+**Environment:** `sun 0.dev (46190fcbc286)`, x86_64 Linux.
 
-`static_ptr<u8>` is satisfied only by compile-time literals, and nothing can
-construct one at runtime. Several stdlib entry points take paths and messages
-that way, which makes them unusable for any value the program computes:
-
-| API | Signature | Consequence |
-|---|---|---|
-| `File.open` (io.sun:41) | `path: static_ptr<u8>` | cannot open a path you computed |
-| `remove_file` (io.sun:135) | `path: static_ptr<u8>` | same |
-| `make_dir` (io.sun:151) | `path: static_ptr<u8>` | same |
-| `Error` (errors.sun:27) | `message: static_ptr<u8>` | an `IError` cannot carry the failing path or errno |
+`sun.io` and friends now take paths as `raw_ptr<u8>`, which a runtime `String`
+satisfies through `c_str()`. `Error` did not move with them: its message is
+still `static_ptr<u8>` (errors.sun:27), satisfied only by a compile-time
+literal.
 
 **Repro**
-
-```sun
-using sun;
-using sun.io;
-
-function main() i32 {
-  var alloc = make_heap_allocator();
-  var path = String(alloc, "/tmp/");
-  path.append("computed.txt");
-  var f = File();
-  try { f.open(path, 1); } catch (e: IError) { }
-  return 0;
-}
-
-manifest { moons: ["stdlib.moon"] }
-```
-```
-Error: fo.sun:8:9: Type mismatch in argument 1 of call to '<unknown>':
-       expected static_ptr(u8), got String
-```
-
-The same for a computed error message:
 
 ```sun
 function boom(path: ref String) void, IError {
@@ -170,88 +156,30 @@ function boom(path: ref String) void, IError {
 }
 ```
 ```
-Error: e.sun:3:9: No matching constructor for '$d8d0890e$_sun_Error'
+Error: e.sun:4:63: No matching constructor for '$f25b09f5$_sun_Error'
        with arguments (i32, ref(String))
 ```
 
-**Expected:** a `ref String` overload on each of these.
+**Expected:** an `Error` constructor accepting an owned or borrowed `String`.
 
-**Requested:** `File.open`, `remove_file` and `make_dir` accepting `ref String`,
-and an `Error` constructor accepting an owned or borrowed `String`.
-
-**Impact:** a program that computes every path it touches — `$XDG_RUNTIME_DIR`,
-`$XDG_CACHE_HOME`, a hashed cache filename, a per-shell FIFO — cannot use
-`sun.io` at all. `namo_complete` reimplements
-`open`/`read`/`write`/`close`/`unlink`/`mkdir` over libc in
-[`src/fs.sun`](https://github.com/namo-robotics/namo_complete/blob/main/src/fs.sun)
-purely so the calls accept a `ref String`. That file exists for no other reason
-and a `ref String` overload would delete it outright. Dynamic error payloads
-would likewise turn a pile of "carry the detail out-of-band" plumbing into
-ordinary `throw`s.
-
-Side note: the diagnostic says `call to '<unknown>'` rather than naming
-`File.open`.
+**Impact:** an `IError` cannot name the path that failed, the URL that timed
+out, or the value that would not parse. Every failure has to either drop its
+detail or carry it out-of-band in a field the catcher knows to read — this
+project does the former, so a cache write that fails on a bad path throws an
+error saying only "failed to write file". Now that `c_str()` and the
+`raw_ptr<u8>` path parameters have made every *other* stdlib entry point usable
+with computed values, this is the one left.
 
 ---
 
-## 4. No `String` → C string bridge, so every FFI call hand-rolls a copy
+## 4. No macOS target: `extern "C"` is ELF-only, which blocks distribution entirely
 
-**Environment:** `sun 0.dev (14b37d81f2ae)`, x86_64 Linux.
+**Environment:** `sun 0.dev (46190fcbc286)`, building on x86_64 Linux.
 
-`String.data` is private (string.sun:84) and `ContiguousBuffer.rawData()` makes
-no NUL-termination guarantee, so there is no supported way to hand a `String` to
-a C function.
-
-**Repro**
-
-```sun
-using sun;
-
-extern "C" function puts(s: raw_ptr<u8>) i32;
-
-function main() i32 {
-  var alloc = make_heap_allocator();
-  var s = String(alloc, "hello");
-  unsafe { puts(s.data.get_raw()); };
-  return 0;
-}
-
-manifest { moons: ["stdlib.moon"] }
-```
-```
-Semantic Error: c.sun:6:17: 'data' is private to class 'String' in module 'sun'
-                and cannot be accessed here
-```
-
-**Workaround** — every caller writes this out by hand:
-
-```sun
-var buf = ContiguousBuffer<u8>(alloc, n + 1);
-for (var i: i64 = 0; i < n; i = i + 1) { buf.set_unchecked(i, s.at(i)); }
-buf.set_unchecked(n, 0);
-```
-
-**Requested:** `String.as_cstr()` returning a NUL-terminated view, or a `CStr`
-type with an explicit lifetime relationship to its `String`.
-
-**Impact:** this is the single most-used function in `namo_complete` — every
-file open, every `getenv`, every `chdir`, every write goes through it. It is the
-entire contents of
-[`src/cstr.sun`](https://github.com/namo-robotics/namo_complete/blob/main/src/cstr.sun),
-which `String.as_cstr()` would delete.
-
----
-
-## 5. No macOS target: `extern "C"` is ELF-only, which blocks distribution entirely
-
-**Environment:** `sun 0.dev (14b37d81f2ae)`, building on x86_64 Linux.
-
-A program that uses the FFI cannot be built for macOS at all.
-
-**Repro** — any program containing an `extern "C"` declaration:
+**Repro** — any program at all, now that the stdlib itself uses the FFI:
 
 ```
-$ sun -c --target aarch64-apple-darwin -o out prog.sun
+$ sun -c --target aarch64-apple-darwin -o out src/main.sun
 Error: no C ABI rules for target 'aarch64-apple-darwin';
        extern "C" supports x86_64 and aarch64 (ELF) only
 ```
@@ -260,21 +188,23 @@ Error: no C ABI rules for target 'aarch64-apple-darwin';
 
 **Requested:** Mach-O argument classification and an `aarch64-apple-darwin` ABI.
 
-**Impact:** because issues #3 and #7 force *every* file operation and every
-environment read through the FFI, there is no subset of the program that still
-works without it — this is not something an application can design around.
-`namo_complete` is therefore Linux-only, and its published releases are Linux
-x86_64 only. For anyone shipping a Sun program to end users, this is the single
-highest-impact addition.
+**Impact:** this got *broader* with the new stdlib, not narrower. `stdlib/sys.sun`
+routes every libc call the standard library makes through `extern "C"`, so the
+ELF restriction is no longer something an application can avoid by avoiding the
+FFI: `namo_complete` now contains no `extern "C"` and no `unsafe` block
+anywhere, and still cannot be built for macOS, because `sun.io` and
+`sun.process` can't be. Any program that opens a file is in the same position.
+This is the single highest-impact addition for anyone shipping a Sun program to
+end users.
 
 Adjacent: upstream publishes only `sun_0.dev_amd64.deb`, so there is no macOS
 toolchain to build with either.
 
 ---
 
-## 6. No TLS, so any HTTPS client has to shell out
+## 5. No TLS, so any HTTPS client has to shell out
 
-**Environment:** `sun 0.dev (14b37d81f2ae)`, x86_64 Linux.
+**Environment:** `sun 0.dev (46190fcbc286)`, x86_64 Linux.
 
 `networking.sun` provides raw IPv4 TCP and `http.sun` provides a plaintext HTTP
 *server*. There is no HTTPS client and no TLS socket anywhere in the stdlib
@@ -283,56 +213,30 @@ toolchain to build with either.
 **Requested:** an HTTPS client, or failing that, TLS sockets to build one on.
 
 **Impact:** for a program whose entire job is calling an HTTPS API, the whole
-transport becomes a subprocess wrapper around the `curl` binary — write the body
-to a file, write a mode-0600 curl config, `chdir`, `system("curl -sS -K
-./req.conf ...")`, read the response back
+transport is a subprocess wrapper around the `curl` binary
 ([`src/client.sun`](https://github.com/namo-robotics/namo_complete/blob/main/src/client.sun)).
-That is ~150 lines and a runtime dependency on an external binary, in a language
-whose static-linking story is otherwise its best feature.
 
-FFI to libcurl was considered and rejected: Sun links statically by default,
-libcurl commonly ships as a `.so` only (needing `--dynamic` plus a `-dev`
-package), and **Sun's FFI rejects function pointers**, which rules out libcurl's
-write-callback API.
+`sun.process.Command` made that wrapper a great deal better than it was — the
+old one wrote a mode-0600 curl config to disk, `chdir`'d so that the command
+string could be a compile-time constant, called `system()`, and read the
+response back out of a file, all to keep user bytes away from `/bin/sh`. There
+is no shell now: `Command` execs curl directly, the request body is one argv
+entry, the API key goes down curl's stdin as a `-K -` config so it appears
+neither on disk nor in `ps`, and `Child.collect` returns the response having
+polled both pipes. That is a real improvement in a security-relevant path and it
+came free with the stdlib.
 
----
-
-## 7. No process, directory or environment access in the stdlib
-
-**Environment:** `sun 0.dev (14b37d81f2ae)`, x86_64 Linux.
-
-`getenv`, `system`, `chdir`, `getuid`, `time` and reading stdin have no stdlib
-equivalent and are hand-declared FFI. Writing a long-lived helper process added
-`fork`, `setpgid`, `dup2`, `poll`, `getpid` and `getdents64` to the same list.
-Two of those gaps are more than a convenience problem:
-
-- **No directory enumeration.** Nothing in the stdlib walks a directory. The
-  workaround is `getdents64`, which hands back a packed `struct linux_dirent64`
-  that has to be stepped through by byte offset (`d_reclen` is the `u16` at 16,
-  `d_name` starts at 19) because the FFI cannot describe a C struct. It works,
-  but it puts Linux-specific record parsing in application code.
-- **No `poll`/`select`.** Waiting on a descriptor with a timeout is the entire
-  shape of a debounce loop. `struct pollfd` has to be built by hand in a
-  `ContiguousBuffer<u8>`, filled with `_store<i32>` plus individual byte writes,
-  and read back the same way.
-
-Command-line arguments are reachable (`main(argc, argv)` — `src/driver.cpp`
-checks `mainArgCount == 2`), but the parameter types are undocumented and every
-example in the docs uses a bare `main()`. `namo_complete` uses environment
-variables instead, partly for this reason.
-
-**Requested:** a `sun.process` module covering `fork`/`exec`/`poll`/`getenv`, and
-a `read_dir(path)` returning `Vec<String>`.
-
-**Impact:** most of the FFI block in
-[`src/live.sun`](https://github.com/namo-robotics/namo_complete/blob/main/src/live.sun)
-exists only to fill these gaps.
+It is still a runtime dependency on an external binary, in a language whose
+static-linking story is otherwise its best feature. FFI to libcurl was
+considered and rejected: Sun links statically by default, libcurl commonly ships
+as a `.so` only (needing `--dynamic` plus a `-dev` package), and **Sun's FFI
+rejects function pointers**, which rules out libcurl's write-callback API.
 
 ---
 
-## 8. A `ref` local cannot be bound to a class field
+## 6. A `ref` local cannot be bound to a class field
 
-**Environment:** `sun 0.dev (14b37d81f2ae)`, x86_64 Linux.
+**Environment:** `sun 0.dev (46190fcbc286)`, x86_64 Linux.
 
 Borrowing a field into a local is rejected, even though passing the same field
 as a `ref` parameter borrows it fine.
@@ -399,47 +303,13 @@ this would be one line and no copy.
 
 ---
 
-## 9. No narrowing conversion between integer types
+## 7. `String.split` keeps empty pieces, and there is no whitespace-collapsing helper
 
-**Environment:** `sun 0.dev (14b37d81f2ae)`, x86_64 Linux.
+**Environment:** `sun 0.dev (46190fcbc286)`, x86_64 Linux.
 
-There is no cast and no truncating intrinsic from `i64` to `i32`. `_bitcast<T>`
-covers only same-width reinterpretation (`f32` ↔ `u32`), so it does not apply.
-
-**Repro**
-
-```sun
-var ms: i64 = 200;
-var t: i32 = ms;
-```
-```
-Error: n.sun:5:3: Cannot assign value of type 'i64' to variable 't' of type 'i32'
-```
-
-**Requested:** an explicit narrowing cast, or a `_truncate<T>` intrinsic.
-
-**Impact:** this bites hardest at the FFI boundary, where C's `int` is
-everywhere. `poll(2)`'s timeout is an `int`, and a debounce interval naturally
-computes as `i64`. With no way to narrow, the workaround is to declare the
-parameter `i64` and rely on the SysV rule that the callee reads only the low
-half of the register:
-
-```sun
-extern "C" function poll(fds: raw_ptr<u8>, nfds: i64, timeout: i64) i32;
-```
-
-That is correct, but the language should not make knowing that rule a
-prerequisite for calling libc.
-
----
-
-## 10. `String.split` keeps empty pieces, and there is no whitespace-collapsing helper
-
-**Environment:** `sun 0.dev (14b37d81f2ae)`, x86_64 Linux.
-
-`String.split(alloc, sep)` (string.sun:682) emits an entry for every separator
-including runs and trailing separators, so splitting text into lines or words
-means writing a filter at every call site.
+`String.split(alloc, sep)` emits an entry for every separator including runs and
+trailing separators, so splitting text into lines or words means writing a
+filter at every call site.
 
 **Repro**
 
@@ -466,9 +336,9 @@ no stdlib equivalent at all.
 
 ---
 
-## 11. `partial` is a reserved word, with a diagnostic that does not say so
+## 8. `partial` is a reserved word, with a diagnostic that does not say so
 
-**Environment:** `sun 0.dev (14b37d81f2ae)`, x86_64 Linux.
+**Environment:** `sun 0.dev (46190fcbc286)`, x86_64 Linux.
 
 **Repro**
 
@@ -488,9 +358,9 @@ it took a bisect. A reserved-word list in the docs would also do.
 
 ---
 
-## 12. `&&` / `||` produce a parse error that does not suggest `and` / `or`
+## 9. `&&` / `||` produce a parse error that does not suggest `and` / `or`
 
-**Environment:** `sun 0.dev (14b37d81f2ae)`, x86_64 Linux.
+**Environment:** `sun 0.dev (46190fcbc286)`, x86_64 Linux.
 
 **Repro**
 
@@ -509,12 +379,12 @@ it to what was written.
 
 ---
 
-## 13. `Json(...)` takes ownership of its `String`, which is not documented
+## 10. `Json(...)` takes ownership of its `String`, which is not documented
 
-**Environment:** `sun 0.dev (14b37d81f2ae)`, x86_64 Linux.
+**Environment:** `sun 0.dev (46190fcbc286)`, x86_64 Linux.
 
-`Json(s: String)` (json.sun:102) consumes the string, so any value still needed
-after being placed into a document has to be cloned first:
+`Json(s: String)` consumes the string, so any value still needed after being
+placed into a document has to be cloned first:
 
 ```sun
 req.set(String(alloc, "model"), Json(cfg.model.clone(alloc)));
@@ -530,48 +400,89 @@ the common case, and it is where values are most likely to be reused.
 
 ---
 
-## 14. Stdlib renames ship with no deprecation window or changelog
+## 11. Stdlib changes ship with no deprecation window or changelog
 
-**Environment:** `sun 0.dev (14b37d81f2ae)`, x86_64 Linux.
+**Environment:** `sun 0.dev (46190fcbc286)`, x86_64 Linux.
 
-`Vec.borrow_unchecked` became `Vec.get_unchecked` between builds, with no
-deprecation period and no release note. It broke this project's build outright,
-and the only way to find out what changed was to diff the stdlib sources.
+The `46190fcbc286` stdlib is a large and very welcome release — and upgrading to
+it broke this project's build in three unrelated ways, none of them announced.
+`/usr/share/doc/sun/changelog.gz` reads, in full, `* Release 0.dev`.
 
-**Requested:** a changelog, or release notes listing stdlib renames.
+1. **A new stdlib free function collided with an existing application one.**
+   `sun.print` gained `eprint`. This project had its own `eprint`, and every
+   file says `using sun;`, so the build stopped at:
 
-**Impact:** upgrading the compiler is currently an unbounded task — there is no
-way to know what will break before trying it. That discourages tracking `dev`,
-which is where the fixes are.
+   ```
+   Error: Ambiguous reference to 'eprint'. Could be: namo or sun
+   ```
+
+   The error is clear, but the hazard is not bounded: adding any public free
+   function to a `using`-imported module can break any program that already has
+   that name. `sun.sys` shows the shape of the fix — every libc extern in it is
+   prefixed `c_` and kept private specifically so that `getenv`, `fork` and
+   `poll` stay free in user namespace. The same care in the public modules, or a
+   release note, would have covered this.
+
+2. **`sun.io` changed shape without a compatible overload.** `File.open`'s mode
+   went from `i32` constants (`MODE_READ`) to a `FileMode` enum, `seek`'s
+   whence went from `SEEK_*` to a `Whence` enum, `File.write` changed its return
+   type from `i32` to `i64`, and the "not open" sentinel for a `File`'s
+   descriptor moved from `-1` to `0`. Each of these is an improvement. Together
+   they are a silent source break for every existing caller.
+
+3. **A rename with no deprecation.** `Vec.borrow_unchecked` became
+   `Vec.get_unchecked` in an earlier build, again with no note; the only way to
+   find out what changed was to diff the stdlib sources.
+
+**Requested:** release notes listing stdlib additions and renames, and — for
+renames — one release where the old name still works and warns.
+
+**Impact:** upgrading the compiler is an unbounded task. There is no way to know
+what will break before trying it, and no way to tell a rename from a removal
+without reading the sources. That discourages tracking `dev`, which is where the
+fixes are. This upgrade was worth every minute it cost, and a two-line note
+would have made it cost almost nothing.
 
 ---
 
-## 15. `_static_ptr_data` / `_static_ptr_len` are documented as discouraged, but are the only option
+## 12. `_static_ptr_data` / `_static_ptr_len` are documented as discouraged, but are the only option
 
-**Environment:** `sun 0.dev (14b37d81f2ae)`, x86_64 Linux.
+**Environment:** `sun 0.dev (46190fcbc286)`, x86_64 Linux.
 
 The docs describe `_static_ptr_data<T>` and `_static_ptr_len<T>` as intrinsics
 to avoid, yet they are the only way to do anything with a `static_ptr` value —
-and the stdlib's own public API hands `static_ptr<u8>` parameters to callers
-routinely (see issue #3).
+and the stdlib's public API still hands `static_ptr<u8>` parameters to callers
+(`Error`, `String.equals_literal`, `starts_with`, `File.write`).
 
 **Requested:** either a supported accessor for `static_ptr`, or documentation
 acknowledging that these intrinsics are the intended tool for it.
 
-**Impact:** application code has to use an intrinsic the documentation warns
-against, with no way to tell whether it will keep working.
+**Impact:** much reduced by this stdlib. Now that paths are `raw_ptr<u8>` and a
+literal narrows to one automatically, this project no longer calls either
+intrinsic anywhere. What is left is a documentation contradiction rather than a
+daily inconvenience — but it still bites anyone who has to read the bytes of a
+`static_ptr` they were handed, which issue #3 shows is still reachable.
 
 ---
 
 ## Not an issue: what already works well
 
-Worth recording alongside the list above. The borrow checker caught a real
-use-after-move in this project's JSON code on the first compile.
-`manifest { suns: [...] }` multi-file builds and cross-module `public`
-visibility worked first try. The JSON module round-tripped quoting,
-backslashes, newlines and `\u` escapes correctly with no fuss. `extern "C"`
-against libc behaved identically under JIT and static-musl AOT, and `fork` and
-`poll` over that FFI worked first try in a statically linked binary. The
+Worth recording alongside the list above.
+
+The `46190fcbc286` stdlib is the best thing to happen to this project. `Command`
+/ `Child` / `Output`, `Poller`, `read_dir`, `sun.env` and `sun.time` replaced
+every last line of FFI in it: no `extern "C"`, no `unsafe`, no `struct
+linux_dirent64` stepped through by byte offset, no `struct pollfd` assembled in
+a `ContiguousBuffer<u8>`. All of it compiled and passed the full suite on the
+first attempt, which for a rewrite that touched the daemon's fork, its poll loop
+and its HTTP client is a strong statement about the API design. `Child.collect`
+polling both pipes rather than draining one and then the other is the kind of
+detail that is easy to get wrong by hand and was simply right here.
+
+From before: the borrow checker caught a real use-after-move in this project's
+JSON code on the first compile. `manifest { suns: [...] }` multi-file builds and
+cross-module `public` visibility worked first try. The JSON module round-tripped
+quoting, backslashes, newlines and `\u` escapes correctly with no fuss. The
 allocator held flat at 1052 KB RSS across 100k iterations of
 `String`/`Vec`/`ContiguousBuffer` churn, which is what made a long-lived daemon
 a reasonable thing to write at all. A statically linked 1.3 MB binary with no

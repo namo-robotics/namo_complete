@@ -14,26 +14,47 @@
 
 public module namo {
   using sun;
-
-  extern "C" function fork() i32;
-  extern "C" function setpgid(pid: i32, pgid: i32) i32;
-  extern "C" function dup2(oldfd: i32, newfd: i32) i32;
-  extern "C" function poll(fds: raw_ptr<u8>, nfds: i64, timeout: i64) i32;
-  extern "C" function getdents64(fd: i32, buf: raw_ptr<u8>, count: i64) i64;
-  extern "C" function getpid() i32;
+  using sun.io;
+  using sun.process;
 
   var REC_OK: i32 = 0;
   var REC_TIMEOUT: i32 = 1;
   var REC_EOF: i32 = 2;
 
-  var POLLIN: u8 = 1;
-  var DENTS_BUF: i64 = 32768;
+  // A correction request rides the same FIFO as every keystroke, marked with
+  // a leading SOH on the line field: readline cannot put a 0x01 at the start
+  // of a buffer (Ctrl-A is a binding, not a character), so no line the user
+  // can type is mistaken for one. See namo_live.bash.
+  var DYM_MARK: u8 = 1;
+
+  // And STX marks a request the shell is *waiting* for -- Alt-O, Alt-A,
+  // Alt-G. Same FIFO, same reason: a key press must not fork either, so the
+  // shell asks the daemon and reads the answer back down a second FIFO
+  // instead of starting a copy of this binary per keystroke.
+  //
+  //   <cwd> TAB STX <id> TAB <mode> TAB <line>      request
+  //   <id> TAB <count>                              reply header
+  //   <id> TAB <candidate>                          ...that many times
+  //
+  // The id is echoed on every line so that an answer the shell has already
+  // given up waiting for is recognised and dropped rather than mistaken for
+  // the next one. `mode` is "c" to complete a line or "a" to answer a
+  // question.
+  var SYNC_MARK: u8 = 2;
+
   var FIFO_BUF: i64 = 4096;
   var TABLE_MAX: i64 = 256;
+  // Nothing the shell had open is of any use to us; see daemon_run.
+  var MAX_INHERITED_FD: i32 = 256;
 
   public class Live {
-    public var ttyfd: i32;
-    public var fifofd: i32;
+    // The terminal we draw the hint row on, and the pipe the shell types
+    // into. Both are owned here: closing them is what ends the daemon.
+    public var tty: File;
+    public var fifo: File;
+    // Rearmed before every wait. One descriptor, but Poller is what keeps
+    // struct pollfd out of this file.
+    public var poller: Poller;
     // Bytes read from the FIFO that do not yet make up a whole record.
     public var pending: String;
     // What the hint row is showing right now. Repainting the row with what it
@@ -47,20 +68,27 @@ public module namo {
     public var keys: Vec<String>;
     public var vals: Vec<String>;
     // Allocated once: this loop runs on every keystroke for the life of the
-    // shell, so the buffers it needs are not built per call.
+    // shell, so the buffer it needs is not built per call.
     public var chunk: ContiguousBuffer<u8>;
-    public var pfd: ContiguousBuffer<u8>;
+    // Opened on the first request the shell waits for, and held open after
+    // that. Opening a FIFO for writing blocks until it has a reader, and the
+    // shell is that reader for exactly as long as it is waiting -- so it is
+    // opened at the one moment it is certain not to block.
+    public var reply: File;
+    public var reply_open: bool;
 
     public function init(alloc: ref HeapAllocator) {
-      this.ttyfd = -1;
-      this.fifofd = -1;
+      this.tty = File();
+      this.fifo = File();
+      this.poller = Poller(alloc);
       this.pending = String(alloc, "");
       this.screen = String(alloc, "");
       this.last = String(alloc, "");
       this.keys = Vec<String>(alloc, 32);
       this.vals = Vec<String>(alloc, 32);
       this.chunk = ContiguousBuffer<u8>(alloc, FIFO_BUF);
-      this.pfd = ContiguousBuffer<u8>(alloc, 8);
+      this.reply = File();
+      this.reply_open = false;
     }
   }
 
@@ -95,8 +123,14 @@ public module namo {
   // Terminal
   // ------------------------------------------------------------------------
 
-  // Absolute positioning to the last row. A newline would scroll the screen
-  // when the prompt sits at the bottom, invalidating the saved cursor.
+  // One row below the cursor -- the row the prompt hook reserves, so this is
+  // the row under the line being typed, wherever on the screen that is.
+  //
+  // It used to be the last row of the screen (ESC[999;1H), which is the line
+  // being typed into as soon as the prompt reaches the bottom of the screen,
+  // which is most of the time. Relative positioning cannot do that, and it
+  // still emits no newline: a newline at the bottom would scroll the screen
+  // and leave the saved cursor pointing a row too low.
   function paint(alloc: ref HeapAllocator, st: ref Live, row: ref String) void {
     if (st.screen.equals(row)) {
       return;
@@ -105,7 +139,8 @@ public module namo {
     esc.append_char(27);
     esc.append("7");
     esc.append_char(27);
-    esc.append("[999;1H");
+    esc.append("[1B");
+    esc.append_char(13);
     esc.append_char(27);
     esc.append("[2K");
     if (row.length() > 0) {
@@ -117,7 +152,7 @@ public module namo {
     }
     esc.append_char(27);
     esc.append("8");
-    write_str(alloc, st.ttyfd, esc);
+    var written: i64 = st.tty.write(esc);
     st.screen = row.clone(alloc);
   }
 
@@ -167,52 +202,12 @@ public module namo {
   // context the model sees does not depend on directory order.
   public function list_dir(alloc: ref HeapAllocator, path: ref String, limit: i64) String {
     var out = String(alloc, "");
-    var flags: i32 = O_RDONLY | O_DIRECTORY;
-    var fd: i32 = open_path(alloc, path, flags, 0);
-    if (fd < 0) {
+    var names = Vec<DirEntry>(alloc, 8);
+    try {
+      names = read_dir(alloc, path.c_str());
+    } catch (e: IError) {
       return out;
     }
-
-    var names = Vec<String>(alloc, 64);
-    var buf = ContiguousBuffer<u8>(alloc, DENTS_BUF);
-    var reading: bool = true;
-    while (reading) {
-      var n: i64 = unsafe { getdents64(fd, buf.rawData(), DENTS_BUF); };
-      if (n <= 0) {
-        reading = false;
-      } else {
-        var off: i64 = 0;
-        while (off < n) {
-          // struct linux_dirent64: d_reclen is the little-endian u16 at offset
-          // 16, d_name the NUL-terminated bytes from offset 19.
-          var lo: i64 = buf.get_unchecked(off + 16);
-          var hi: i64 = buf.get_unchecked(off + 17);
-          var reclen: i64 = lo + hi * 256;
-          if (reclen <= 0) {
-            off = n;
-          } else {
-            var name = String(alloc, "");
-            var i: i64 = off + 19;
-            while (i < n and buf.get_unchecked(i) != 0) {
-              name.append_char(buf.get_unchecked(i));
-              i = i + 1;
-            }
-            var keep: bool = name.length() > 0;
-            if (name.equals_literal(".") or name.equals_literal("..")) {
-              keep = false;
-            }
-            if (names.size() >= 4096) {
-              keep = false;
-            }
-            if (keep) {
-              names.push(name);
-            }
-            off = off + reclen;
-          }
-        }
-      }
-    }
-    close_fd(fd);
 
     var want: i64 = names.size();
     if (limit > 0 and want > limit) {
@@ -234,8 +229,8 @@ public module namo {
           if (best < 0) {
             best = j;
           } else {
-            var cand = names.get_unchecked(j).clone(alloc);
-            var held = names.get_unchecked(best).clone(alloc);
+            var cand = names.get_unchecked(j).name();
+            var held = names.get_unchecked(best).name();
             if (cand.compare(held) < 0) {
               best = j;
             }
@@ -252,7 +247,7 @@ public module namo {
           if (out.length() > 0) {
             out.append(" ");
           }
-          out.append(names.get_unchecked(best));
+          out.append(names.get_unchecked(best).name());
         }
       }
     }
@@ -295,12 +290,47 @@ public module namo {
     return out;
   }
 
-  function arm_poll(st: ref Live) void {
-    unsafe { _store<i32>(st.pfd.rawData(), 0, st.fifofd); };
-    st.pfd.set_unchecked(4, POLLIN);
-    st.pfd.set_unchecked(5, 0);
-    st.pfd.set_unchecked(6, 0);
-    st.pfd.set_unchecked(7, 0);
+  function rec_mark(alloc: ref HeapAllocator, rec: ref String, mark: u8) bool {
+    var line = rec_line(alloc, rec);
+    if (line.length() == 0) {
+      return false;
+    }
+    return line.at(0) == mark;
+  }
+
+  function rec_is_sync(alloc: ref HeapAllocator, rec: ref String) bool {
+    return rec_mark(alloc, rec, SYNC_MARK);
+  }
+
+  function rec_is_dym(alloc: ref HeapAllocator, rec: ref String) bool {
+    var line = rec_line(alloc, rec);
+    if (line.length() == 0) {
+      return false;
+    }
+    return line.at(0) == DYM_MARK;
+  }
+
+  // 1 when the FIFO has bytes, 0 on timeout, -1 once the write end is gone.
+  function fifo_ready(st: ref Live, timeout_ms: i32) i32 {
+    st.poller.clear();
+    st.poller.add_read(st.fifo.get_fd());
+    var ready: i32 = 0;
+    try {
+      ready = st.poller.wait(timeout_ms);
+    } catch (e: IError) {
+      // A signal cutting the wait short is not end-of-input; report it as a
+      // timeout and let the caller decide. A wait that keeps failing ends the
+      // daemon anyway, through the blocking call at the top of live_loop.
+      return 0;
+    }
+    if (ready <= 0) {
+      return 0;
+    }
+    if (st.poller.is_readable(0)) {
+      return 1;
+    }
+    // POLLHUP or POLLERR without POLLIN: nothing more is coming.
+    return -1;
   }
 
   function take_record(alloc: ref HeapAllocator, st: ref Live, out: ref String) bool {
@@ -326,24 +356,21 @@ public module namo {
 
   // One record, or REC_TIMEOUT after `timeout_ms` (negative blocks forever),
   // or REC_EOF once the shell that owns the write end is gone.
-  function next_record(alloc: ref HeapAllocator, st: ref Live, timeout_ms: i64, out: ref String) i32 {
+  function next_record(alloc: ref HeapAllocator, st: ref Live, timeout_ms: i32, out: ref String) i32 {
     var tries: i64 = 0;
     while (tries < 64) {
       tries = tries + 1;
       if (take_record(alloc, st, out)) {
         return REC_OK;
       }
-      arm_poll(st);
-      var pr: i32 = unsafe { poll(st.pfd.rawData(), 1, timeout_ms); };
-      if (pr <= 0) {
+      var pr: i32 = fifo_ready(st, timeout_ms);
+      if (pr == 0) {
         return REC_TIMEOUT;
       }
-      var rev: u8 = st.pfd.get_unchecked(6);
-      // POLLHUP or POLLERR without POLLIN: nothing more is coming.
-      if ((rev & POLLIN) == 0) {
+      if (pr < 0) {
         return REC_EOF;
       }
-      var n: i64 = read_chunk(st.fifofd, st.chunk, FIFO_BUF);
+      var n: i64 = st.fifo.read_into(st.chunk.rawData(), FIFO_BUF);
       if (n <= 0) {
         return REC_EOF;
       }
@@ -358,9 +385,7 @@ public module namo {
     if (st.pending.contains_char(CH_NL)) {
       return true;
     }
-    arm_poll(st);
-    var pr: i32 = unsafe { poll(st.pfd.rawData(), 1, 0); };
-    return pr > 0;
+    return fifo_ready(st, 0) != 0;
   }
 
   // ------------------------------------------------------------------------
@@ -456,6 +481,170 @@ public module namo {
     render(alloc, cfg, st, line);
   }
 
+  // bash could not find the command, and the shell has already printed its
+  // own message and handed the prompt back -- the whole point of doing this
+  // here is that nobody is waiting for it. Paid immediately rather than
+  // debounced: the line is finished, there is no next keystroke to wait for.
+  function serve_dym(alloc: ref HeapAllocator, cfg: ref Config, st: ref Live, rec: ref String) void {
+    var marked = rec_line(alloc, rec);
+    var typed = String(alloc, "");
+    for (var i: i64 = 1; i < marked.length(); i = i + 1) {
+      typed.append_char(marked.at(i));
+    }
+    typed.trim();
+    if (typed.length() == 0) {
+      return;
+    }
+
+    var cwd = rec_cwd(alloc, rec);
+    cfg.set_query_target(alloc, "dym", typed, cwd);
+
+    // The gap between live calls exists to bound what a burst of typing can
+    // spend. One correction per command bash could not find is not a burst.
+    var saved_gap: i64 = cfg.min_gap;
+    cfg.min_gap = 0;
+
+    var key = cache_key(alloc, cfg);
+    var hit = cache_lookup(alloc, cfg, key);
+    if (hit.size() == 0) {
+      hit = live_call(alloc, cfg, key);
+    }
+
+    cfg.min_gap = saved_gap;
+    cfg.clear_query_target(alloc);
+
+    if (hit.size() == 0) {
+      return;
+    }
+    // Two rules, both the same rule: this row belongs to the command that
+    // failed, and to nothing else. Keystrokes queued while the answer was in
+    // flight mean the user is already typing the next line, and a row that is
+    // not empty means a hint for that line is up. Either way the answer is
+    // stale before it is drawn -- it stays in the cache, where the same typo
+    // will find it, and the row is left alone.
+    if (input_waiting(st)) {
+      return;
+    }
+    if (st.screen.length() > 0) {
+      return;
+    }
+
+    var row = String(alloc, "");
+    row.append(cfg.dym_prefix);
+    row.append(hit.get_unchecked(0));
+    paint(alloc, st, row);
+  }
+
+  // Every wait below can be the one a correction or a key press lands in --
+  // both are posted while the daemon is anywhere in its cycle -- and neither
+  // is a line being typed. So they are served here, and the caller only ever
+  // sees records that are.
+  function next_line_record(alloc: ref HeapAllocator, cfg: ref Config, st: ref Live, timeout_ms: i32, out: ref String) i32 {
+    var r: i32 = next_record(alloc, st, timeout_ms, out);
+    var more: bool = true;
+    while (r == REC_OK and more) {
+      if (rec_is_dym(alloc, out)) {
+        serve_dym(alloc, cfg, st, out);
+        r = next_record(alloc, st, timeout_ms, out);
+      } else if (rec_is_sync(alloc, out)) {
+        serve_sync(alloc, cfg, st, out);
+        r = next_record(alloc, st, timeout_ms, out);
+      } else {
+        more = false;
+      }
+    }
+    return r;
+  }
+
+  // The shell is inside `read -t`, so an answer always goes back -- even an
+  // empty one. A request that got no reply at all would leave it there until
+  // the timeout, for nothing.
+  function reply_send(alloc: ref HeapAllocator, cfg: ref Config, st: ref Live, id: ref String, items: ref Vec<String>) void {
+    if (cfg.reply.length() == 0) {
+      return;
+    }
+    if (st.reply_open == false) {
+      try {
+        st.reply.open(cfg.reply.c_str(), FileMode.Write);
+      } catch (e: IError) {
+        return;
+      }
+      st.reply_open = true;
+    }
+
+    var msg = String(alloc, "");
+    msg.append(id);
+    msg.append_char(CH_TAB);
+    msg.append(items.size());
+    msg.append_char(CH_NL);
+    for (var i: i64 = 0; i < items.size(); i = i + 1) {
+      msg.append(id);
+      msg.append_char(CH_TAB);
+      msg.append(items.get_unchecked(i));
+      msg.append_char(CH_NL);
+    }
+    var written: i64 = st.reply.write(msg);
+  }
+
+  // A request the shell is blocked on: Alt-O, Alt-A or Alt-G. The shell has
+  // nothing to do but wait, so this is paid immediately and never debounced,
+  // and the answer goes straight back down the reply FIFO. The hint row is
+  // not touched: the shell owns what happens to the line it asked about.
+  function serve_sync(alloc: ref HeapAllocator, cfg: ref Config, st: ref Live, rec: ref String) void {
+    var marked = rec_line(alloc, rec);
+    var body = String(alloc, "");
+    for (var i: i64 = 1; i < marked.length(); i = i + 1) {
+      body.append_char(marked.at(i));
+    }
+
+    // <id> TAB <mode> TAB <line>. The line is whatever is left, tabs and all.
+    var fields = body.split(alloc, CH_TAB);
+    if (fields.size() < 3) {
+      return;
+    }
+    var id = fields.get_unchecked(0).clone(alloc);
+    var mode = fields.get_unchecked(1).clone(alloc);
+    var subject = String(alloc, "");
+    for (var f: i64 = 2; f < fields.size(); f = f + 1) {
+      if (f > 2) {
+        subject.append_char(CH_TAB);
+      }
+      subject.append(fields.get_unchecked(f));
+    }
+
+    var out = Vec<String>(alloc, 4);
+    var trimmed = subject.clone(alloc);
+    trimmed.trim();
+    // The same floor the one-shot run applies: two characters is not enough
+    // to be worth a round trip.
+    if (trimmed.length() >= 3) {
+      var cwd = rec_cwd(alloc, rec);
+      if (mode.equals_literal("a")) {
+        cfg.set_query_target(alloc, "ask", subject, cwd);
+      } else {
+        cfg.set_query_target(alloc, "complete", subject, cwd);
+        cfg.line = subject.clone(alloc);
+      }
+
+      // A key press is one request, not a burst; the gap that bounds what
+      // typing can spend does not apply to it.
+      var saved_gap: i64 = cfg.min_gap;
+      cfg.min_gap = 0;
+
+      var key = cache_key(alloc, cfg);
+      out = cache_lookup(alloc, cfg, key);
+      if (out.size() == 0) {
+        out = live_call(alloc, cfg, key);
+      }
+
+      cfg.min_gap = saved_gap;
+      cfg.clear_query_target(alloc);
+      cfg.line = String(alloc, "");
+    }
+
+    reply_send(alloc, cfg, st, id, out);
+  }
+
   // ------------------------------------------------------------------------
   // The loop
   // ------------------------------------------------------------------------
@@ -466,12 +655,12 @@ public module namo {
   function live_loop(alloc: ref HeapAllocator, cfg: ref Config, st: ref Live) i32 {
     var cur = String(alloc, "");
     var msg = String(alloc, "");
-    var quiet_ms: i64 = cfg.quiet_ms;
-    var debounce_ms: i64 = cfg.debounce_ms;
+    var quiet_ms: i32 = _convert<i32>(cfg.quiet_ms);
+    var debounce_ms: i32 = _convert<i32>(cfg.debounce_ms);
 
     var running: bool = true;
     while (running) {
-      if (next_record(alloc, st, -1, cur) != REC_OK) {
+      if (next_line_record(alloc, cfg, st, -1, cur) != REC_OK) {
         running = false;
       } else {
         render(alloc, cfg, st, rec_line(alloc, cur));
@@ -479,7 +668,7 @@ public module namo {
         // Coalesce the burst: mid-word keystrokes are not worth a lookup each.
         var settled: bool = false;
         while (settled == false) {
-          var q: i32 = next_record(alloc, st, quiet_ms, msg);
+          var q: i32 = next_line_record(alloc, cfg, st, quiet_ms, msg);
           if (q == REC_OK) {
             cur.clear();
             cur.append(msg);
@@ -497,7 +686,7 @@ public module namo {
 
           var idle: bool = false;
           while (idle == false and running) {
-            var d: i32 = next_record(alloc, st, debounce_ms, msg);
+            var d: i32 = next_line_record(alloc, cfg, st, debounce_ms, msg);
             if (d == REC_TIMEOUT) {
               idle = true;
             } else {
@@ -510,7 +699,7 @@ public module namo {
 
                 var quiet2: bool = false;
                 while (quiet2 == false) {
-                  var r: i32 = next_record(alloc, st, quiet_ms, msg);
+                  var r: i32 = next_line_record(alloc, cfg, st, quiet_ms, msg);
                   if (r == REC_OK) {
                     cur.clear();
                     cur.append(msg);
@@ -544,17 +733,35 @@ public module namo {
 
   // So the shell can tell at the next prompt whether we are still here,
   // without a fork: `read -r pid < file` and `kill -0` are both builtins.
-  function write_pid(alloc: ref HeapAllocator, cfg: ref Config, pid: i32) void {
+  function write_pid(alloc: ref HeapAllocator, cfg: ref Config, child: i32) void {
     if (cfg.pidfile.length() == 0) {
       return;
     }
     var s = String(alloc, "");
-    s.append(pid);
+    s.append(child);
     s.append("\n");
     try {
-      write_file(alloc, cfg.pidfile, s, MODE_0600);
+      write_file(alloc, cfg.pidfile, s);
     } catch (e: IError) {
       // Without the pid file the shell simply never respawns us.
+    }
+  }
+
+  // Point our own stdin, stdout and stderr at /dev/null. The inherited ones
+  // are the user's terminal, where a stray byte would land in the middle of
+  // the line being typed.
+  function silence_std_streams() void {
+    var sink = File();
+    try {
+      sink.open("/dev/null", FileMode.Read);
+      dup_fd(sink.get_fd(), 0);
+      sink.close();
+      sink.open("/dev/null", FileMode.Write);
+      dup_fd(sink.get_fd(), 1);
+      dup_fd(sink.get_fd(), 2);
+      sink.close();
+    } catch (e: IError) {
+      // Nothing useful to say, and nowhere left to say it.
     }
   }
 
@@ -563,25 +770,31 @@ public module namo {
       return 0;
     }
 
-    var pid: i32 = unsafe { fork(); };
-    if (pid < 0) {
+    var child: i32 = 0;
+    try {
+      child = fork();
+    } catch (e: IError) {
       return 1;
     }
-    if (pid > 0) {
+    if (child > 0) {
       // The shell called us synchronously; hand it back its prompt at once.
       // The pid goes down here rather than in the child, so that it is already
       // on disk when this returns: the shell checks it at the next prompt, and
       // a check that lost the race would spawn a second daemon onto the same
       // FIFO and the two would split the records between them.
-      write_pid(alloc, cfg, pid);
+      write_pid(alloc, cfg, child);
       return 0;
     }
 
     // Our own process group. Terminal-generated signals go to the foreground
-    // group, and Ctrl-C must not take the hint row with it. setsid() would do
-    // that too, but it also drops the controlling terminal -- and /dev/tty is
-    // the one thing we cannot do without.
-    unsafe { setpgid(0, 0); };
+    // group, and Ctrl-C must not take the hint row with it. new_session() would
+    // do that too, but it also drops the controlling terminal -- and /dev/tty
+    // is the one thing we cannot do without.
+    try {
+      set_pgid(0, 0);
+    } catch (e: IError) {
+      // Already a group leader, or the shell moved us; neither is fatal.
+    }
 
     // Everything the shell had open came with us through fork+exec, and one of
     // those descriptors is the *write* end of our own FIFO: the shell opens it
@@ -589,40 +802,30 @@ public module namo {
     // it would mean the FIFO always has a writer, so the read below would never
     // reach end-of-file and this process would outlive the shell it draws for.
     // Nothing inherited is of any use to us, so drop all of it.
-    for (var fd: i32 = 3; fd < 256; fd = fd + 1) {
+    for (var fd: i32 = 3; fd < MAX_INHERITED_FD; fd = fd + 1) {
       close_fd(fd);
     }
-
-    // The inherited descriptors point at the user's terminal, where a stray
-    // byte would land in the middle of the line being typed.
-    var devnull = String(alloc, "/dev/null");
-    var nullfd: i32 = open_path(alloc, devnull, O_RDWR, 0);
-    if (nullfd >= 0) {
-      unsafe { dup2(nullfd, 0); };
-      unsafe { dup2(nullfd, 1); };
-      unsafe { dup2(nullfd, 2); };
-      if (nullfd > 2) {
-        close_fd(nullfd);
-      }
-    }
+    silence_std_streams();
 
     var st = Live(alloc);
-    st.ttyfd = open_path(alloc, cfg.tty_path, O_WRONLY | O_CREAT, MODE_0600);
-    if (st.ttyfd < 0) {
+    try {
+      st.tty.open(cfg.tty_path.c_str(), FileMode.Write);
+    } catch (e: IError) {
       return 0;
     }
     // Read-only, so that when the shell closes its end we see end-of-file and
     // stop rather than outliving the shell we were drawing for.
-    st.fifofd = open_path(alloc, cfg.fifo, O_RDONLY, 0);
-    if (st.fifofd < 0) {
-      close_fd(st.ttyfd);
+    try {
+      st.fifo.open(cfg.fifo.c_str(), FileMode.Read);
+    } catch (e: IError) {
+      st.tty.close();
       return 0;
     }
 
     var rc = live_loop(alloc, cfg, st);
     clear_row(alloc, st);
-    close_fd(st.fifofd);
-    close_fd(st.ttyfd);
+    st.fifo.close();
+    st.tty.close();
     if (cfg.pidfile.length() > 0) {
       remove_path(alloc, cfg.pidfile);
     }

@@ -1,60 +1,16 @@
 // redact.sun - decide what leaves the machine.
 //
-// The interactive path (Alt-O / Alt-A / Alt-G) hands us both sections on
-// stdin, separated by a sentinel line: recent history first, then a directory
-// listing. The live daemon reads the same history out of the snapshot file the
-// shell refreshes at each prompt and enumerates the directory itself, so it
-// calls parse_history directly.
+// Both callers now hand history in the same shape: the interactive path
+// (Alt-O / Alt-A / Alt-G) pipes `fc -ln` on stdin, the live daemon reads the
+// snapshot file the shell refreshes at each prompt. The directory listing is
+// no longer part of that stream -- the binary enumerates the directory itself
+// (see list_dir in live.sun).
 //
-// Either way the redaction below is the only thing between the shell history
-// and the network, so it is applied in one place for both callers.
+// This is the only thing between the shell history and the network, so it is
+// applied in one place for both callers.
 
 public module namo {
   using sun;
-
-  public var LS_SENTINEL: static_ptr<u8> = "%%NAMO_LS%%";
-
-  public class Stdin {
-    public var history: Vec<String>;
-    public var listing: String;
-
-    public function init(alloc: ref HeapAllocator) {
-      this.history = Vec<String>(alloc, 8);
-      this.listing = String(alloc, "");
-    }
-  }
-
-  // Split stdin into (history, listing), dropping history lines that look
-  // like they carry a credential, and keeping only the last `keep` entries.
-  public function parse_stdin(alloc: ref HeapAllocator, raw: ref String, keep: i64, want_ls: bool) Stdin {
-    var out = Stdin(alloc);
-    var lines = split_lines(alloc, raw);
-
-    var in_ls: bool = false;
-    var hist_raw = String(alloc, "");
-
-    for (var i: i64 = 0; i < lines.size(); i = i + 1) {
-      var line = lines.get_unchecked(i);
-      if (line.equals_literal(LS_SENTINEL)) {
-        in_ls = true;
-      } else {
-        if (in_ls) {
-          if (want_ls and out.listing.length() < 512) {
-            if (out.listing.length() > 0) {
-              out.listing.append(" ");
-            }
-            out.listing.append(line);
-          }
-        } else {
-          hist_raw.append(line);
-          hist_raw.append("\n");
-        }
-      }
-    }
-    out.history = parse_history(alloc, hist_raw, keep);
-
-    return out;
-  }
 
   // History lines carrying a known credential prefix are dropped entirely
   // rather than partially masked; the rest is trimmed to the most recent
@@ -82,27 +38,5 @@ public module namo {
       out.push(hist.get_unchecked(j).clone(alloc));
     }
     return out;
-  }
-
-  // Commands worth a second look before the user presses Enter.
-  public function is_dangerous(alloc: ref HeapAllocator, cmd: ref String) bool {
-    var low = cmd.clone(alloc);
-    low.to_lower();
-    if (low.contains("rm -rf") or low.contains("rm -fr")) {
-      return true;
-    }
-    if (low.contains("mkfs") or low.contains("dd if=")) {
-      return true;
-    }
-    if (low.contains("> /dev/") or low.contains("chmod -r 777")) {
-      return true;
-    }
-    if (low.contains("| sh") or low.contains("| bash")) {
-      return true;
-    }
-    if (low.starts_with("sudo ")) {
-      return true;
-    }
-    return false;
   }
 }

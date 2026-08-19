@@ -12,7 +12,6 @@ ARG USER_UID=1000
 ARG USER_GID=1000
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV SUN_PATH=/usr/lib/sun
 
 # Runtime + build tooling. `curl` is a hard runtime dependency of
 # namo_complete itself (Sun has no TLS, so HTTPS goes through curl).
@@ -33,11 +32,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgcc-s1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Sun toolchain (~152 MB .deb).
-RUN curl -fsSL -o /tmp/sun.deb "${SUN_DEB_URL}" \
+# Sun toolchain (~152 MB .deb), installed the way the docs prescribe:
+# `apt install ./sun_0.dev_amd64.deb`, not `dpkg -i`. The package declares
+# `gcc | clang`, `libc6-dev | libc-dev` and `g++ | libstdc++-dev` -- `sun -c`
+# links through the system C compiler -- and apt resolves those, where dpkg
+# would install unconfigured and leave them to a repair step.
+RUN curl -fsSL -o /tmp/sun_0.dev_amd64.deb "${SUN_DEB_URL}" \
     && apt-get update \
-    && (dpkg -i /tmp/sun.deb || apt-get install -y -f --no-install-recommends) \
-    && rm -f /tmp/sun.deb \
+    && apt-get install -y --no-install-recommends /tmp/sun_0.dev_amd64.deb \
+    && rm -f /tmp/sun_0.dev_amd64.deb \
     && rm -rf /var/lib/apt/lists/* \
     && sun --version
 

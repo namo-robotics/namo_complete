@@ -18,7 +18,6 @@
   // Pass the API key through without baking it into the image.
   "containerEnv": {
     "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
-    "SUN_PATH": "/usr/lib/sun",
 
     // Pulls ~/.claude.json (account + onboarding state) inside ~/.claude, so
     // the single volume below covers it too. Without this it sits beside the
@@ -59,7 +58,8 @@
     "vscode": {
       "extensions": [
         "anthropic.claude-code",
-        "timonwong.shellcheck"
+        "timonwong.shellcheck",
+        "namo-robotics.sun-language"
       ],
       "settings": {
         "terminal.integrated.defaultProfile.linux": "bash",

@@ -1,7 +1,7 @@
 // util.sun - the few string helpers the stdlib still does not provide.
 //
 // Everything else (trim, to_lower, contains, split, clone, append_hex) now
-// lives on sun.String; see SUN_FEEDBACK.md §10.
+// lives on sun.String; see SUN_FEEDBACK.md §7.
 
 public module namo {
   using sun;

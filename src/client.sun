@@ -1,13 +1,18 @@
 // client.sun - HTTPS via the curl binary.
 //
-// Sun's stdlib has TCP but no TLS, so the request goes out through curl. The
-// safety property that matters: we chdir() into the runtime directory first,
-// so the command string is a compile-time constant made only of relative
-// literal paths. No user-controlled byte ever reaches /bin/sh. The API key
-// travels in a mode-0600 curl config file, so it never appears in `ps`.
+// Sun's stdlib has TCP but no TLS, so the request goes out through curl. It is
+// run with sun.process.Command, which execs curl directly: there is no shell,
+// so no command string to quote and nothing user-controlled to escape.
+//
+// The API key is the one argument that must not be visible: argv shows up in
+// `ps`, so the key goes down curl's stdin as a one-line config file (`-K -`)
+// and never touches the disk or the process table. Everything else -- the URL,
+// the fixed headers, the path of the request body -- rides in argv, where the
+// kernel keeps the arguments apart and no quoting rules apply.
 
 public module namo {
   using sun;
+  using sun.process;
 
   public class Reply {
     public var suggestions: Vec<String>;
@@ -19,70 +24,89 @@ public module namo {
     }
   }
 
+  // curl's config format is line-based and understands backslash escapes
+  // inside a quoted value, so a key carrying a newline or a quote could add
+  // directives of its own. Keys never contain either; one that does is
+  // rejected rather than escaped.
+  function usable_key(key: ref String) bool {
+    if (key.length() == 0) {
+      return false;
+    }
+    for (var i: i64 = 0; i < key.length(); i = i + 1) {
+      var c: u8 = key.at(i);
+      if (c < 32 or c == 34 or c == 92 or c == 127) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // The whole of curl's stdin: the header that must stay out of `ps`.
   function build_conf(alloc: ref HeapAllocator, cfg: ref Config) String {
-    var conf = String(alloc, "url = \"");
-    conf.append(cfg.endpoint);
-    conf.append("\"\n");
-    conf.append("header = \"x-api-key: ");
+    var conf = String(alloc, "header = \"x-api-key: ");
     conf.append(cfg.api_key);
     conf.append("\"\n");
-    conf.append("header = \"anthropic-version: 2023-06-01\"\n");
-    conf.append("header = \"content-type: application/json\"\n");
-    conf.append("data-binary = \"@body.json\"\n");
-    conf.append("output = \"resp.json\"\n");
-    conf.append("write-out = \"%{http_code}\"\n");
-    conf.append("max-time = 8\n");
-    conf.append("silent\n");
-    conf.append("show-error\n");
     return conf;
   }
 
   public function call_api(alloc: ref HeapAllocator, cfg: ref Config, body: ref String) Reply, IError {
     var reply = Reply(alloc);
 
-    ensure_dir(alloc, cfg.runtime_dir);
-    if (change_dir(alloc, cfg.runtime_dir) != 0) {
-      throw Error(-1, "cannot enter runtime directory");
-    }
-
-    // From here on every path is a relative literal.
-    var p_body = String(alloc, "./body.json");
-    var p_conf = String(alloc, "./req.conf");
-    var p_resp = String(alloc, "./resp.json");
-    var p_err = String(alloc, "./curl.err");
-
-    write_file(alloc, p_body, body, MODE_0600);
-
-    var conf = build_conf(alloc, cfg);
-    write_file_private(alloc, p_conf, conf);
-
-    var rc: i32 = run_curl();
-
-    // The key is on disk only for the duration of the call.
-    remove_path(alloc, p_conf);
-
-    if (rc != 0) {
-      var errtxt = String(alloc, "");
-      try {
-        errtxt = read_file(alloc, p_err);
-      } catch (e: IError) {
-        errtxt = String(alloc, "curl failed");
-      }
-      var m = String(alloc, "[namo] curl exit ");
-      m.append(rc);
-      m.append(": ");
-      m.append(errtxt);
-      m.append("\n");
-      eprint(alloc, m);
+    if (usable_key(cfg.api_key) == false) {
+      eprint("[namo] ANTHROPIC_API_KEY is not a usable header value\n");
       reply.failed = true;
       return reply;
     }
 
-    var raw = read_file(alloc, p_resp);
-    remove_path(alloc, p_resp);
+    // One request body per process, so a live daemon and an Alt-O run in the
+    // same shell cannot overwrite each other's file.
+    ensure_dir_p(alloc, cfg.runtime_dir);
+    var p_body = cfg.rt_path(alloc, "body.");
+    p_body.append(pid());
+    p_body.append(".json");
+    write_file(alloc, p_body, body);
+
+    var data_arg = String(alloc, "@");
+    data_arg.append(p_body);
+
+    var cmd = Command(alloc, "curl");
+    cmd.arg("-sS");
+    cmd.arg("--max-time");
+    cmd.arg("8");
+    cmd.arg("-K");
+    cmd.arg("-");
+    cmd.arg("-H");
+    cmd.arg("anthropic-version: 2023-06-01");
+    cmd.arg("-H");
+    cmd.arg("content-type: application/json");
+    cmd.arg("--data-binary");
+    cmd.arg(data_arg);
+    cmd.arg(cfg.endpoint);
+    cmd.stdin(Stdio.Piped);
+    cmd.stdout(Stdio.Piped);
+    cmd.stderr(Stdio.Piped);
+
+    var child = cmd.start();
+    var conf = build_conf(alloc, cfg);
+    child.write_stdin(conf);
+    child.close_stdin();
+    // Drains both pipes while curl runs, so a large response cannot wedge it.
+    var result = child.collect(alloc);
+
     remove_path(alloc, p_body);
 
-    parse_reply(alloc, cfg, raw, reply);
+    if (result.status() != 0) {
+      var m = String(alloc, "[namo] curl exit ");
+      m.append(result.status());
+      m.append(": ");
+      m.append(result.stderr());
+      m.append("\n");
+      eprint(m);
+      reply.failed = true;
+      return reply;
+    }
+
+    parse_reply(alloc, cfg, result.stdout(), reply);
     return reply;
   }
 
@@ -96,7 +120,7 @@ public module namo {
         var m = String(alloc, "[namo] api error: ");
         m.append(msg);
         m.append("\n");
-        eprint(alloc, m);
+        eprint(m);
         reply.failed = true;
         return;
       }
@@ -132,7 +156,7 @@ public module namo {
         }
       }
     } catch (e: IError) {
-      eprint_lit(alloc, "[namo] could not parse api response\n");
+      eprint("[namo] could not parse api response\n");
       reply.failed = true;
     }
   }

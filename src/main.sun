@@ -1,9 +1,9 @@
 // namo_complete - LLM-powered bash command completion.
 //
-// Reads the partial command line from the environment and recent history plus
-// a directory listing from stdin, asks Claude for completions, and writes the
-// candidates to stdout one per line. Bash puts the chosen line into the
-// readline buffer; nothing here ever executes a command.
+// Reads the partial command line from the environment and the recent history
+// from stdin, lists the working directory itself, asks Claude for completions,
+// and writes the candidates to stdout one per line. Bash puts the chosen line
+// into the readline buffer; nothing here ever executes a command.
 //
 // Any failure is silent on stdout so the shell prompt degrades gracefully.
 
@@ -34,7 +34,7 @@ function main() i32 {
   // assigning it: `var subject = cfg.query` would move the String out of the
   // Config object, leaving the field empty for build_context later.
   var prefix = String(alloc, "");
-  if (cfg.is_ask()) {
+  if (cfg.from_query()) {
     prefix = cfg.query.clone(alloc);
   } else {
     prefix = cfg.line.clone(alloc);
@@ -60,7 +60,7 @@ function main() i32 {
   }
 
   if (cfg.api_key.length() == 0) {
-    eprint_lit(alloc, "[namo] ANTHROPIC_API_KEY is not set\n");
+    eprint("[namo] ANTHROPIC_API_KEY is not set\n");
     return 1;
   }
 
@@ -68,19 +68,26 @@ function main() i32 {
     return 0;
   }
 
-  // History and directory listing arrive on stdin -- bash gathers both, which
-  // keeps a user-controlled path out of every command string we build.
+  // History arrives on stdin: `fc` is a shell builtin, so the shell is the
+  // only thing that can read its own history. The directory listing is ours
+  // to take -- same code the live daemon uses, so both paths send the same
+  // context for the same directory.
   var raw_stdin = read_fd(alloc, 0);
-  var input = parse_stdin(alloc, raw_stdin, cfg.history_lines, cfg.send_ls);
+  var history = parse_history(alloc, raw_stdin, cfg.history_lines);
 
-  var context = build_context(alloc, cfg, input.history, input.listing);
+  var listing = String(alloc, "");
+  if (cfg.send_ls) {
+    listing = list_dir(alloc, cfg.cwd, cfg.ls_limit);
+  }
+
+  var context = build_context(alloc, cfg, history, listing);
   var body = build_body(alloc, cfg, context);
 
   var reply = Reply(alloc);
   try {
     reply = call_api(alloc, cfg, body);
   } catch (e: IError) {
-    eprint_lit(alloc, "[namo] request failed\n");
+    eprint("[namo] request failed\n");
     return 1;
   }
 
@@ -98,10 +105,8 @@ function main() i32 {
 
 manifest {
     suns: [
-        "cstr.sun",
         "util.sun",
         "fs.sun",
-        "sysexec.sun",
         "config.sun",
         "prompt.sun",
         "redact.sun",

@@ -6,6 +6,8 @@
 
 public module namo {
   using sun;
+  using sun.env;
+  using sun.process;
 
   public class Config {
     public var line: String;
@@ -32,21 +34,23 @@ public module namo {
     // shell integration", which is the normal state for a one-shot run.
     public var daemon: bool;
     public var fifo: String;
+    public var reply: String;
     public var histfile: String;
     public var pidfile: String;
     public var tty_path: String;
     public var hint_prefix: String;
     public var hint_suffix: String;
+    public var dym_prefix: String;
     public var debounce_ms: i64;
     public var quiet_ms: i64;
 
     public function init(alloc: ref HeapAllocator) {
-      this.line = env(alloc, "NAMO_LINE");
-      this.query = env(alloc, "NAMO_QUERY");
+      this.line = env_str(alloc, "NAMO_LINE");
+      this.query = env_str(alloc, "NAMO_QUERY");
       this.mode = env_or(alloc, "NAMO_MODE", "complete");
       this.cwd = env_or(alloc, "NAMO_CWD", ".");
       this.model = env_or(alloc, "NAMO_MODEL", "claude-haiku-4-5");
-      this.api_key = env(alloc, "ANTHROPIC_API_KEY");
+      this.api_key = env_str(alloc, "ANTHROPIC_API_KEY");
       this.endpoint = env_or(
         alloc,
         "NAMO_ENDPOINT",
@@ -65,20 +69,25 @@ public module namo {
       this.cache_only = env_int(alloc, "NAMO_CACHE_ONLY", 0) != 0;
 
       this.daemon = env_int(alloc, "NAMO_DAEMON", 0) != 0;
-      this.fifo = env(alloc, "NAMO_FIFO");
-      this.histfile = env(alloc, "NAMO_HISTFILE");
-      this.pidfile = env(alloc, "NAMO_PIDFILE");
+      this.fifo = env_str(alloc, "NAMO_FIFO");
+      // Where answers to the shell's own requests go back. See live.sun.
+      this.reply = env_str(alloc, "NAMO_REPLY");
+      this.histfile = env_str(alloc, "NAMO_HISTFILE");
+      this.pidfile = env_str(alloc, "NAMO_PIDFILE");
       // Overridable so the test suite can watch what would have been drawn.
       this.tty_path = env_or(alloc, "NAMO_TTY", "/dev/tty");
       this.hint_prefix = env_or(alloc, "NAMO_HINT_PREFIX", "hint: ");
       this.hint_suffix = env_or(alloc, "NAMO_HINT_SUFFIX", "  (Alt-O / Alt-A for more)");
+      // The correction row carries no suffix: Alt-O runs a completion, and
+      // offering it next to a line that is not one would be a lie.
+      this.dym_prefix = env_or(alloc, "NAMO_DYM_PREFIX", "did you mean: ");
       // Documented in seconds, used in milliseconds by poll(2).
       this.debounce_ms = env_ms(alloc, "NAMO_DEBOUNCE", 200);
       this.quiet_ms = env_ms(alloc, "NAMO_QUIET", 50);
 
       // Runtime dir holds the API key for the duration of one call, so it
       // must be user-private. XDG_RUNTIME_DIR is tmpfs mode 0700.
-      var rt = env(alloc, "XDG_RUNTIME_DIR");
+      var rt = env_str(alloc, "XDG_RUNTIME_DIR");
       if (rt.length() == 0) {
         rt = String(alloc, "/tmp/namo-");
         rt.append(uid());
@@ -87,7 +96,7 @@ public module namo {
       }
       this.runtime_dir = rt;
 
-      var cd = env(alloc, "XDG_CACHE_HOME");
+      var cd = env_str(alloc, "XDG_CACHE_HOME");
       if (cd.length() == 0) {
         cd = env_or(alloc, "HOME", "/tmp");
         cd.append("/.cache/namo_complete");
@@ -105,8 +114,34 @@ public module namo {
       this.cwd = cwd.clone(alloc);
     }
 
+    // The daemon is one long-lived process answering every kind of request,
+    // so anything that is not a keystroke borrows the config and hands it
+    // back: set_query_target before the call, clear_query_target after it, and
+    // the keystrokes that follow are served exactly as before.
+    public function set_query_target(alloc: ref HeapAllocator, mode: static_ptr<u8>, query: ref String, cwd: ref String) void {
+      this.mode = String(alloc, mode);
+      this.query = query.clone(alloc);
+      this.cwd = cwd.clone(alloc);
+    }
+
+    public function clear_query_target(alloc: ref HeapAllocator) void {
+      this.mode = String(alloc, "complete");
+      this.query = String(alloc, "");
+    }
+
     public function is_ask() bool {
       return this.mode.equals_literal("ask");
+    }
+
+    // "Did you mean": bash could not find the command, and the line the user
+    // typed arrives in NAMO_QUERY to be corrected rather than completed.
+    public function is_dym() bool {
+      return this.mode.equals_literal("dym");
+    }
+
+    // Both of the modes whose subject is NAMO_QUERY rather than NAMO_LINE.
+    public function from_query() bool {
+      return this.is_ask() or this.is_dym();
     }
 
     // Path inside the runtime dir.
@@ -119,10 +154,27 @@ public module namo {
     }
   }
 
+  // sun.env.get returns an Option; almost everything here wants "" for unset,
+  // and the two callers that do not use env_or.
+  public function env_str(alloc: ref HeapAllocator, name: raw_ptr<u8>) String {
+    return match sun.env.get(alloc, name) {
+      Option.Some(v) => v,
+      Option.None => String(alloc, "")
+    };
+  }
+
+  public function env_or(alloc: ref HeapAllocator, name: raw_ptr<u8>, fallback: static_ptr<u8>) String {
+    var v = env_str(alloc, name);
+    if (v.length() == 0) {
+      return String(alloc, fallback);
+    }
+    return v;
+  }
+
   // Seconds as a decimal ("0.2", ".05", "1") to whole milliseconds. Anything
   // that is not a plain decimal number falls back rather than half-parsing.
-  public function env_ms(alloc: ref HeapAllocator, name: static_ptr<u8>, fallback: i64) i64 {
-    var raw = env(alloc, name);
+  public function env_ms(alloc: ref HeapAllocator, name: raw_ptr<u8>, fallback: i64) i64 {
+    var raw = env_str(alloc, name);
     raw.trim();
     if (raw.length() == 0) {
       return fallback;
@@ -162,8 +214,8 @@ public module namo {
     return whole * 1000 + frac;
   }
 
-  public function env_int(alloc: ref HeapAllocator, name: static_ptr<u8>, fallback: i64) i64 {
-    var raw = env(alloc, name);
+  public function env_int(alloc: ref HeapAllocator, name: raw_ptr<u8>, fallback: i64) i64 {
+    var raw = env_str(alloc, name);
     if (raw.length() == 0) {
       return fallback;
     }
