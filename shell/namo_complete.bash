@@ -455,6 +455,17 @@ _namo_line_restore() {
   _NAMO_REPAINTED=0
   printf '\r\033[2K'
 }
+# The other way a handler can end: it printed rows (a picker, a question, a
+# confirmation), so readline's redraw lands on a fresh row at the bottom of the
+# screen -- with no empty row under it for the daemon to draw in. Reserve one,
+# exactly as the prompt hook does, or the next hint lands on the line itself.
+_namo_line_settle() {
+  if [ "$_NAMO_REPAINTED" = 1 ]; then
+    _namo_line_restore
+  else
+    _namo_reserve_hint_row
+  fi
+}
 
 # Candidates arrive as "<flag> TAB <command> TAB <description>". The daemon has
 # already pulled ask mode's two halves apart and decided whether a command is
@@ -559,17 +570,17 @@ _namo_key_request() {  # mode ("c" or "a"), show_picker
 
   if [[ "$mode" == a ]]; then
     _namo_line_repaint
-    _namo_read_question || { _namo_line_restore; return 0; }
-    [[ -z "${_NAMO_QUESTION//[[:space:]]/}" ]] && { _namo_line_restore; return 0; }
-    _namo_ask_daemon a "$_NAMO_QUESTION" || { _namo_line_restore; return 0; }
+    _namo_read_question || { _namo_line_settle; return 0; }
+    [[ -z "${_NAMO_QUESTION//[[:space:]]/}" ]] && { _namo_line_settle; return 0; }
+    _namo_ask_daemon a "$_NAMO_QUESTION" || { _namo_line_settle; return 0; }
   else
     [[ -z "${READLINE_LINE//[[:space:]]/}" ]] && return 0
     _namo_line_repaint
-    _namo_ask_daemon c "$READLINE_LINE" || { _namo_line_restore; return 0; }
+    _namo_ask_daemon c "$READLINE_LINE" || { _namo_line_settle; return 0; }
   fi
 
   _namo_pick_and_insert "$_NAMO_REPLY_OUT" "$force"
-  _namo_line_restore
+  _namo_line_settle
 }
 
 _namo_on_complete_key()     { _namo_key_request c 0; }
