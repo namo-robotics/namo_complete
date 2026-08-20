@@ -14,7 +14,7 @@
 command in plain English](assets/demo.gif)
 
 Type as usual. A moment after you pause, a dim hint appears on the row below
-your line with the command you are most likely looking for. Pres **Alt-O** to accept the hint, which puts it in your line where
+your line with the command you are most likely looking for. Press **Alt-O** to accept the hint, which puts it in your line where
 you can edit it before pressing Enter. If you mistype a command, the *command not found* line comes with a **did you mean** hint.
 Press **Alt-G** to enter **ask>** mode where you can describe the command that you want in plain english.
 
