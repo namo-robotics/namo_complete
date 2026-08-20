@@ -637,23 +637,36 @@ per=$(( ($(date +%s%N) - start) / 10000000 ))
 [ "$per" -le 15 ] && ok "cache-only lookup ${per}ms per keystroke" \
                   || bad "cache-only too slow for live use: ${per}ms"
 
-# key handlers edit the buffer correctly
+# No printable key is rebound any more: bash erases and repaints the prompt row
+# around every `bind -x` handler, which is a visible flicker on a terminal that
+# draws as the bytes arrive. The line is read off the pty instead (5d).
+printf '%s' "$binds" | grep -qE '^"[a-zA-Z0-9]": ' \
+  && bad "a printable key is still rebound: bash will repaint the row per keystroke" \
+  || ok "no printable key is rebound"
+printf '%s' "$binds" | grep -q '"\\C-?"' \
+  && bad "backspace is still rebound" || ok "backspace left to readline"
 res=$(bash -i -c '
   source shell/namo_complete.bash 2>/dev/null
-  READLINE_LINE=""; READLINE_POINT=0
-  for c in g i t " " c o; do _namo_on_printable_key "$c"; done
-  _namo_on_backspace_key
-  READLINE_POINT=3; _namo_on_printable_key "X"
-  echo "R=[$READLINE_LINE|$READLINE_POINT]"
-' 2>/dev/null | grep '^R=')
-[ "$res" = 'R=[gitX c|4]' ] && ok "live key handlers edit the buffer correctly" \
-                            || bad "live key handlers wrong (got $res)"
+  type -t _namo_on_printable_key' 2>/dev/null | tail -1)
+[ -z "$res" ] && ok "the per-keystroke handler is gone, not just unbound" \
+              || bad "_namo_on_printable_key still defined ($res)"
 
-# Live hints are the point of the tool: they must be on with no opt-in.
-printf '%s' "$binds" | grep -q '"a" "_namo_on_printable_key' \
-  && ok "live hints active on source, no opt-in" || bad "live hints not enabled by default"
-printf '%s' "$binds" | grep -q '"\\C-?" "_namo_on_backspace_key"' \
-  && ok "backspace routed through the live handler" || bad "backspace not rebound"
+# Live hints are still the point of the tool, so the one thing the shell has to
+# do for them -- mark the end of the prompt -- happens with no opt-in.
+res=$(bash -i -c '
+  source shell/namo_complete.bash 2>/dev/null
+  PS1="T\$ "; _NAMO_CAPTURE=1; _namo_ps1_sync; _namo_ps1_sync
+  printf "%q\n" "$PS1"' 2>/dev/null | tail -1)
+[ "$res" = "\$'T\$ \\\\[\\035\\\\]'" ] \
+  && ok "prompt marker appended once, inside \\[ \\]" \
+  || bad "PS1 marker wrong (got $res)"
+res=$(bash -i -c '
+  source shell/namo_complete.bash 2>/dev/null
+  PS1="T\$ "; _NAMO_CAPTURE=1; _namo_ps1_sync; _NAMO_CAPTURE=""; _namo_ps1_sync
+  printf "%q\n" "$PS1"' 2>/dev/null | tail -1)
+[ "$res" = "T\\\$\\ " ] \
+  && ok "marker taken back out when no relay is there to strip it" \
+  || bad "PS1 marker not removed (got $res)"
 res=$(bash -i -c '
   source shell/namo_complete.bash 2>/dev/null
   type -t namo-live' 2>/dev/null | tail -1)
@@ -672,7 +685,7 @@ source "$PWD/shell/namo_complete.bash"
 PS1='T\$ '
 RCEOF
   daemons_before=$(live_helpers)
-  jobnoise=$(printf 'READLINE_LINE=""; READLINE_POINT=0; for c in g i t " " c o; do _namo_on_printable_key "$c"; done\nsleep 1\nexit\n' \
+  jobnoise=$(printf 'git com\nsleep 1\nexit\n' \
     | script -qec "bash --rcfile /tmp/namo_rc_test.sh -i" /dev/null 2>&1 \
     | tr -d '\r' | grep -acE '^\[[0-9]+\][[:space:]]+[0-9]+')
   [ "$jobnoise" = 0 ] && ok "no job-control noise while typing" \
@@ -972,6 +985,156 @@ RCEOF
     || bad "a helper outlived its shell"
   rm -f /tmp/namo_rc_out.sh
 fi
+
+# --------------------------------------------------------------------------
+head_ "5d. the line tracker"
+# --------------------------------------------------------------------------
+# No key is rebound any more: readline echoes the line onto the shell's stdout,
+# which is the relay's pty, and the relay follows it from there. These drive
+# that pty directly with the bytes readline actually writes -- the marker at
+# the end of the prompt, the characters, BS, ESC[K, ESC[n@, ESC[nP, ESC[nD.
+TT=$(mktemp -d)
+mkfifo -m 600 "$TT/fifo"
+exec {TFD}<>"$TT/fifo"
+NAMO_RELAY=1 NAMO_OUTPUT=3 NAMO_PTSFILE="$TT/pts" NAMO_OUTFILE="$TT/out" \
+  NAMO_RELAY_PIDFILE="$TT/pid" NAMO_TTY="$TT/tty" NAMO_FIFO="$TT/fifo" \
+  NAMO_SHELL_PID=$$ "$BIN" </dev/null >/dev/null 2>&1
+sleep 0.4
+tpts=$(cat "$TT/pts" 2>/dev/null)
+tpid=$(cat "$TT/pid" 2>/dev/null)
+GS=$(printf '\035')
+
+# Everything the relay would send, drained for one command's worth of typing.
+# The last record is the line as it stood when the typing stopped.
+typed() {  # typed <bytes to write into the pty>  -> the last record's line
+  printf '%s' "$1" > "$tpts"
+  sleep 0.35
+  local rec last=""
+  while IFS= read -r -t 0.2 -u "$TFD" rec; do last=$rec; done
+  printf '%s' "${last#*$'\t'}"
+}
+
+if [ -n "$tpts" ] && [ -n "$tpid" ]; then
+  res=$(typed "T\$ ${GS}git com")
+  [ "$res" = "git com" ] && ok "the line typed at a prompt reaches the daemon" \
+                         || bad "tracked [$res]"
+  # The prompt itself is not part of it: the marker is what starts the line.
+  case "$res" in *"T\$"*) bad "the prompt leaked into the tracked line" ;;
+                 *) ok "the prompt is not mistaken for the line" ;; esac
+
+  res=$(typed "$(printf '\010\033[K')")
+  [ "$res" = "git co" ] && ok "backspace shortens it (BS, ESC[K)" || bad "after BS: [$res]"
+
+  # Readline opens a gap before it writes into the middle of a line.
+  res=$(typed "$(printf '\033[2D\033[1@X')")
+  [ "$res" = "git Xco" ] && ok "an insert in the middle lands where the cursor is" \
+                         || bad "after insert: [$res]"
+  res=$(typed "$(printf '\033[3P')")
+  [ "$res" = "git X" ] && ok "a delete closes the gap (ESC[nP)" || bad "after delete: [$res]"
+
+  # Enter ends it, and what comes next is not a line being typed.
+  res=$(typed "$(printf '\r\n')stray output here")
+  [ -z "$res" ] && ok "nothing is tracked once the line has been accepted" \
+                || bad "output after Enter tracked as typing: [$res]"
+
+  # Reverse search repaints with a prompt of its own, which carries no marker:
+  # the CR that starts it is where the tracker gives up.
+  res=$(typed "T\$ ${GS}git st$(printf '\r\033[K')(reverse-i-search)\`': ls")
+  case "$res" in
+    *reverse*|*": ls"*) bad "a readline prompt was tracked as typing: [$res]" ;;
+    *) ok "a repaint with no marker stops the tracking" ;;
+  esac
+
+  # And a real prompt after it starts a clean line again.
+  res=$(typed "T\$ ${GS}echo hi")
+  [ "$res" = "echo hi" ] && ok "the next prompt arms the tracker again" || bad "after re-arm: [$res]"
+
+  # A record from the relay has no cwd in it: the relay watches a pty, not a
+  # shell, and the daemon fills the field in from the last prompt.
+  printf '%s' "T\$ ${GS}whoami" > "$tpts"; sleep 0.35
+  rec=""; while IFS= read -r -t 0.2 -u "$TFD" line; do rec=$line; done
+  case "$rec" in $'\t'*) ok "the cwd field is left for the daemon to fill" ;;
+                 *) bad "relay record carries a cwd: [$rec]" ;; esac
+
+  grep -q "$GS" "$TT/tty" && bad "the prompt marker reached the screen" \
+                          || ok "the prompt marker never reaches the screen"
+  grep -q 'git com' "$TT/tty" && ok "what was typed still reaches the terminal" \
+                              || bad "typing lost on the way through"
+else
+  bad "the relay did not start for the tracker tests"
+fi
+exec {TFD}>&-
+kill "$tpid" 2>/dev/null
+rm -rf "$TT"
+
+# The whole chain, in a real shell on a real pty: type, and a hint appears --
+# with no key bound, so bash never repaints the row on the way there.
+if command -v script >/dev/null 2>&1; then
+  cat > /tmp/namo_rc_trk.sh <<RCEOF
+export NAMO_BIN="$PWD/$BIN"
+export NAMO_MIN_GAP=0 NAMO_DEBOUNCE=0.3 NAMO_CACHE=0
+export NAMO_ENDPOINT="$NAMO_ENDPOINT"
+export ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
+source "$PWD/shell/namo_complete.bash"
+PS1='T\$ '
+RCEOF
+  trkcap=$( { printf 'zzhint com'; sleep 2.5; printf '\nexit\n'; sleep 0.5; } \
+    | script -qec "bash --rcfile /tmp/namo_rc_trk.sh -i" /dev/null 2>&1 | tr -d '\r' )
+  printf '%s' "$trkcap" | grep -q 'hint: git commit' \
+    && ok "typing into a real shell paints a hint, with nothing rebound" \
+    || bad "no hint painted: $(printf '%s' "$trkcap" | cat -v | tail -3)"
+  printf '%s' "$trkcap" | grep -q 'zzhint com' \
+    && ok "what was typed is still echoed by readline" || bad "typing never echoed"
+  # The flicker itself: bash repaints the prompt row once per keystroke around a
+  # `bind -x` handler, so ten characters used to mean ten prompts on the wire.
+  prompts=$(printf '%s' "$trkcap" | grep -o 'T\$' | grep -c .)
+  [ "${prompts:-99}" -le 5 ] \
+    && ok "the prompt is not repainted per keystroke ($prompts times for 10 characters)" \
+    || bad "$prompts prompt repaints for 10 characters -- the row is being redrawn again"
+  # NAMO_OUTPUT=0 keeps the relay -- the line comes down that pty too -- and
+  # only stops it keeping what commands print.
+  sed 's/NAMO_CACHE=0/NAMO_CACHE=0 NAMO_OUTPUT=0/' /tmp/namo_rc_trk.sh > /tmp/namo_rc_trk0.sh
+  rm -f /tmp/namo_req.json
+  zerocap=$( { printf 'zzquiet com'; sleep 2.5; printf '\nexit\n'; sleep 0.5; } \
+    | script -qec "bash --rcfile /tmp/namo_rc_trk0.sh -i" /dev/null 2>&1 | tr -d '\r' )
+  printf '%s' "$zerocap" | grep -q 'hint: git commit' \
+    && ok "hints still work with NAMO_OUTPUT=0" \
+    || bad "no hint with output recording off"
+  grep -q '<output>' /tmp/namo_req.json 2>/dev/null \
+    && bad "output was recorded with NAMO_OUTPUT=0" \
+    || ok "and nothing the commands printed is kept"
+  rm -f /tmp/namo_rc_trk.sh /tmp/namo_rc_trk0.sh
+fi
+
+# The daemon's half of the same deal: a record with an empty cwd is served in
+# the directory the shell reported at its last prompt.
+DT2=$(mktemp -d)
+mkfifo -m 600 "$DT2/fifo" "$DT2/reply"
+: > "$DT2/hist"
+exec {D2}<>"$DT2/fifo"
+rm -f /tmp/namo_req.json
+NAMO_DAEMON=1 NAMO_FIFO="$DT2/fifo" NAMO_REPLY="$DT2/reply" NAMO_HISTFILE="$DT2/hist" \
+  NAMO_PIDFILE="$DT2/pid" NAMO_TTY="$DT2/tty" NAMO_DEBOUNCE=0.2 NAMO_QUIET=0.05 \
+  NAMO_CACHE=0 "$BIN" </dev/null >/dev/null 2>&1
+d2pid=$(cat "$DT2/pid" 2>/dev/null)
+printf '%s\t%s\n' "$PWD" "" >&"$D2"          # the shell, at a prompt, in $PWD
+sleep 0.2
+printf '\t%s\n' "zzcwd probe" >&"$D2"        # the relay, with a line and no cwd
+sleep 1.2
+if [ -f /tmp/namo_req.json ]; then
+  python3 - "$PWD" <<'PYCWD' && ok "the daemon fills the cwd in from the last prompt" \
+                             || bad "cwd not carried over to a relay record"
+import json, sys
+c = json.load(open('/tmp/namo_req.json'))['messages'][0]['content']
+assert '<cwd>' + sys.argv[1] + '</cwd>' in c, c[:400]
+PYCWD
+else
+  bad "a relay record never reached the API"
+fi
+exec {D2}>&-
+sleep 0.5
+kill "$d2pid" 2>/dev/null
+rm -rf "$DT2"
 
 # --------------------------------------------------------------------------
 head_ "6. packaging"

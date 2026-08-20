@@ -33,8 +33,14 @@ public module namo {
   extern "C" function ioctl(fd: i32, req: u64, arg: raw_ptr<u8>) i32;
   extern "C" function read(fd: i32, buf: raw_ptr<u8>, n: i64) i64;
   extern "C" function strlen(s: raw_ptr<u8>) i64;
+  // The daemon's FIFO, opened read-write so that it neither blocks waiting for
+  // a reader nor takes a SIGPIPE if the daemon goes away, and non-blocking so
+  // that a full pipe costs a dropped hint rather than a stalled terminal.
+  // sun.io opens read-only, write-only or append; this needs all three flags.
+  extern "C" function open(path: raw_ptr<u8>, flags: i32, mode: i32) i32;
 
   var O_RDWR_NOCTTY: i32 = 258;      // O_RDWR | O_NOCTTY
+  var O_RDWR_NONBLOCK: i32 = 2050;   // O_RDWR | O_NONBLOCK
   var TIOCGWINSZ: u64 = 21523;
   var TIOCSWINSZ: u64 = 21524;
 
@@ -43,14 +49,17 @@ public module namo {
   // -- see copy_winsize -- so this interval is the whole of the answer to a
   // resize, and it has to hold whether the screen is busy or idle.
   var WINSIZE_MS: i64 = 250;
-  // Two markers down the captured stream, and neither ever reaches the screen.
+  // Markers down the captured stream, and none of them ever reaches the screen.
   // RS is written by PS0, after Enter and before the command runs: everything
   // before it was the prompt and the line being typed, which the history
-  // already carries -- and with a hint daemon rebinding every key, the line
-  // being typed arrives here once per keystroke. US is written by the prompt
-  // hook, when the command is done: what lies between them is its output.
+  // already carries. US is written by the prompt hook, when the command is
+  // done: what lies between them is its output.
   var MARK_START: u8 = 30;
   var MARK_FLUSH: u8 = 31;
+  // GS, at the end of PS1: the prompt is over, what follows is the line being
+  // typed. It is what arms the tracker below, and like the other two it is
+  // taken back out before the bytes reach the screen.
+  var MARK_PROMPT: u8 = 29;
   var MAX_LINE: i64 = 400;
 
   function from_cstr(alloc: ref HeapAllocator, p: raw_ptr<u8>) String {
@@ -224,11 +233,262 @@ public module namo {
   }
 
   // ------------------------------------------------------------------------
+  // The line being typed
+  // ------------------------------------------------------------------------
+  //
+  // Nothing rebinds a printable key any more. Readline puts the terminal in
+  // raw mode and echoes what you type itself -- onto the shell's stdout, which
+  // is this pty -- so the line can be followed by reading it here instead of
+  // by taking every keystroke away from readline. What that buys is the whole
+  // reason this exists: around a `bind -x` handler bash erases the prompt row
+  // and repaints it in full, once per character, and on a terminal that draws
+  // as the bytes arrive that is a visible flicker. Left alone, readline writes
+  // the one new character and nothing else.
+  //
+  // What arrives here while a line is being edited is a small, fixed
+  // vocabulary -- the characters themselves, BS, ESC[K, ESC[n@ to open a gap
+  // for an insert, ESC[nP to close one, ESC[nC and ESC[nD to move. Anything
+  // outside it disarms the tracker until the next prompt, because a line we
+  // are not sure of is worse than no hint at all: readline reprints the whole
+  // prompt after a completion listing, a Ctrl-L or a Ctrl-C, and the marker at
+  // the end of that prompt arms us again with the line it repainted.
+  //
+  // Reverse search (Ctrl-R) replaces the prompt with one of its own, which
+  // carries no marker: the CR that starts that repaint disarms us and nothing
+  // arms us again until a real prompt comes back.
+
+  var TRK_TEXT: i32 = 0;
+  var TRK_ESC: i32 = 1;
+  var TRK_CSI: i32 = 2;
+
+  public class Tracker {
+    public var line: String;
+    public var point: i64;        // in bytes, which is why `wide` exists
+    public var armed: bool;       // between the prompt marker and the newline
+    public var wide: bool;        // a byte >= 0x80 went by: bytes and columns
+                                  // no longer agree, so the next cursor move
+                                  // would be guesswork
+    public var dirty: bool;       // changed since the last record went out
+    public var state: i32;
+    public var param: i64;
+    public var got_param: bool;
+    public var known: bool;       // this CSI is one of the six we follow
+
+    public function init(alloc: ref HeapAllocator) {
+      this.line = String(alloc, "");
+      this.point = 0;
+      this.armed = false;
+      this.wide = false;
+      this.dirty = false;
+      this.state = TRK_TEXT;
+      this.param = 0;
+      this.got_param = false;
+      this.known = true;
+    }
+  }
+
+  function trk_reset(alloc: ref HeapAllocator, t: ref Tracker, armed: bool) void {
+    t.line = String(alloc, "");
+    t.point = 0;
+    t.armed = armed;
+    t.wide = false;
+    t.dirty = armed;
+    t.state = TRK_TEXT;
+  }
+
+  // Readline opens a gap with ESC[n@ before it writes into the middle of a
+  // line, so a character always lands on a column that is already there.
+  function trk_put(alloc: ref HeapAllocator, t: ref Tracker, c: u8) void {
+    if (t.point < t.line.length()) {
+      t.line.set_at(t.point, c);
+    } else {
+      t.line.append_char(c);
+    }
+    t.point = t.point + 1;
+    t.dirty = true;
+  }
+
+  function trk_splice(alloc: ref HeapAllocator, t: ref Tracker, insert: i64, drop: i64) void {
+    var out = String(alloc, "");
+    for (var i: i64 = 0; i < t.point and i < t.line.length(); i = i + 1) {
+      out.append_char(t.line.at(i));
+    }
+    for (var g: i64 = 0; g < insert; g = g + 1) {
+      out.append_char(CH_SP);
+    }
+    for (var j: i64 = t.point + drop; j < t.line.length(); j = j + 1) {
+      out.append_char(t.line.at(j));
+    }
+    t.line = out;
+    t.dirty = true;
+  }
+
+  function trk_csi(alloc: ref HeapAllocator, t: ref Tracker, fin: u8) void {
+    var n: i64 = 1;
+    if (t.got_param and t.param > 0) {
+      n = t.param;
+    }
+    if (t.known == false) {
+      t.armed = false;
+      return;
+    }
+    if (fin == 75) {                       // K: erase to the end of the row
+      t.line.truncate(t.point);
+      t.dirty = true;
+    } else if (fin == 64) {                // @: open a gap of n
+      trk_splice(alloc, t, n, 0);
+    } else if (fin == 80) {                // P: close a gap of n
+      trk_splice(alloc, t, 0, n);
+    } else if (fin == 67) {                // C: right
+      t.point = t.point + n;
+      if (t.point > t.line.length()) {
+        t.point = t.line.length();
+      }
+    } else if (fin == 68) {                // D: left
+      t.point = t.point - n;
+      if (t.point < 0) {
+        t.point = 0;
+      }
+    } else if (fin == 109) {               // m: colour, and none of our business
+      var ignored: bool = true;
+    } else {
+      t.armed = false;
+    }
+    if (t.wide and (fin == 64 or fin == 80 or fin == 67 or fin == 68)) {
+      t.armed = false;
+    }
+  }
+
+  function trk_feed(alloc: ref HeapAllocator, t: ref Tracker, c: u8) void {
+    if (t.state == TRK_ESC) {
+      if (c == 91) {                       // ESC [
+        t.state = TRK_CSI;
+        t.param = 0;
+        t.got_param = false;
+        t.known = true;
+      } else {
+        t.state = TRK_TEXT;
+        t.armed = false;
+      }
+      return;
+    }
+    if (t.state == TRK_CSI) {
+      if (c >= 48 and c <= 57) {           // 0-9
+        t.param = t.param * 10 + _convert<i64>(c - 48);
+        t.got_param = true;
+        return;
+      }
+      if (c >= 32 and c <= 63) {           // ';' '?' and the intermediates
+        t.known = false;
+        return;
+      }
+      if (c >= 64 and c <= 126) {          // the final byte
+        t.state = TRK_TEXT;
+        trk_csi(alloc, t, c);
+        return;
+      }
+      t.state = TRK_TEXT;
+      t.armed = false;
+      return;
+    }
+
+    // A prompt has just finished printing: whatever follows is the line.
+    if (c == MARK_PROMPT) {
+      trk_reset(alloc, t, true);
+      return;
+    }
+    if (c == 27) {
+      t.state = TRK_ESC;
+      return;
+    }
+    // Enter, or a command starting. Either way the line is no longer ours.
+    if (c == 10 or c == MARK_START) {
+      t.armed = false;
+      return;
+    }
+    if (t.armed == false) {
+      return;
+    }
+    if (c == 13) {
+      // A repaint from column 0. The prompt that comes with it re-arms us --
+      // and if it is a prompt of readline's own, like reverse search, nothing
+      // does, which is the answer we want.
+      t.armed = false;
+      return;
+    }
+    if (c == 8) {                          // BS: one column left
+      if (t.wide) {
+        t.armed = false;
+        return;
+      }
+      if (t.point > 0) {
+        t.point = t.point - 1;
+      }
+      return;
+    }
+    if (c == 7 or c == 9 or c == MARK_FLUSH) {
+      return;                              // bell, tab, end of a recording
+    }
+    if (c < 32 or c == 127) {
+      t.armed = false;
+      return;
+    }
+    if (c >= 128) {
+      t.wide = true;
+    }
+    trk_put(alloc, t, c);
+  }
+
+  // The line goes to the daemon down the same FIFO the shell uses, in the same
+  // shape, with the cwd left empty: the daemon fills in the one the shell told
+  // it at the last prompt, which is the directory this line is being typed in.
+  public class Hints {
+    public var fifo: File;
+    public var ready: bool;
+    public var sent: String;
+
+    public function init(alloc: ref HeapAllocator) {
+      this.fifo = File();
+      this.ready = false;
+      this.sent = String(alloc, "");
+    }
+  }
+
+  function hints_send(alloc: ref HeapAllocator, cfg: ref Config, h: ref Hints, t: ref Tracker) void {
+    if (t.dirty == false or cfg.fifo.length() == 0) {
+      return;
+    }
+    t.dirty = false;
+    if (t.armed == false) {
+      return;
+    }
+    if (t.line.equals(h.sent)) {
+      return;
+    }
+    if (h.ready == false) {
+      var fd: i32 = unsafe { open(cfg.fifo.c_str(), O_RDWR_NONBLOCK, 0); };
+      if (fd < 0) {
+        return;
+      }
+      h.fifo.adopt(fd);
+      h.ready = true;
+    }
+    h.sent = t.line.clone(alloc);
+    var msg = String(alloc, "");
+    msg.append_char(CH_TAB);
+    msg.append(t.line);
+    msg.append_char(CH_NL);
+    var written: i64 = h.fifo.write(msg);
+  }
+
+  // ------------------------------------------------------------------------
   // The loop
   // ------------------------------------------------------------------------
 
   function relay_loop(alloc: ref HeapAllocator, cfg: ref Config, master: i32, tty: ref File, shell_pid: i32) i32 {
     var rec = Recorder(alloc, cfg.output_lines);
+    var trk = Tracker(alloc);
+    var hints = Hints(alloc);
     var poller = Poller(alloc);
     var buf = ContiguousBuffer<u8>(alloc, RELAY_BUF);
     var through = ContiguousBuffer<u8>(alloc, RELAY_BUF);
@@ -265,6 +525,9 @@ public module namo {
           var out = String(alloc, "");
           for (var i: i64 = 0; i < n; i = i + 1) {
             var c: u8 = buf.get_unchecked(i);
+            // The tracker sees the markers as well: they are what tell it a
+            // prompt has finished printing and a command has started.
+            trk_feed(alloc, trk, c);
             if (c == MARK_START) {
               // A command is starting: everything so far was the prompt and
               // the keystrokes that led to it.
@@ -273,14 +536,23 @@ public module namo {
               if (c == MARK_FLUSH) {
                 flush_record(alloc, cfg, rec);
               } else {
-                out.append_char(c);
-                record_byte(alloc, rec, c);
+                if (c == MARK_PROMPT) {
+                  // Ours, like the other two.
+                  var dropped: bool = true;
+                } else {
+                  out.append_char(c);
+                  record_byte(alloc, rec, c);
+                }
               }
             }
           }
           if (out.length() > 0) {
             var w: i64 = tty.write(out);
           }
+          // One record per read rather than per character: a burst of typing
+          // that arrives together is one line as far as the daemon is
+          // concerned, and it debounces from there.
+          hints_send(alloc, cfg, hints, trk);
         }
       } else {
         // Idle: the shell may be gone.
@@ -319,7 +591,10 @@ public module namo {
   // shell gets its prompt back, because the very next thing it does is open
   // the slave and point its own stdout at it.
   public function relay_run(alloc: ref HeapAllocator, cfg: ref Config) i32 {
-    if (cfg.ptsfile.length() == 0 or cfg.outfile.length() == 0) {
+    // The pts file is what the shell needs to point its stdout at; the outfile
+    // is only needed when there is output to record. NAMO_OUTPUT=0 still gets
+    // a relay, because the line being typed comes down this pty too.
+    if (cfg.ptsfile.length() == 0) {
       return 0;
     }
 

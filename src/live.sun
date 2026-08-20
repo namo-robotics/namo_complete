@@ -1,12 +1,17 @@
 // live.sun - the as-you-type hint daemon.
 //
-// Bash blanks the prompt line before it runs a `bind -x` command and repaints
-// it afterwards, so however long the handler takes is a hole in the line being
-// typed into: a single fork is enough to see it flicker. The keystroke path in
-// namo_live.bash therefore does exactly one thing -- write "<cwd>\t<line>" into
-// a FIFO, which is one write() into a pipe buffer -- and everything that
-// debounces, reads a cache, calls the API or paints the screen happens over
-// here, in a process forked once per shell.
+// Records arrive as "<cwd>\t<line>", one write() into a FIFO, and everything
+// that debounces, reads a cache, calls the API or paints the screen happens
+// over here, in a process forked once per shell. Nothing in the shell is on
+// the keystroke path at all any more: the relay watches the line go past on
+// the shell's own stdout and posts it here (relay.sun), with the cwd field
+// empty for the last one the shell reported at a prompt to fill.
+//
+// Bash is the reason for that split. It blanks the prompt line before running
+// a `bind -x` command and repaints it in full afterwards, so a handler on every
+// printable key is a repaint on every character -- flicker on a terminal that
+// draws as the bytes arrive -- and however long that handler takes is a hole
+// in the line being typed into.
 //
 // Started with NAMO_DAEMON=1 and the FIFO path in NAMO_FIFO. Exits when the
 // FIFO reports end-of-input, which is what happens when the shell holding the
@@ -76,6 +81,11 @@ public module namo {
     // opened at the one moment it is certain not to block.
     public var reply: File;
     public var reply_open: bool;
+    // The directory the shell was in at the last prompt. Records that come
+    // from the relay carry the line and nothing else -- it watches a pty, not
+    // a shell, and has no business guessing where that shell is -- so this is
+    // what fills the field in for them.
+    public var last_cwd: String;
 
     public function init(alloc: ref HeapAllocator) {
       this.tty = File();
@@ -88,6 +98,7 @@ public module namo {
       this.vals = Vec<String>(alloc, 32);
       this.chunk = ContiguousBuffer<u8>(alloc, FIFO_BUF);
       this.reply = File();
+      this.last_cwd = String(alloc, "");
       this.reply_open = false;
     }
   }
@@ -351,6 +362,21 @@ public module namo {
       rest.append_char(st.pending.at(j));
     }
     st.pending = rest;
+
+    // "<cwd> TAB <line>" from the shell, "TAB <line>" from the relay. The
+    // shell reports where it is at every prompt, which is the last moment it
+    // could have moved, so an empty field is filled from that.
+    if (out.length() > 0 and out.at(0) == CH_TAB) {
+      var filled = st.last_cwd.clone(alloc);
+      filled.append(out);
+      out.clear();
+      out.append(filled);
+    } else {
+      var seen = rec_cwd(alloc, out);
+      if (seen.length() > 0) {
+        st.last_cwd = seen.clone(alloc);
+      }
+    }
     return true;
   }
 

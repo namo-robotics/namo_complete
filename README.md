@@ -121,11 +121,38 @@ newline (`curl -s`, `printf`) no longer gets the next prompt glued to it.
 The hint row sits one row below the cursor, is reserved by the prompt hook, and
 is given back the moment you press Enter, so nothing is left in the scrollback.
 
-Readline has no line-changed hook, so this rebinds every printable key. That
-makes paste slower, changes undo granularity, inserts multi-byte UTF-8
-byte-by-byte, and does not cover vi command mode. Rendering is a row under the
-line you are typing, not inline ghost text — that needs a full line editor such
-as [ble.sh](https://github.com/akinomyoga/ble.sh).
+**No key is rebound.** Readline has no line-changed hook, so the obvious way to
+see the line is to bind every printable key — and that is what this used to do.
+It costs more than it looks: around every `bind -x` handler bash erases the
+prompt row and repaints it in full (`\r ESC[K \r`, the whole prompt, the line)
+where plain readline would have written the one new character, so a terminal
+that draws as the bytes arrive flickers on every keystroke. It also slowed
+paste, coarsened undo, inserted multi-byte UTF-8 byte-by-byte and did not cover
+vi command mode.
+
+So the line is read rather than intercepted. Readline puts the terminal in raw
+mode and echoes what you type itself — onto the shell's stdout, which is the
+relay's pty — and the relay follows it from there
+([src/relay.sun](src/relay.sun)), handing each new state of the line to the
+daemon. Typing costs one byte on the wire again, and all four of those costs
+are gone with the bindings.
+
+The vocabulary it has to follow is small: the characters, `BS`, `ESC[K`,
+`ESC[n@` to open a gap for an insert, `ESC[nP` to close one, `ESC[nC`/`ESC[nD`
+to move. Anything else stops the tracking until the next prompt, because a line
+it is unsure of is worse than no hint — and readline reprints the whole prompt
+after a completion listing, a Ctrl-L or a Ctrl-C, so the marker at the end of
+that prompt starts it again with the line as repainted. Reverse search (Ctrl-R)
+puts up a prompt of its own with no marker, so no hints are drawn inside it.
+What it needs from the shell is that one marker at the end of `PS1`, kept there
+at every prompt and stripped by the relay before the bytes reach the screen.
+
+Live hints therefore need the pty: `NAMO_OUTPUT=0` stops the relay keeping what
+commands print, not the relay itself. `NAMO_DISABLE=1` is what turns everything
+off.
+
+Rendering is a row under the line you are typing, not inline ghost text — that
+needs a full line editor such as [ble.sh](https://github.com/akinomyoga/ble.sh).
 
 ## Configuration
 
@@ -140,7 +167,7 @@ as [ble.sh](https://github.com/akinomyoga/ble.sh).
 | `NAMO_HINT_PREFIX` | `hint: ` | Text in front of the hint row |
 | `NAMO_TIMEOUT` | `10` | Seconds before giving up |
 | `NAMO_DYM` / `NAMO_DYM_PREFIX` | `1` / `did you mean: ` | "did you mean" after *command not found*, and the text in front of it |
-| `NAMO_OUTPUT` | `10` | Lines of the last command's output to send; `0` records nothing |
+| `NAMO_OUTPUT` | `10` | Lines of the last command's output to send; `0` records nothing (the pty stays, live hints need it) |
 | `NAMO_HISTORY_LINES` | `50` | History commands sent; `0` disables |
 | `NAMO_LS_LIMIT` / `NAMO_NO_LS` | `40` / `0` | Directory listing |
 | `NAMO_MAX_SUGGESTIONS` | `3` | Candidates requested |
@@ -154,19 +181,19 @@ directory + model. Deleting the directory is safe at any time.
 
 ## Architecture
 
-Two processes and one binary, or three when the last command's output is being
-recorded. Bash owns the line, because readline is the only thing that can; the
-binary owns everything else.
+Three processes and one binary. Bash owns the line, because readline is the only
+thing that can; the binary owns everything else — including watching that line
+go by, which is the relay's job.
 
 ```mermaid
 flowchart LR
     subgraph bash["bash, interactive shell"]
-        RL["namo_complete.bash<br>every printable key<br>Alt-O / Alt-A / Alt-G<br>PROMPT_COMMAND, PS0<br>command_not_found_handle<br>the picker, READLINE_LINE"]
+        RL["namo_complete.bash<br>no printable key bound<br>Alt-O / Alt-A / Alt-G<br>PROMPT_COMMAND, PS0, PS1 marker<br>command_not_found_handle<br>the picker, READLINE_LINE"]
     end
 
     subgraph bin["namo_complete: one static binary"]
         DAE["live daemon<br>live.sun<br>one per shell"]
-        REL["output relay<br>relay.sun<br>unless NAMO_OUTPUT=0"]
+        REL["relay + line tracker<br>relay.sun<br>one per shell"]
         ONE["one-shot run<br>main.sun<br>run.sh, tests, scripts"]
         CORE["config - redact - prompt<br>cache - client - fs - util"]
         DAE --> CORE
@@ -179,12 +206,13 @@ flowchart LR
     API(["Claude Messages API"])
 
     RL -->|"READLINE_LINE"| TTY
-    RL -->|"keystrokes, requests, corrections:<br>one write into a FIFO"| DAE
+    RL -->|"requests and corrections:<br>one write into a FIFO"| DAE
     DAE -->|"answers, down the reply FIFO"| RL
     RL -->|"history snapshot"| DISK
     DAE -->|"hint row and did-you-mean row"| TTY
-    RL -->|"stdout, through a pty"| REL
+    RL -->|"stdout, through a pty:<br>the line, as readline echoes it"| REL
     REL -->|"everything, verbatim"| TTY
+    REL -->|"the line being typed"| DAE
     REL -->|"the last N lines"| DISK
     CORE -->|"read and write"| DISK
     CORE -->|"exec curl, key on its stdin"| API
@@ -193,9 +221,10 @@ flowchart LR
 **The shell half** is one file, and deliberately thin: it does the things only
 bash can do and nothing else. `READLINE_LINE` exists only inside a `bind -x`
 handler, and assigning to it is the only way to put a command in a prompt
-without running it. `fc` is a builtin, so this is the only process that can read
-the shell's own history; it leaves the daemon a snapshot at every prompt.
-`bind`, `PROMPT_COMMAND`, `PS0` and `command_not_found_handle` are bash's too.
+without running it — that is Alt-O, and it is the only kind of key this binds.
+`fc` is a builtin, so this is the only process that can read the shell's own
+history; it leaves the daemon a snapshot at every prompt. `bind`,
+`PROMPT_COMMAND`, `PS0`, `PS1` and `command_not_found_handle` are bash's too.
 Everything else — what to send, what to keep out of it, what the hint says and
 where it goes — is the daemon's.
 
@@ -205,20 +234,22 @@ read end of a FIFO for the lifetime of the shell and answers everything that
 comes down it. The one-shot shape (read the environment, read history from
 stdin, print candidates, exit) is what `run.sh`, the tests and any script use.
 
-**Nothing in the interactive path forks.** That is the whole reason the split
-falls where it does: bash blanks the prompt line before running a `bind -x`
-handler and repaints it afterwards, so anything a handler waits for is a visible
-hole in the line being typed into — and a single fork is enough to see it. So a
-keystroke is one `write()` into a pipe. Alt-O, Alt-A and Alt-G are the same
-write plus a `read` on a second FIFO, labelled with the id that asked so a stale
-answer is dropped rather than mistaken for the next one.
+**Nothing runs on a keystroke.** Bash erases the prompt row before running a
+`bind -x` handler and repaints it in full afterwards, once per character — a
+visible flicker on a terminal that draws as the bytes arrive, and a visible hole
+in the line if the handler waits for anything at all. So the line is not
+intercepted: readline echoes it onto the shell's stdout, which is the relay's
+pty, and the relay reads it from there and posts it to the daemon. Alt-O, Alt-A
+and Alt-G are the only bindings left, and they are one `write()` into a FIFO
+plus a `read` on a second one, labelled with the id that asked so a stale answer
+is dropped rather than mistaken for the next one.
 
 | File | Owns |
 | --- | --- |
-| [`shell/namo_complete.bash`](shell/namo_complete.bash) | All of the shell side: bindings, the picker, `READLINE_LINE`, both FIFOs, the prompt hook, `command_not_found_handle` |
+| [`shell/namo_complete.bash`](shell/namo_complete.bash) | All of the shell side: the three bindings, the picker, `READLINE_LINE`, both FIFOs, the prompt hook and its `PS1` marker, `command_not_found_handle` |
 | [`src/main.sun`](src/main.sun) | One-shot run: mode, the too-short guard, cache, output |
 | [`src/live.sun`](src/live.sun) | The daemon: FIFO records, debounce, replies, hint row, directory listing |
-| [`src/relay.sun`](src/relay.sun) | The pty the shell's stdout points at, the copy through to the terminal, the last N lines |
+| [`src/relay.sun`](src/relay.sun) | The pty the shell's stdout points at, the copy through to the terminal, the line being typed, the last N lines |
 | [`src/config.sun`](src/config.sun) | Every setting, from the environment only; the three modes |
 | [`src/prompt.sun`](src/prompt.sun) | The three system prompts, the context block, the JSON body |
 | [`src/redact.sun`](src/redact.sun) | Dropping history lines that carry a credential prefix |
@@ -244,10 +275,11 @@ flowchart TD
     F --> G["Bash puts one in your line.<br>You press Enter"]
 ```
 
-Every keystroke goes down the FIFO as `<cwd><tab><line>`, one `write()` into a
-pipe buffer and nothing else; the daemon debounces, reads the cache, makes the
-request and draws the hint row on `/dev/tty`. The daemon exits when the shell
-that owns the write end goes away.
+The line reaches the daemon as `<cwd><tab><line>` down that FIFO — from the
+shell for a key press, and from the relay, cwd left empty for the daemon to
+fill, for a line being typed. The daemon debounces, reads the cache, makes the
+request and draws the hint row on `/dev/tty`. It exits when the shell that owns
+the write end goes away.
 
 The binary does the rest: drop history lines carrying a credential prefix, hash
 the line, directory and model into a cache key, answer straight away if a fresh
@@ -281,9 +313,10 @@ The binary is statically linked; `curl` is its only runtime dependency.
 Processes, polling, directories, the environment and the clock all come from
 Sun's standard library, and only one file reaches past it:
 [`relay.sun`](src/relay.sun) declares `extern "C"` for `posix_openpt`,
-`grantpt`, `unlockpt`, `ptsname`, `ioctl` and `read`, because allocating a pty
-is the one thing the stdlib cannot do — and without a pty, recording what a
-command printed would cost every command its `isatty(1)`. Nothing else in
+`grantpt`, `unlockpt`, `ptsname`, `ioctl`, `read` and `open`, because allocating
+a pty is the one thing the stdlib cannot do — and without a pty there is nothing
+to read the line off, and recording what a command printed would cost every
+command its `isatty(1)`. Nothing else in
 [`src/`](src/) declares an extern or opens an `unsafe` block.
 
 ## Development

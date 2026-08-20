@@ -11,23 +11,26 @@
 #
 # None of the thinking happens here. One long-running copy of the namo binary
 # -- the daemon -- starts at the first prompt, and this file talks to it down
-# two FIFOs: what you are typing goes one way, answers come back the other.
-# Nothing here starts a process, because bash blanks the line you are typing
-# before it runs a key handler and repaints it afterwards, so anything a
-# handler waits for is a visible hole in your line. A keystroke is one write
-# into a pipe; a key press is that write and a read.
+# two FIFOs: a key press goes one way, the answer comes back the other. What
+# you are *typing* takes a different route entirely: readline echoes it onto
+# this shell's stdout, which is a pty a second helper holds, and that helper
+# reads the line off it. No printable key is bound, and nothing here runs on a
+# keystroke -- which is what keeps bash from erasing and repainting the prompt
+# row on every character you type.
 #
 # What is left is the things only bash can do:
 #
 #   * READLINE_LINE, the line you are typing, exists only inside a `bind -x`
 #     handler, and assigning to it is the only way to put a command in your
-#     prompt without running it.
+#     prompt without running it. That is what Alt-O does.
 #   * `fc` is a builtin, so this is the only process that can read the shell's
 #     own history. It leaves the daemon a snapshot at every prompt.
 #   * `bind`, PROMPT_COMMAND, PS0 and command_not_found_handle are bash's.
-#   * `exec` points this shell's stdout at a pty, so that a second helper can
-#     copy it through to the terminal and keep the last few lines your commands
-#     printed. On by default; NAMO_OUTPUT=0 turns it off.
+#   * PS1 ends with a marker, so the helper watching the pty knows where the
+#     prompt stops and the line starts.
+#   * `exec` points this shell's stdout at that pty. It is also where the last
+#     few lines your commands printed are kept; NAMO_OUTPUT=0 stops the
+#     keeping, not the pty.
 #
 # Everything else -- what to send, what to keep out of it, which suggestions
 # are worth stopping on, what the hint says and where it goes -- belongs to the
@@ -173,7 +176,10 @@ _namo_capture_ensure() {
   # Nothing below prints a marker unless this ends up back at 1: a shell with no
   # relay behind it must not put control bytes in its own output.
   _NAMO_CAPTURE=""
-  (( NAMO_OUTPUT > 0 )) || return 0
+  # Note what is *not* here: a check on NAMO_OUTPUT. The pty is how the line
+  # being typed is seen at all now, so it goes up even when nothing is being
+  # recorded; NAMO_OUTPUT=0 means the relay keeps no output, not that there is
+  # no relay. NAMO_DISABLE=1 is what turns the whole thing off.
   # Only when stdout is already a terminal. A shell whose output is a pipe or a
   # file is being read by something -- a script, a harness -- and putting a pty
   # in front of it would send that output to the terminal instead.
@@ -191,7 +197,7 @@ _namo_capture_ensure() {
 
   NAMO_RELAY=1 NAMO_OUTPUT="$NAMO_OUTPUT" NAMO_SHELL_PID=$$ \
     NAMO_PTSFILE="$_NAMO_PTSFILE" NAMO_OUTFILE="$_NAMO_OUTFILE" \
-    NAMO_RELAY_PIDFILE="$_NAMO_RELAY_PIDFILE" \
+    NAMO_RELAY_PIDFILE="$_NAMO_RELAY_PIDFILE" NAMO_FIFO="$_NAMO_FIFO" \
     "$_NAMO_BIN_PATH" </dev/null >/dev/null 2>&1
   _namo_relay_is_running || return 1
 
@@ -303,6 +309,27 @@ elif [ -z "${_NAMO_PS0:-}" ]; then
   _NAMO_PS0=""
 fi
 
+# The tracker in the relay needs to know where the prompt stops and the line
+# being typed starts, and only PS1 can say: everything before its last byte is
+# the prompt. So PS1 ends with a marker, wrapped in \[ \] so readline does not
+# count it as width, and the relay takes it back out before the bytes reach the
+# screen. It is added only while a relay is actually there to do that.
+#
+# Re-checked at every prompt, and from the *end* of PROMPT_COMMAND: a prompt
+# that is rebuilt from scratch each command -- starship, git-prompt -- drops
+# whatever we appended last time.
+_NAMO_PS1_MARK=$'\\['$'\035'$'\\]'
+_namo_ps1_sync() {
+  case "$PS1" in
+    *"$_NAMO_PS1_MARK")
+      [ -n "$_NAMO_CAPTURE" ] && return 0
+      PS1=${PS1%"$_NAMO_PS1_MARK"} ;;
+    *)
+      [ -n "$_NAMO_CAPTURE" ] && PS1="$PS1$_NAMO_PS1_MARK" ;;
+  esac
+  return 0
+}
+
 _namo_ps0_sync() {
   [ -n "${_NAMO_PS0:-}" ] || return 0
   local want=$'\033[2K'
@@ -335,42 +362,34 @@ _namo_on_prompt() {
 if [[ ${PROMPT_COMMAND@a} == *a* ]]; then
   [[ " ${PROMPT_COMMAND[*]} " == *" _namo_on_prompt "* ]] || \
     PROMPT_COMMAND=(_namo_on_prompt "${PROMPT_COMMAND[@]}")
+  [[ " ${PROMPT_COMMAND[*]} " == *" _namo_ps1_sync "* ]] || \
+    PROMPT_COMMAND+=(_namo_ps1_sync)
 else
   case "${PROMPT_COMMAND:-}" in
     *_namo_on_prompt*) ;;
     "") PROMPT_COMMAND=_namo_on_prompt ;;
     *)  PROMPT_COMMAND="_namo_on_prompt; ${PROMPT_COMMAND}" ;;
   esac
+  case "${PROMPT_COMMAND:-}" in
+    *_namo_ps1_sync*) ;;
+    *) PROMPT_COMMAND="${PROMPT_COMMAND}; _namo_ps1_sync" ;;
+  esac
 fi
 
 # ---------------------------------------------------------------------------
 # Typing
 #
-# Readline has no line-changed hook, so every printable key is rebound. Costs:
-# slower paste, per-character undo, byte-wise UTF-8, no vi command mode. What
-# is gained is that the daemon sees the line as it is typed; the debounce, the
-# cache, the request and the hint row are all on the other end of the pipe.
+# Not a single key is rebound here, and that is the point. Readline echoes what
+# you type onto this shell's stdout, which is the relay's pty, and the relay
+# follows the line from there (src/relay.sun). Rebinding every printable key
+# was the other way to see it, and it made bash erase and repaint the prompt
+# row once per character -- flicker on any terminal that draws as the bytes
+# arrive, plus slower paste, per-character undo, byte-wise UTF-8 and no vi
+# command mode. All of that is gone with the bindings.
+#
+# What the tracker needs from this side is one marker at the end of the prompt,
+# so it knows where the prompt stops and the line starts. See _namo_ps1_sync.
 # ---------------------------------------------------------------------------
-
-_namo_on_printable_key() {
-  READLINE_LINE="${READLINE_LINE:0:$READLINE_POINT}${1}${READLINE_LINE:$READLINE_POINT}"
-  READLINE_POINT=$((READLINE_POINT + 1))
-  _namo_send_line "$READLINE_LINE"
-}
-
-_namo_on_backspace_key() {
-  if (( READLINE_POINT > 0 )); then
-    READLINE_LINE="${READLINE_LINE:0:$((READLINE_POINT - 1))}${READLINE_LINE:$READLINE_POINT}"
-    READLINE_POINT=$((READLINE_POINT - 1))
-  fi
-  _namo_send_line "$READLINE_LINE"
-}
-
-for _namo_c in {a..z} {A..Z} {0..9} ' ' '-' '_' '.' '/' '=' ',' ':' '+' '@' '%' '~'; do
-  bind -x "\"$_namo_c\": _namo_on_printable_key \"$_namo_c\"" 2>/dev/null
-done
-unset _namo_c
-bind -x '"\C-?": _namo_on_backspace_key' 2>/dev/null
 
 # ---------------------------------------------------------------------------
 # The keys
