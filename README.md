@@ -9,7 +9,7 @@ command in plain English](assets/demo.gif)
 Type as usual. A moment after you pause, a dim hint appears on the row below
 your line with the command you are most likely reaching for. Accepting a hint
 puts the command in your line — **nothing is ever executed**, so you can edit it
-before pressing Enter.
+before pressing Enter. If you mistype a command, the *command not found* line comes with a **did you mean** hint.
 
 | Key | Action |
 | --- | --- |
@@ -17,46 +17,24 @@ before pressing Enter.
 | **Alt-A** | List the other candidates, pick one by number |
 | **Alt-G** | Describe what you want in plain English, pick from described options |
 
-```
-$ git com
-  hint: git commit -m "..."  (Alt-O) <- hint, while you type
-$ git commit -m "..."                <- after Alt-O
-
-$ <Alt-G>
-ask> undo my last commit but keep the changes staged
-  1) git reset --soft HEAD~1
-     Undo last commit, keep changes staged
-  2) git revert --no-commit HEAD
-     Create revert commit, keep changes staged
-  select [1-2]: 1
-$ git reset --soft HEAD~1
-
-$ gti status
-bash: gti: command not found
-$                                    <- prompt back at once; nothing waits
-  did you mean: git status           <- row below, when the answer arrives
-```
-
-Mistype a command and the *command not found* line comes with a **did you
-mean**, drawn when the answer arrives — the prompt never waits for it.
-`NAMO_DYM=0` turns it off.
 
 ## Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/namo-robotics/namo_complete/main/install.sh | bash
+```
+
+Then open a new terminall. You will also need to set the `ANTHROPIC_API_KEY` env var.
+```bash
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-That downloads a ready-built program, checks it against the published checksum,
-puts it in `~/.local`, and adds one line to your `~/.bashrc` so new shells pick
-it up. Nothing is compiled and nothing needs `sudo`. Open a new terminal and
-start typing.
+The install script downloads a release artifact and 
+unpacks two files to `~/.local/bin/namo_complete` and ~/.local/share/namo_complete.bash`. It then adds a line to your `~/.bashrc` so new shells source the `namo_complete.bash` script.
 
-Options: `--version v0.1.0` for a particular release or `--version dev` for the
+Options: `--version v[x.y.z]` for a particular release or `--version dev` for the
 latest build of `main`, `--prefix DIR` to install somewhere else, `--no-bashrc`
-to edit your `~/.bashrc` yourself. With no `--version` you get the newest stable
-release.
+to edit your `~/.bashrc` yourself.
 
 **Linux on x86-64 only**, and you need `bash` 4.4 or newer and `curl` — every
 request to Anthropic is made by running `curl`, because Sun cannot yet speak

@@ -4,12 +4,14 @@ Each section below is a self-contained issue body, ready to file against the
 [Sun](https://namo-robotics.github.io/sun/) repository — repro, observed
 behaviour, expectation, impact. They come out of writing
 [`namo_complete`](https://github.com/namo-robotics/namo_complete), an
-LLM-powered bash completion tool: ~1650 lines of Sun with a network client, a
-file cache and a long-lived daemon.
+LLM-powered bash completion tool: ~2800 lines of Sun with a network client, a
+file cache, a long-lived daemon and a pty in front of the shell.
 
 Every repro is standalone, and every one was re-run against the build named in
 its Environment line before this was written. Items fixed in earlier builds have
-been dropped along with the workarounds they forced.
+been dropped along with the workarounds they forced; on the current re-run all
+fourteen still reproduce, `46190fcbc286` still being the newest published
+build.
 
 The `46190fcbc286` stdlib closed three of them outright, and they are gone from
 the list below: `String.c_str()` ended the hand-rolled C-string bridge, the
@@ -17,11 +19,12 @@ the list below: `String.c_str()` ended the hand-rolled C-string bridge, the
 `sun.process` / `sun.env` / `sun.time` plus `read_dir` and `Poller` covered
 every process, directory and environment call this program had been making
 through the FFI. Between them they deleted two source files and every
-`extern "C"` declaration and every `unsafe` block in the project — it now
-compiles with none of either. A fourth item, "no narrowing conversion between
-integer types", was withdrawn rather than fixed: `_convert<i32>` truncates
-correctly and always did, on this build and the one before it. The issue was
-wrong.
+`extern "C"` declaration and every `unsafe` block the project had — it compiled
+with none of either until it needed a pty, which the stdlib cannot allocate;
+that is issue #7, and it is the only FFI left. A fourth item, "no narrowing
+conversion between integer types", was withdrawn rather than fixed:
+`_convert<i32>` truncates correctly and always did, on this build and the one
+before it. The issue was wrong.
 
 Ordered by severity: compiler crashes, then things that shaped the
 architecture, then papercuts.
@@ -139,7 +142,93 @@ matters most. Porting this project to the `46190fcbc286` stdlib, where
 
 ---
 
-## 3. `Error` cannot carry a computed message
+## 3. `spawn` takes only an inline `i32` lambda: a `void` one crashes the compiler, a named one fails codegen
+
+**Environment:** `sun 0.dev (46190fcbc286)`, x86_64 Linux, `sun -c` (static AOT).
+
+`spawn(lambda)` works, and works well — but only in one exact shape. The two
+neighbouring forms, which are the first two things anyone will type, fail badly:
+one with a compiler crash and no diagnostic, the other in the LLVM verifier.
+
+**Repro A — a worker that returns nothing crashes the compiler**
+
+```sun
+using sun;
+
+function main() i32 {
+  spawn(lambda() void { });
+  return 0;
+}
+
+manifest { moons: ["stdlib.moon"] }
+```
+
+```
+$ sun -c -o t t.sun
+Trace/breakpoint trap (core dumped)
+$ echo $?
+133
+```
+
+No error, no file, no line. Binding the handle (`var h = spawn(...)`) crashes
+identically. This is likely the same underlying hole as issue #1: a `void`
+result reaching a value position.
+
+**Repro B — a lambda held in a variable fails the verifier**
+
+```sun
+using sun;
+
+function main() i32 {
+  var f = lambda() i32 { return 0; };
+  var h = spawn(f);
+  return 0;
+}
+
+manifest { moons: ["stdlib.moon"] }
+```
+
+```
+Load operand must be a pointer.
+  %spawn.fat = load { ptr, ptr }, %closure.0 %f1, align 8
+Error: Function verification failed: main
+```
+
+**Expected:** a diagnostic in both cases. The compiler already carries the right
+kind of message for the neighbouring mistakes — `spawn requires a lambda
+expression` and `spawn lambda must take no arguments` are both in the binary —
+so the shape of the fix is a third check (`must return i32`, or accept `void`)
+plus support for a lambda that is already bound.
+
+**What works, for contrast.** The supported form is genuinely good, and this
+issue is worth fixing because of that rather than in spite of it:
+
+```sun
+var h = spawn(lambda() i32 {
+  var a2 = make_heap_allocator();
+  var cmd = Command(a2, "curl");     // ... blocking child, drained to completion
+  var res = cmd.start().collect(a2);
+  return 0;
+});
+// ... main thread keeps polling its descriptors on schedule ...
+var rc = h.join();                   // returns the lambda's i32
+```
+
+Timed, the main loop held its 150ms cadence throughout while the thread sat in a
+600ms blocking `collect()`, and `join()` returned the value the lambda returned.
+That is exactly the primitive an event-driven program needs to move a slow API
+call off a latency-sensitive loop.
+
+**Impact:** a worker that returns nothing is the natural thing to write — the
+whole point is the side effect — and it costs a core dump with nothing to bisect
+from. Storing a lambda in a variable is the natural way to reuse or share one,
+and it produces an error naming an internal symbol. Both are reachable within
+about a minute of discovering the keyword, which is where the first impression
+of the feature gets made.
+
+---
+
+## 4. `Error` cannot carry a computed message
 
 **Environment:** `sun 0.dev (46190fcbc286)`, x86_64 Linux.
 
@@ -172,7 +261,7 @@ with computed values, this is the one left.
 
 ---
 
-## 4. No macOS target: `extern "C"` is ELF-only, which blocks distribution entirely
+## 5. No macOS target: `extern "C"` is ELF-only, which blocks distribution entirely
 
 **Environment:** `sun 0.dev (46190fcbc286)`, building on x86_64 Linux.
 
@@ -191,9 +280,9 @@ Error: no C ABI rules for target 'aarch64-apple-darwin';
 **Impact:** this got *broader* with the new stdlib, not narrower. `stdlib/sys.sun`
 routes every libc call the standard library makes through `extern "C"`, so the
 ELF restriction is no longer something an application can avoid by avoiding the
-FFI: `namo_complete` now contains no `extern "C"` and no `unsafe` block
-anywhere, and still cannot be built for macOS, because `sun.io` and
-`sun.process` can't be. Any program that opens a file is in the same position.
+FFI: for a while `namo_complete` contained no `extern "C"` and no `unsafe` block
+anywhere, and still could not be built for macOS, because `sun.io` and
+`sun.process` cannot be. Any program that opens a file is in the same position.
 This is the single highest-impact addition for anyone shipping a Sun program to
 end users.
 
@@ -202,7 +291,7 @@ toolchain to build with either.
 
 ---
 
-## 5. No TLS, so any HTTPS client has to shell out
+## 6. No TLS, so any HTTPS client has to shell out
 
 **Environment:** `sun 0.dev (46190fcbc286)`, x86_64 Linux.
 
@@ -234,7 +323,42 @@ rejects function pointers**, which rules out libcurl's write-callback API.
 
 ---
 
-## 6. A `ref` local cannot be bound to a class field
+## 7. No pseudo-terminal support, and `sun.io` cannot express the flags around it
+
+**Environment:** `sun 0.dev (46190fcbc286)`, x86_64 Linux.
+
+There is no way to allocate a pty from Sun. `sun.io` opens files, `sun.process`
+runs children, `Poller` waits on descriptors — but nothing creates the terminal
+a child would be given, and nothing sets or reads a window size.
+
+**Requested:** pty allocation (`posix_openpt` / `grantpt` / `unlockpt` /
+`ptsname`, or one call that returns a master/slave pair), and a way to get and
+set a terminal's window size.
+
+Two smaller gaps sit next to it, both hit in the same file:
+
+- `File.open` takes a `FileMode` of `Read`, `Write` or `Append`, so there is no
+  way to ask for read-write, or for `O_NONBLOCK`. Opening a FIFO read-write is
+  the standard way to hold a pipe open without blocking on a reader and without
+  risking `SIGPIPE`; expressing it needs a raw `open`.
+- `ioctl` is not exposed at all, which is what the window size needs.
+
+**Impact:** this is the one thing that put FFI back into a project that had
+none. After the `46190fcbc286` stdlib, `namo_complete` compiled with no
+`extern "C"` and no `unsafe` block anywhere. It now has eight extern
+declarations and ten `unsafe` blocks, all of them in one file
+([`src/cmd_output_relay.sun`](https://github.com/namo-robotics/namo_complete/blob/main/src/cmd_output_relay.sun)),
+purely to allocate a pty, copy the window size onto it, and open a FIFO
+read-write.
+
+A pty is not an exotic requirement: it is what anything wanting to sit between a
+shell and its terminal needs — a recorder, a multiplexer, a test harness driving
+an interactive program. And because of issue #5, that file is also the reason
+the whole project cannot target macOS.
+
+---
+
+## 8. A `ref` local cannot be bound to a class field
 
 **Environment:** `sun 0.dev (46190fcbc286)`, x86_64 Linux.
 
@@ -303,7 +427,7 @@ this would be one line and no copy.
 
 ---
 
-## 7. `String.split` keeps empty pieces, and there is no whitespace-collapsing helper
+## 9. `String.split` keeps empty pieces, and there is no whitespace-collapsing helper
 
 **Environment:** `sun 0.dev (46190fcbc286)`, x86_64 Linux.
 
@@ -336,7 +460,7 @@ no stdlib equivalent at all.
 
 ---
 
-## 8. `partial` is a reserved word, with a diagnostic that does not say so
+## 10. `partial` is a reserved word, with a diagnostic that does not say so
 
 **Environment:** `sun 0.dev (46190fcbc286)`, x86_64 Linux.
 
@@ -358,7 +482,7 @@ it took a bisect. A reserved-word list in the docs would also do.
 
 ---
 
-## 9. `&&` / `||` produce a parse error that does not suggest `and` / `or`
+## 11. `&&` / `||` produce a parse error that does not suggest `and` / `or`
 
 **Environment:** `sun 0.dev (46190fcbc286)`, x86_64 Linux.
 
@@ -379,7 +503,7 @@ it to what was written.
 
 ---
 
-## 10. `Json(...)` takes ownership of its `String`, which is not documented
+## 12. `Json(...)` takes ownership of its `String`, which is not documented
 
 **Environment:** `sun 0.dev (46190fcbc286)`, x86_64 Linux.
 
@@ -400,7 +524,7 @@ the common case, and it is where values are most likely to be reused.
 
 ---
 
-## 11. Stdlib changes ship with no deprecation window or changelog
+## 13. Stdlib changes ship with no deprecation window or changelog
 
 **Environment:** `sun 0.dev (46190fcbc286)`, x86_64 Linux.
 
@@ -445,7 +569,7 @@ would have made it cost almost nothing.
 
 ---
 
-## 12. `_static_ptr_data` / `_static_ptr_len` are documented as discouraged, but are the only option
+## 14. `_static_ptr_data` / `_static_ptr_len` are documented as discouraged, but are the only option
 
 **Environment:** `sun 0.dev (46190fcbc286)`, x86_64 Linux.
 
@@ -459,9 +583,9 @@ acknowledging that these intrinsics are the intended tool for it.
 
 **Impact:** much reduced by this stdlib. Now that paths are `raw_ptr<u8>` and a
 literal narrows to one automatically, this project no longer calls either
-intrinsic anywhere. What is left is a documentation contradiction rather than a
+intrinsic anywhere — including in the one file that does use the FFI. What is left is a documentation contradiction rather than a
 daily inconvenience — but it still bites anyone who has to read the bytes of a
-`static_ptr` they were handed, which issue #3 shows is still reachable.
+`static_ptr` they were handed, which issue #4 shows is still reachable.
 
 ---
 
@@ -471,13 +595,20 @@ Worth recording alongside the list above.
 
 The `46190fcbc286` stdlib is the best thing to happen to this project. `Command`
 / `Child` / `Output`, `Poller`, `read_dir`, `sun.env` and `sun.time` replaced
-every last line of FFI in it: no `extern "C"`, no `unsafe`, no `struct
-linux_dirent64` stepped through by byte offset, no `struct pollfd` assembled in
-a `ContiguousBuffer<u8>`. All of it compiled and passed the full suite on the
+every line of FFI it had at the time: no `struct linux_dirent64` stepped through
+by byte offset, no `struct pollfd` assembled in a `ContiguousBuffer<u8>`. The
+`extern "C"` block that came back later is for the pty (issue #7) and nothing
+else — none of what the stdlib now covers has had to go back to the FFI. All of it compiled and passed the full suite on the
 first attempt, which for a rewrite that touched the daemon's fork, its poll loop
 and its HTTP client is a strong statement about the API design. `Child.collect`
 polling both pipes rather than draining one and then the other is the kind of
 detail that is easy to get wrong by hand and was simply right here.
+
+`spawn` deserves its own line: an OS thread from a language keyword, `join()`
+returning the lambda's value, and a blocking subprocess inside the worker
+leaving the main loop's timing untouched. Issue #3 is about the two shapes of it
+that fail, and it is filed the way it is because the shape that works is worth
+protecting.
 
 From before: the borrow checker caught a real use-after-move in this project's
 JSON code on the first compile. `manifest { suns: [...] }` multi-file builds and
