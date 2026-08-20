@@ -395,6 +395,67 @@ fi
 # The keys
 # ---------------------------------------------------------------------------
 
+# Before a `bind -x` handler runs, bash erases the row the line is on and
+# leaves the cursor at column 0 of the blank row (readline 8.0's
+# rl_clear_visible_line; older bash and TERM=dumb move to a fresh row
+# instead). It redraws only after the handler returns -- so every moment the
+# daemon spends thinking is a moment you stare at a blank row where your
+# command was. The first thing a handler does, then, is paint the line back
+# where it was, prompt and all; \[ \] arrive from ${PS1@P} as \001 \002 and
+# would be echoed, so they are stripped.
+#
+# The flip side: readline still believes the row is blank with the cursor at
+# column 0, and its redraw draws from what it believes. A handler that ends
+# with the cursor on a *later* row is fine -- the redraw lands there, on a
+# fresh line -- but one that never left the repainted row must blank it again
+# before returning, so the redraw finds the row exactly as readline left it.
+# _NAMO_REPAINTED is that debt, and printing rows below cancels it.
+_NAMO_REPAINTED=0
+_namo_line_repaint() {
+  [ -t 1 ] || return 0
+  (( BASH_VERSINFO[0] >= 5 )) || return 0
+  [[ "$TERM" == dumb ]] && return 0
+  local p=${PS1%"$_NAMO_PS1_MARK"}
+  p=${p@P}
+  p=${p##*$'\n'}
+  p=${p//$'\001'/}; p=${p//$'\002'/}
+  # The prompt's width is counted in columns, not bytes: an ordinary Ubuntu
+  # prompt is mostly escape bytes -- a title-setting OSC, colors -- and
+  # counting those once had this skipping the repaint on any real prompt.
+  # Colors (CSI) are kept and replayed; OSC sequences are dropped whole, since
+  # replaying a terminal-integration mark would announce a prompt that is not
+  # one.
+  local out='' vis='' chunk rest
+  while [[ $p == *$'\033'* ]]; do
+    chunk=${p%%$'\033'*}; vis+=$chunk; out+=$chunk
+    p=${p#*$'\033'}
+    case $p in
+      '['*)                                 # CSI: params, then a final in @-~
+        chunk=$'\033['; p=${p:1}
+        while [[ -n $p && $p != [@-~]* ]]; do chunk+=${p:0:1}; p=${p:1}; done
+        chunk+=${p:0:1}; p=${p:1}; out+=$chunk ;;
+      ']'*)                                 # OSC: runs to BEL or ESC-backslash
+        rest=${p#*$'\a'}
+        if [[ $rest != "$p" ]]; then p=$rest
+        else rest=${p#*$'\033'\\}; [[ $rest != "$p" ]] && p=$rest || p=''; fi ;;
+      *) p=${p:1} ;;                        # two-byte escape
+    esac
+  done
+  vis+=$p; out+=$p
+  vis=${vis//$'\a'/}; out=${out//$'\a'/}
+  # The line is cut to fit rather than skipped: a repaint that wrapped would
+  # put the cursor on a row the bookkeeping above knows nothing about.
+  local n=$(( ${COLUMNS:-80} - 1 - ${#vis} ))
+  (( n < 0 )) && n=0
+  printf '\r\033[2K%s%s' "$out" "${READLINE_LINE:0:n}"
+  _NAMO_REPAINTED=1
+}
+_namo_line_restore() {
+  [ "$_NAMO_REPAINTED" = 1 ] || return 0
+  _NAMO_REPAINTED=0
+  printf '\r\033[2K'
+}
+
 # Candidates arrive as "<flag> TAB <command> TAB <description>". The daemon has
 # already pulled ask mode's two halves apart and decided whether a command is
 # one to stop on ("!"), so there is nothing to parse here: pick one, insert it.
@@ -409,11 +470,17 @@ _namo_pick_and_insert() {
   # Alt-O takes the top candidate; Alt-A and ask mode (force) open the list.
   local chosen="${cands[0]}" flag cmd desc i k
   if [[ "$force" == 1 ]] && (( ${#cands[@]} > 1 )); then
-    printf '\n'
+    # The first row of the list lands on the reserved hint row, which may
+    # still be holding "hint: <cmd>  (Alt-O / Alt-A for more)". "  1) " is a
+    # column shorter than "hint: ", so without an erase the tail of the old
+    # row survives past the end of the new one -- the last character of the
+    # hint's command, then its suffix, stuck to what we just printed.
+    _NAMO_REPAINTED=0   # rows go below: bash's redraw lands on a fresh line
+    printf '\n\r\033[2K'
     for i in "${!cands[@]}"; do
       IFS=$'\t' read -r flag cmd desc <<<"${cands[$i]}"
-      printf '  %d) %s\n' "$((i + 1))" "$cmd"
-      [[ -n "$desc" ]] && printf '     \033[2m%s\033[0m\n' "$desc"
+      printf '  %d) %s\033[K\n' "$((i + 1))" "$cmd"
+      [[ -n "$desc" ]] && printf '     \033[2m%s\033[0m\033[K\n' "$desc"
     done
     read -rsn1 -p "  select [1-${#cands[@]}]: " k
     printf '\n'
@@ -431,7 +498,9 @@ _namo_pick_and_insert() {
 
   if [[ "$flag" == '!' ]]; then
     local yn
-    printf '\n  \033[33mdestructive:\033[0m %s\n' "$cmd"
+    # Straight from Alt-O this row is the hint row too: erase it first.
+    _NAMO_REPAINTED=0
+    printf '\n\r\033[2K  \033[33mdestructive:\033[0m %s\033[K\n' "$cmd"
     read -rsn1 -p "  insert anyway? [y/N] " yn
     printf '\n'
     [[ "$yn" == [yY] ]] || return 0
@@ -463,6 +532,7 @@ _namo_read_question() {
 }
 
 _namo_read_question_on_tty() {
+  _NAMO_REPAINTED=0
   _NAMO_QUESTION=""
   local q="$READLINE_LINE" ch
   # The row below the line is the reserved hint row, and a hint may still be
@@ -485,17 +555,21 @@ _namo_read_question_on_tty() {
 
 _namo_key_request() {  # mode ("c" or "a"), show_picker
   local mode=$1 force=$2
+  _NAMO_REPAINTED=0
 
   if [[ "$mode" == a ]]; then
-    _namo_read_question || return 0
-    [[ -z "${_NAMO_QUESTION//[[:space:]]/}" ]] && return 0
-    _namo_ask_daemon a "$_NAMO_QUESTION" || return 0
+    _namo_line_repaint
+    _namo_read_question || { _namo_line_restore; return 0; }
+    [[ -z "${_NAMO_QUESTION//[[:space:]]/}" ]] && { _namo_line_restore; return 0; }
+    _namo_ask_daemon a "$_NAMO_QUESTION" || { _namo_line_restore; return 0; }
   else
     [[ -z "${READLINE_LINE//[[:space:]]/}" ]] && return 0
-    _namo_ask_daemon c "$READLINE_LINE" || return 0
+    _namo_line_repaint
+    _namo_ask_daemon c "$READLINE_LINE" || { _namo_line_restore; return 0; }
   fi
 
   _namo_pick_and_insert "$_NAMO_REPLY_OUT" "$force"
+  _namo_line_restore
 }
 
 _namo_on_complete_key()     { _namo_key_request c 0; }
