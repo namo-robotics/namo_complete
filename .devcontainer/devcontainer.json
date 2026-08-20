@@ -59,7 +59,8 @@
       "extensions": [
         "anthropic.claude-code",
         "timonwong.shellcheck",
-        "namo-robotics.sun-language"
+        "namo-robotics.sun-language",
+        "yzhang.markdown-all-in-one"
       ],
       "settings": {
         "terminal.integrated.defaultProfile.linux": "bash",
