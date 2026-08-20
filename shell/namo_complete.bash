@@ -640,3 +640,16 @@ command_not_found_handle() {
   _namo_should_correct && _namo_queue_correction "$1" "$*"
   return $rc
 }
+
+# ---------------------------------------------------------------------------
+# Startup
+# ---------------------------------------------------------------------------
+
+# The prompt hook covers every prompt from the first one on, but not the file
+# being sourced into a shell that is already sitting at one: there the daemon
+# would not exist until the *next* prompt, and the keys would be dead exactly
+# where someone who just sourced this would try them. Run the between-commands
+# work once now. All of it is idempotent, and the history snapshot it takes --
+# empty at .bashrc time, since bash reads the history file after the startup
+# files -- is replaced by the one the first prompt takes.
+_namo_on_prompt
