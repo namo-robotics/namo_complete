@@ -42,7 +42,7 @@ esac
 
 if [ -z "$VERSION" ]; then
   # Follow the /releases/latest redirect: no token, no rate limit, no jq.
-  loc=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+  loc=$(curl -fsSLI -o /dev/null -w '%{url_effective}' -H 'Cache-Control: no-cache' \
         "https://github.com/$REPO/releases/latest" 2>/dev/null || true)
   VERSION="${loc##*/}"
   case "$VERSION" in
@@ -57,14 +57,19 @@ BASE="https://github.com/$REPO/releases/download/$VERSION"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-say "downloading $NAME"
-curl -fsSL -o "$TMP/$NAME.tar.gz" "$BASE/$NAME.tar.gz" || die "download failed: $BASE/$NAME.tar.gz"
+# `dev` is a rolling tag: the same URL serves different bytes from one merge to
+# the next, and anything in the way -- a CDN edge, a corporate proxy -- may hand
+# back the copy it already has. Ask for a fresh one.
+fetch() { curl -fsSL -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' "$@"; }
 
-if curl -fsSL -o "$TMP/SHA256SUMS" "$BASE/SHA256SUMS" 2>/dev/null \
+say "downloading $NAME"
+fetch -o "$TMP/$NAME.tar.gz" "$BASE/$NAME.tar.gz" || die "download failed: $BASE/$NAME.tar.gz"
+
+if fetch -o "$TMP/SHA256SUMS" "$BASE/SHA256SUMS" 2>/dev/null \
    && command -v sha256sum >/dev/null 2>&1; then
   ( cd "$TMP" && grep " $NAME.tar.gz\$" SHA256SUMS | sha256sum -c --status - ) \
     || die "checksum mismatch -- refusing to install."
-  say "checksum verified"
+  say "checksum verified: $(sha256sum "$TMP/$NAME.tar.gz" | cut -c1-16)..."
 else
   warn "skipping checksum verification."
 fi

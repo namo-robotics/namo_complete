@@ -77,6 +77,25 @@ out=$(env ANTHROPIC_API_KEY=x NAMO_ENDPOINT='http://127.0.0.1:9/v1' \
         NAMO_LINE='git commit' NAMO_CWD="$PWD" "$BIN" </dev/null 2>/dev/null); rc=$?
 [ -z "$out" ] && ok "unreachable endpoint: stdout stays clean" || bad "unreachable endpoint"
 
+# Which build is this? `dev` is a rolling tag, so the commit is the only thing
+# that identifies a binary -- and the question has to be answerable on a machine
+# where the tool is switched off and misbehaving.
+for flag in --version -V; do
+  # NAMO_DISABLE and a missing key are both deliberate: the answer must not
+  # depend on the tool being configured or turned on.
+  out=$(env -u ANTHROPIC_API_KEY NAMO_DISABLE=1 "$BIN" "$flag" </dev/null 2>/dev/null); rc=$?
+  { [ "$rc" = 0 ] && printf '%s\n' "$out" | grep -qE '^namo_complete .+ \(commit .+, built .+\)$'; } \
+    && ok "$flag names the version, the commit and the build time" \
+    || bad "$flag printed (rc=$rc): $out"
+done
+
+ver=$("$BIN" --version 2>/dev/null)
+printf '%s\n' "$ver" | grep -q '^built with sun ' \
+  && ok "--version names the compiler it was built with" || bad "no built-with line"
+printf '%s\n' "$ver" | grep -q 'commit unknown' \
+  && bad "the binary does not know its own commit" \
+  || ok "the commit is stamped, not a placeholder"
+
 # --------------------------------------------------------------------------
 head_ "2. end-to-end against a mock API"
 # --------------------------------------------------------------------------
@@ -314,6 +333,16 @@ for seq in '\\eo' '\\ea' '\\eg'; do
   printf '%s' "$binds" | grep -q "\"$seq\"" \
     && ok "keyseq $seq bound" || bad "keyseq $seq not bound"
 done
+
+# The pair a shell is really running, for when the two halves disagree.
+res=$(NAMO_BIN="$PWD/$BIN" bash -i -c '
+  source shell/namo_complete.bash 2>/dev/null
+  namo-version' 2>/dev/null)
+{ printf '%s\n' "$res" | grep -q "^binary: .*$BIN\$" \
+  && printf '%s\n' "$res" | grep -q 'namo_complete .*commit ' \
+  && printf '%s\n' "$res" | grep -q '^shell: '; } \
+  && ok "namo-version names the shell file, the binary and its commit" \
+  || bad "namo-version printed: $(printf '%s' "$res" | tr '\n' '|')"
 
 # default: no picker -- the top suggestion is accepted with no extra keystroke
 res=$(bash -i -c '
@@ -970,6 +999,19 @@ out=$(env -u ANTHROPIC_API_KEY NAMO_LINE='gi' NAMO_CWD="$PWD" \
         "$PKGTMP/prefix/bin/namo_complete" </dev/null 2>&1); rc=$?
 [ "$rc" = 0 ] && [ -z "$out" ] \
   && ok "installed binary runs" || bad "installed binary misbehaved (rc=$rc out=$out)"
+
+# The whole point of stamping: an installed copy can be asked what it is,
+# without the source tree it came from.
+"$PKGTMP/prefix/bin/namo_complete" --version 2>/dev/null | grep -q '^namo_complete .*commit ' \
+  && ok "the installed binary reports its version and commit" \
+  || bad "installed binary has no --version"
+# Captured rather than piped: `grep -q` closes the pipe on its first match, and
+# the installer runs under `set -o pipefail` here.
+instout=$(env BASHRC=/dev/null "$PKGTMP/x/$PNAME/install.sh" \
+            --prefix "$PKGTMP/p4" --no-bashrc 2>/dev/null)
+printf '%s\n' "$instout" | grep -q 'namo_complete .*commit ' \
+  && ok "the installer prints the build it just installed" \
+  || bad "install output does not say which build landed"
 
 # .bashrc handling: adds once, never duplicates, and honours --no-bashrc.
 : > "$PKGTMP/bashrc"

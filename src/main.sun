@@ -8,6 +8,7 @@
 // Any failure is silent on stdout so the shell prompt degrades gracefully.
 
 using sun;
+using sun.env;
 using namo;
 
 function emit(alloc: ref HeapAllocator, items: ref Vec<String>) void {
@@ -16,8 +17,38 @@ function emit(alloc: ref HeapAllocator, items: ref Vec<String>) void {
   }
 }
 
-function main() i32 {
+// Which build is this? The `dev` release is a rolling tag, so the version alone
+// does not identify a binary; the commit it was built from does. Stamped by
+// build.sh into src/version.sun.
+function print_version(alloc: ref HeapAllocator) void {
+  var line = String(alloc, "namo_complete ");
+  line.append(VERSION);
+  line.append(" (commit ");
+  line.append(COMMIT);
+  line.append(", built ");
+  line.append(BUILT);
+  line.append(")");
+  println(line);
+  var second = String(alloc, "built with ");
+  second.append(BUILT_WITH);
+  println(second);
+}
+
+function main(argc: i32, argv: raw_ptr<raw_ptr<i8>>) i32 {
   var alloc = make_heap_allocator();
+
+  // The only thing here that reads argv at all -- every setting comes from the
+  // environment (see config.sun). Answered before the config, so that a shell
+  // with NAMO_DISABLE=1 can still be asked what it has installed.
+  var cli = args(alloc, argc, argv);
+  for (var i: i64 = 1; i < cli.size(); i = i + 1) {
+    var arg = cli.get_unchecked(i);
+    if (arg.equals_literal("--version") or arg.equals_literal("-V")) {
+      print_version(alloc);
+      return 0;
+    }
+  }
+
   var cfg = Config(alloc);
 
   if (cfg.disabled) {
@@ -111,6 +142,7 @@ function main() i32 {
 
 manifest {
     suns: [
+        "version.sun",
         "util.sun",
         "fs.sun",
         "config.sun",

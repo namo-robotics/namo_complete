@@ -92,6 +92,17 @@ _NAMO_CAPTURE="" # set while this shell's output really is going through a relay
 # is the only value the prompt hook needs from outside the shell.
 _NAMO_BIN_PATH=$(_namo_find_binary) || _NAMO_OFF=1
 
+# Which pair is this shell actually running? The two halves are installed
+# together but sourced and resolved separately, so a shell can end up with a new
+# binary and an old bash file, or the other way round -- and either explains
+# behaviour the current source does not. Typed by hand, so a fork is free here.
+_NAMO_SHELL_FILE="${BASH_SOURCE[0]}"
+namo-version() {
+  printf 'shell:  %s\n' "$_NAMO_SHELL_FILE"
+  printf 'binary: %s\n' "${_NAMO_BIN_PATH:-not found}"
+  [ -n "$_NAMO_BIN_PATH" ] && "$_NAMO_BIN_PATH" --version
+}
+
 _namo_on_exit() {
   rm -f "$_NAMO_FIFO" "$_NAMO_REPLYFIFO" "$_NAMO_HISTFILE" "$_NAMO_PIDFILE" \
         "$_NAMO_DYMFILE" "$_NAMO_PTSFILE" "$_NAMO_OUTFILE" \

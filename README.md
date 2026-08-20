@@ -66,6 +66,21 @@ which its standard library is built on, targets ELF only
 
 See [what gets sent to Anthropic](#what-gets-sent-to-anthropic) first.
 
+### Which build am I running?
+
+```bash
+namo_complete --version
+# namo_complete dev (commit 7be6e48d1c2f, built 2026-08-20T02:04:41Z)
+# built with sun 0.dev (46190fcbc286)
+
+namo-version        # the same, plus the paths this shell actually resolved
+```
+
+`dev` is a rolling tag, so the version alone does not identify a build — the
+commit does. `namo-version` also names the bash file this shell sourced and the
+binary it found, which is what to compare when one machine behaves differently
+from another.
+
 ## Uninstall
 
 ```bash

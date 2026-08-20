@@ -34,9 +34,23 @@ mkdir -p "$BIN_DIR" "$SHARE_DIR"
 
 install -m 0755 "$HERE/bin/namo_complete"                      "$BIN_DIR/namo_complete"
 install -m 0644 "$HERE/share/namo_complete/namo_complete.bash" "$SHARE_DIR/"
-[ -f "$HERE/VERSION" ] && install -m 0644 "$HERE/VERSION" "$SHARE_DIR/VERSION"
+[ -f "$HERE/VERSION" ]    && install -m 0644 "$HERE/VERSION"    "$SHARE_DIR/VERSION"
+[ -f "$HERE/BUILT-WITH" ] && install -m 0644 "$HERE/BUILT-WITH" "$SHARE_DIR/BUILT-WITH"
 
 printf 'installed:\n  %s\n  %s/namo_complete.bash\n' "$BIN_DIR/namo_complete" "$SHARE_DIR"
+
+# Say which build this is, from the binary itself: `dev` is a rolling tag, so
+# the version alone does not identify one. Same string `namo_complete --version`
+# prints later, which is how a shell that is misbehaving gets identified.
+"$BIN_DIR/namo_complete" --version 2>/dev/null | sed 's/^/  /' || true
+
+# An older copy earlier on PATH is the quiet failure this catches: the install
+# succeeds, and the shell goes on running the other one.
+other=$(command -v namo_complete 2>/dev/null || true)
+if [ -n "$other" ] && [ "$other" != "$BIN_DIR/namo_complete" ]; then
+  printf '\nwarning: %s comes first on your PATH and will be used instead:\n  %s\n' \
+    "namo_complete" "$($other --version 2>/dev/null | head -1 || echo "$other")" >&2
+fi
 
 SOURCE_LINE="[ -f \"$SHARE_DIR/namo_complete.bash\" ] && . \"$SHARE_DIR/namo_complete.bash\""
 

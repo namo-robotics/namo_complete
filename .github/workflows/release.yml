@@ -57,7 +57,10 @@ jobs:
           sun --version | tee /tmp/sun-version.txt
 
       - name: Build
-        run: ./build.sh
+        # The version is stamped into the binary, so `namo_complete --version`
+        # on a user's machine names the release it came from and the commit it
+        # was built at -- `dev` is a rolling tag and identifies nothing on its own.
+        run: NAMO_VERSION="${{ steps.v.outputs.version }}" ./build.sh
 
       - name: Verify the binary is statically linked
         run: |
