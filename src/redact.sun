@@ -1,10 +1,10 @@
 // redact.sun - decide what leaves the machine.
 //
 // Both callers now hand history in the same shape: the interactive path
-// (Alt-O / Alt-A / Alt-G) pipes `fc -ln` on stdin, the live daemon reads the
+// (Alt-O / Alt-A / Alt-G) pipes `fc -ln` on stdin, the daemon reads the
 // snapshot file the shell refreshes at each prompt. The directory listing is
 // no longer part of that stream -- the binary enumerates the directory itself
-// (see list_dir in live.sun).
+// (see list_dir in daemon.sun).
 //
 // This is the only thing between the shell history and the network, so it is
 // applied in one place for both callers.

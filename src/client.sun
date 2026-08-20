@@ -58,7 +58,7 @@ public module namo {
       return reply;
     }
 
-    // One request body per process, so a live daemon and an Alt-O run in the
+    // One request body per process, so a daemon and an Alt-O run in the
     // same shell cannot overwrite each other's file.
     ensure_dir_p(alloc, cfg.runtime_dir);
     var p_body = cfg.rt_path(alloc, "body.");

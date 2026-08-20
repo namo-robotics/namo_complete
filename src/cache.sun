@@ -98,7 +98,7 @@ public module namo {
     }
   }
 
-  // Minimum interval between live API calls, enforced with a stamp file.
+  // Minimum interval between API calls, enforced with a stamp file.
   // Returns false when the caller should back off.
   public function rate_limit_ok(alloc: ref HeapAllocator, cfg: ref Config, min_gap: i64) bool {
     ensure_dir_p(alloc, cfg.cache_dir);

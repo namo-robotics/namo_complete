@@ -1,10 +1,10 @@
-// live.sun - the as-you-type hint daemon.
+// daemon.sun - the as-you-type hint daemon.
 //
 // Records arrive as "<cwd>\t<line>", one write() into a FIFO, and everything
 // that debounces, reads a cache, calls the API or paints the screen happens
 // over here, in a process forked once per shell. Nothing in the shell is on
 // the keystroke path at all any more: the relay watches the line go past on
-// the shell's own stdout and posts it here (relay.sun), with the cwd field
+// the shell's own stdout and posts it here (cmd_output_relay.sun), with the cwd field
 // empty for the last one the shell reported at a prompt to fill.
 //
 // Bash is the reason for that split. It blanks the prompt line before running
@@ -29,7 +29,7 @@ public module namo {
   // A correction request rides the same FIFO as every keystroke, marked with
   // a leading SOH on the line field: readline cannot put a 0x01 at the start
   // of a buffer (Ctrl-A is a binding, not a character), so no line the user
-  // can type is mistaken for one. See namo_live.bash.
+  // can type is mistaken for one. See namo_complete.bash.
   var DYM_MARK: u8 = 1;
 
   // And STX marks a request the shell is *waiting* for -- Alt-O, Alt-A,
@@ -52,7 +52,7 @@ public module namo {
   // Nothing the shell had open is of any use to us; see daemon_run.
   var MAX_INHERITED_FD: i32 = 256;
 
-  public class Live {
+  public class Daemon {
     // The terminal we draw the hint row on, and the pipe the shell types
     // into. Both are owned here: closing them is what ends the daemon.
     public var tty: File;
@@ -107,7 +107,7 @@ public module namo {
   // Hint table
   // ------------------------------------------------------------------------
 
-  function table_find(st: ref Live, line: ref String) i64 {
+  function table_find(st: ref Daemon, line: ref String) i64 {
     for (var i: i64 = 0; i < st.keys.size(); i = i + 1) {
       if (st.keys.get_unchecked(i).equals(line)) {
         return i;
@@ -116,7 +116,7 @@ public module namo {
     return -1;
   }
 
-  function table_put(alloc: ref HeapAllocator, st: ref Live, line: ref String, hint: ref String) void {
+  function table_put(alloc: ref HeapAllocator, st: ref Daemon, line: ref String, hint: ref String) void {
     var at = table_find(st, line);
     if (at >= 0) {
       st.vals.set_unchecked(at, hint.clone(alloc));
@@ -142,7 +142,7 @@ public module namo {
   // which is most of the time. Relative positioning cannot do that, and it
   // still emits no newline: a newline at the bottom would scroll the screen
   // and leave the saved cursor pointing a row too low.
-  function paint(alloc: ref HeapAllocator, st: ref Live, row: ref String) void {
+  function paint(alloc: ref HeapAllocator, st: ref Daemon, row: ref String) void {
     if (st.screen.equals(row)) {
       return;
     }
@@ -167,14 +167,14 @@ public module namo {
     st.screen = row.clone(alloc);
   }
 
-  function clear_row(alloc: ref HeapAllocator, st: ref Live) void {
+  function clear_row(alloc: ref HeapAllocator, st: ref Daemon) void {
     var blank = String(alloc, "");
     paint(alloc, st, blank);
   }
 
   // Decide what the row should show for `line` and put it there. Reads only
   // the in-memory table, so this is safe to run on every single keystroke.
-  function render(alloc: ref HeapAllocator, cfg: ref Config, st: ref Live, line: ref String) void {
+  function render(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, line: ref String) void {
     if (line.length() < cfg.hint_min) {
       st.last = String(alloc, "");
       clear_row(alloc, st);
@@ -322,7 +322,7 @@ public module namo {
   }
 
   // 1 when the FIFO has bytes, 0 on timeout, -1 once the write end is gone.
-  function fifo_ready(st: ref Live, timeout_ms: i32) i32 {
+  function fifo_ready(st: ref Daemon, timeout_ms: i32) i32 {
     st.poller.clear();
     st.poller.add_read(st.fifo.get_fd());
     var ready: i32 = 0;
@@ -331,7 +331,7 @@ public module namo {
     } catch (e: IError) {
       // A signal cutting the wait short is not end-of-input; report it as a
       // timeout and let the caller decide. A wait that keeps failing ends the
-      // daemon anyway, through the blocking call at the top of live_loop.
+      // daemon anyway, through the blocking call at the top of daemon_loop.
       return 0;
     }
     if (ready <= 0) {
@@ -344,7 +344,7 @@ public module namo {
     return -1;
   }
 
-  function take_record(alloc: ref HeapAllocator, st: ref Live, out: ref String) bool {
+  function take_record(alloc: ref HeapAllocator, st: ref Daemon, out: ref String) bool {
     var found = st.pending.find_char(CH_NL);
     var idx: i64 = match found {
       Option.Some(v) => v,
@@ -382,7 +382,7 @@ public module namo {
 
   // One record, or REC_TIMEOUT after `timeout_ms` (negative blocks forever),
   // or REC_EOF once the shell that owns the write end is gone.
-  function next_record(alloc: ref HeapAllocator, st: ref Live, timeout_ms: i32, out: ref String) i32 {
+  function next_record(alloc: ref HeapAllocator, st: ref Daemon, timeout_ms: i32, out: ref String) i32 {
     var tries: i64 = 0;
     while (tries < 64) {
       tries = tries + 1;
@@ -407,7 +407,7 @@ public module namo {
     return REC_TIMEOUT;
   }
 
-  function input_waiting(st: ref Live) bool {
+  function input_waiting(st: ref Daemon) bool {
     if (st.pending.contains_char(CH_NL)) {
       return true;
     }
@@ -420,7 +420,7 @@ public module namo {
 
   // The paid call. Everything it needs beyond the line itself comes from the
   // shell's history snapshot and from the directory the line was typed in.
-  function live_call(alloc: ref HeapAllocator, cfg: ref Config, key: ref String) Vec<String> {
+  function daemon_call(alloc: ref HeapAllocator, cfg: ref Config, key: ref String) Vec<String> {
     var out = Vec<String>(alloc, 4);
     if (cfg.api_key.length() == 0) {
       return out;
@@ -472,7 +472,7 @@ public module namo {
   // network=false stays local (a cache read, ~2ms); network=true may pay for
   // an API call. Either way the answer lands in the table and the row is
   // repainted from it.
-  function serve(alloc: ref HeapAllocator, cfg: ref Config, st: ref Live, rec: ref String, network: bool) void {
+  function serve(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, rec: ref String, network: bool) void {
     var line = rec_line(alloc, rec);
     if (line.length() < cfg.hint_min) {
       return;
@@ -488,7 +488,7 @@ public module namo {
     var key = cache_key(alloc, cfg);
     var hit = cache_lookup(alloc, cfg, key);
     if (hit.size() == 0 and network) {
-      hit = live_call(alloc, cfg, key);
+      hit = daemon_call(alloc, cfg, key);
     }
 
     if (hit.size() > 0) {
@@ -511,7 +511,7 @@ public module namo {
   // own message and handed the prompt back -- the whole point of doing this
   // here is that nobody is waiting for it. Paid immediately rather than
   // debounced: the line is finished, there is no next keystroke to wait for.
-  function serve_dym(alloc: ref HeapAllocator, cfg: ref Config, st: ref Live, rec: ref String) void {
+  function serve_dym(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, rec: ref String) void {
     // The record is a knock on the door; the line itself is in the file the
     // handler wrote, as "<word> TAB <fallback> TAB <what `history 1` printed>".
     // Reading it here rather than in the shell keeps the picking-apart -- the
@@ -552,7 +552,7 @@ public module namo {
     var cwd = rec_cwd(alloc, rec);
     cfg.set_query_target(alloc, "dym", typed, cwd);
 
-    // The gap between live calls exists to bound what a burst of typing can
+    // The gap between API calls exists to bound what a burst of typing can
     // spend. One correction per command bash could not find is not a burst.
     var saved_gap: i64 = cfg.min_gap;
     cfg.min_gap = 0;
@@ -560,7 +560,7 @@ public module namo {
     var key = cache_key(alloc, cfg);
     var hit = cache_lookup(alloc, cfg, key);
     if (hit.size() == 0) {
-      hit = live_call(alloc, cfg, key);
+      hit = daemon_call(alloc, cfg, key);
     }
 
     cfg.min_gap = saved_gap;
@@ -592,7 +592,7 @@ public module namo {
   // both are posted while the daemon is anywhere in its cycle -- and neither
   // is a line being typed. So they are served here, and the caller only ever
   // sees records that are.
-  function next_line_record(alloc: ref HeapAllocator, cfg: ref Config, st: ref Live, timeout_ms: i32, out: ref String) i32 {
+  function next_line_record(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, timeout_ms: i32, out: ref String) i32 {
     var r: i32 = next_record(alloc, st, timeout_ms, out);
     var more: bool = true;
     while (r == REC_OK and more) {
@@ -612,7 +612,7 @@ public module namo {
   // The shell is inside `read -t`, so an answer always goes back -- even an
   // empty one. A request that got no reply at all would leave it there until
   // the timeout, for nothing.
-  function reply_send(alloc: ref HeapAllocator, cfg: ref Config, st: ref Live, id: ref String, items: ref Vec<String>) void {
+  function reply_send(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, id: ref String, items: ref Vec<String>) void {
     if (cfg.reply.length() == 0) {
       return;
     }
@@ -669,7 +669,7 @@ public module namo {
   // nothing to do but wait, so this is paid immediately and never debounced,
   // and the answer goes straight back down the reply FIFO. The hint row is
   // not touched: the shell owns what happens to the line it asked about.
-  function serve_sync(alloc: ref HeapAllocator, cfg: ref Config, st: ref Live, rec: ref String) void {
+  function serve_sync(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, rec: ref String) void {
     var marked = rec_line(alloc, rec);
     var body = String(alloc, "");
     for (var i: i64 = 1; i < marked.length(); i = i + 1) {
@@ -713,7 +713,7 @@ public module namo {
       var key = cache_key(alloc, cfg);
       out = cache_lookup(alloc, cfg, key);
       if (out.size() == 0) {
-        out = live_call(alloc, cfg, key);
+        out = daemon_call(alloc, cfg, key);
       }
 
       cfg.min_gap = saved_gap;
@@ -731,7 +731,7 @@ public module namo {
   // Blocks on the FIFO, so an idle shell costs nothing at all. A record means
   // a keystroke; a short gap means a look at the cache; a debounce interval of
   // silence means the user has stopped and the request is worth paying for.
-  function live_loop(alloc: ref HeapAllocator, cfg: ref Config, st: ref Live) i32 {
+  function daemon_loop(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon) i32 {
     var cur = String(alloc, "");
     var msg = String(alloc, "");
     var quiet_ms: i32 = _convert<i32>(cfg.quiet_ms);
@@ -886,7 +886,7 @@ public module namo {
     }
     silence_std_streams();
 
-    var st = Live(alloc);
+    var st = Daemon(alloc);
     try {
       st.tty.open(cfg.tty_path.c_str(), FileMode.Write);
     } catch (e: IError) {
@@ -901,7 +901,7 @@ public module namo {
       return 0;
     }
 
-    var rc = live_loop(alloc, cfg, st);
+    var rc = daemon_loop(alloc, cfg, st);
     clear_row(alloc, st);
     st.fifo.close();
     st.tty.close();

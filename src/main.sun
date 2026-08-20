@@ -55,14 +55,15 @@ function main(argc: i32, argv: raw_ptr<raw_ptr<i8>>) i32 {
     return 0;
   }
 
-  // Live hints: fork off the daemon and give the shell its prompt back. See
-  // live.sun for why none of that work can happen in the shell itself.
+  // Hints as you type: fork off the daemon and give the shell its prompt back.
+  // See
+  // daemon.sun for why none of that work can happen in the shell itself.
   if (cfg.daemon) {
     return daemon_run(alloc, cfg);
   }
 
   // Output capture: the shell's stdout on the other side of a pty. See
-  // relay.sun for why it is a pty and not a pipe.
+  // cmd_output_relay.sun for why it is a pty and not a pipe.
   if (cfg.relay) {
     return relay_run(alloc, cfg);
   }
@@ -90,7 +91,7 @@ function main(argc: i32, argv: raw_ptr<raw_ptr<i8>>) i32 {
     }
   }
 
-  // Live rendering calls us on every keystroke and must never block on the
+  // Cache-only mode is asked for a line at a time and must never block on the
   // network: serve from cache or return nothing at all.
   if (cfg.cache_only) {
     return 0;
@@ -107,7 +108,7 @@ function main(argc: i32, argv: raw_ptr<raw_ptr<i8>>) i32 {
 
   // History arrives on stdin: `fc` is a shell builtin, so the shell is the
   // only thing that can read its own history. The directory listing is ours
-  // to take -- same code the live daemon uses, so both paths send the same
+  // to take -- same code the daemon uses, so both paths send the same
   // context for the same directory.
   var raw_stdin = read_fd(alloc, 0);
   var history = parse_history(alloc, raw_stdin, cfg.history_lines);
@@ -150,8 +151,8 @@ manifest {
         "redact.sun",
         "client.sun",
         "cache.sun",
-        "live.sun",
-        "relay.sun"
+        "daemon.sun",
+        "cmd_output_relay.sun"
     ]
     moons: ["stdlib.moon"]
 }

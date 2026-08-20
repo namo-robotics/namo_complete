@@ -34,7 +34,7 @@
 #
 # Everything else -- what to send, what to keep out of it, which suggestions
 # are worth stopping on, what the hint says and where it goes -- belongs to the
-# binary. See src/live.sun and src/relay.sun.
+# binary. See src/daemon.sun and src/cmd_output_relay.sun.
 #
 # Nothing here ever executes a command. The only thing that reaches your line
 # is a candidate you picked, and it sits there until you press Enter.
@@ -75,14 +75,14 @@ _namo_find_binary() {
 # The history snapshot lives here, so the directory must be private.
 _NAMO_DIR="${XDG_RUNTIME_DIR:-/tmp/namo-$UID}/namo_complete"
 mkdir -p "$_NAMO_DIR" 2>/dev/null && chmod 700 "$_NAMO_DIR" 2>/dev/null
-_NAMO_FIFO="$_NAMO_DIR/live_fifo.$$"
-_NAMO_REPLYFIFO="$_NAMO_DIR/live_reply.$$"
-_NAMO_HISTFILE="$_NAMO_DIR/live_hist.$$"
-_NAMO_PIDFILE="$_NAMO_DIR/live_pid.$$"
-_NAMO_DYMFILE="$_NAMO_DIR/live_dym.$$"
-_NAMO_PTSFILE="$_NAMO_DIR/live_pts.$$"
-_NAMO_OUTFILE="$_NAMO_DIR/live_out.$$"
-_NAMO_RELAY_PIDFILE="$_NAMO_DIR/live_relay.$$"
+_NAMO_FIFO="$_NAMO_DIR/fifo.$$"
+_NAMO_REPLYFIFO="$_NAMO_DIR/reply.$$"
+_NAMO_HISTFILE="$_NAMO_DIR/hist.$$"
+_NAMO_PIDFILE="$_NAMO_DIR/daemon_pid.$$"
+_NAMO_DYMFILE="$_NAMO_DIR/dym.$$"
+_NAMO_PTSFILE="$_NAMO_DIR/pts.$$"
+_NAMO_OUTFILE="$_NAMO_DIR/out.$$"
+_NAMO_RELAY_PIDFILE="$_NAMO_DIR/relay_pid.$$"
 
 _NAMO_WFD=""   # write end of the request FIFO, held open by this shell
 _NAMO_RFD=""   # read end of the reply FIFO, likewise
@@ -161,7 +161,7 @@ _namo_daemon_ensure() {
 # this shell's stdout -- and if that something is a pipe, every command loses
 # isatty(1) and with it colour and pagers. So it is a pty: `exec > "$pts"`
 # below leaves the shell writing to a terminal, which the relay copies through
-# to the real one while keeping the last NAMO_OUTPUT lines. See src/relay.sun.
+# to the real one while keeping the last NAMO_OUTPUT lines. See src/cmd_output_relay.sun.
 # ---------------------------------------------------------------------------
 
 _namo_relay_is_running() {
@@ -381,7 +381,7 @@ fi
 #
 # Not a single key is rebound here, and that is the point. Readline echoes what
 # you type onto this shell's stdout, which is the relay's pty, and the relay
-# follows the line from there (src/relay.sun). Rebinding every printable key
+# follows the line from there (src/cmd_output_relay.sun). Rebinding every printable key
 # was the other way to see it, and it made bash erase and repaint the prompt
 # row once per character -- flicker on any terminal that draws as the bytes
 # arrive, plus slower paste, per-character undo, byte-wise UTF-8 and no vi

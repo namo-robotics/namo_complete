@@ -37,7 +37,7 @@ alive() {
     *)      return 0 ;;
   esac
 }
-live_helpers() {
+running_helpers() {
   local p out=""
   for p in $(pgrep -x namo_complete 2>/dev/null | sort -n); do
     alive "$p" && out="$out$p "
@@ -108,7 +108,7 @@ class H(http.server.BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers.get('content-length', 0)))
         open('/tmp/namo_req.json','wb').write(body)
         # Every request, appended: a pty test cannot rely on being the last
-        # caller, since the live daemon is asking for its own hints throughout.
+        # caller, since the daemon is asking for its own hints throughout.
         open('/tmp/namo_reqs.log','ab').write(body + b'\\n')
         open('/tmp/namo_hdr.txt','w').write(str(self.headers))
         # Correction mode gets its own answer, so a "did you mean" test cannot
@@ -611,7 +611,7 @@ RCEOF
   rm -f /tmp/namo_rc_dym.sh
   unset -f runpty ms_now
   # A daemon still holding a slow correction would show up as a leak in the
-  # next section, which counts the daemons that outlive their shell.
+  # next section, which counts the helpers that outlive their shell.
   sleep 1.5
 else
   echo "  (skipped pty tests: 'script' not available)"
@@ -684,7 +684,7 @@ export ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
 source "$PWD/shell/namo_complete.bash"
 PS1='T\$ '
 RCEOF
-  daemons_before=$(live_helpers)
+  daemons_before=$(running_helpers)
   jobnoise=$(printf 'git com\nsleep 1\nexit\n' \
     | script -qec "bash --rcfile /tmp/namo_rc_test.sh -i" /dev/null 2>&1 \
     | tr -d '\r' | grep -acE '^\[[0-9]+\][[:space:]]+[0-9]+')
@@ -694,10 +694,10 @@ RCEOF
   # The daemon holds the read end of the FIFO; when the shell that owns the
   # write end goes away it must see end-of-file and stop, not linger.
   sleep 0.8
-  daemons_after=$(live_helpers)
+  daemons_after=$(running_helpers)
   [ "$daemons_before" = "$daemons_after" ] \
-    && ok "no live daemon left behind by an exited shell" \
-    || bad "a live daemon outlived its shell"
+    && ok "no daemon left behind by an exited shell" \
+    || bad "the daemon outlived its shell"
 
   # Output with no trailing newline must not swallow the next prompt: the hook
   # pads to the end of the row so the wrap happens before the prompt is drawn.
@@ -718,10 +718,10 @@ else
 fi
 
 # --------------------------------------------------------------------------
-head_ "5b. the live daemon"
+head_ "5b. the daemon"
 # --------------------------------------------------------------------------
 # The FIFO read loop, the debounce, the cache lookup, the API call and the hint
-# row all live inside the binary now (src/live.sun); the shell only writes
+# row all sit inside the binary (src/daemon.sun); the shell only writes
 # "<cwd><tab><line>" into a pipe. These drive that side of it directly.
 DT=$(mktemp -d)
 mkfifo -m 600 "$DT/fifo" "$DT/reply"
@@ -737,7 +737,7 @@ dpid=$(cat "$DT/pid" 2>/dev/null)
   && ok "daemon detaches and records its pid before returning" \
   || bad "daemon did not start"
 
-printf '%s\t%s\n' "$PWD" "live daemon probe" >&"$DFD"
+printf '%s\t%s\n' "$PWD" "daemon probe" >&"$DFD"
 sleep 1.2
 grep -q 'hint: ' "$DT/tty" && ok "hint painted after the debounce" || bad "no hint painted"
 # One row below the cursor, never on it: the row the prompt hook reserves.
@@ -776,11 +776,11 @@ hdr=""; IFS= read -r -t 5 -u "$RFD" hdr
 exec {RFD}>&-
 
 grep -q 'ghp_LIVELEAK' /tmp/namo_req.json \
-  && bad "SECRET LEAKED from the live path" \
-  || ok "history snapshot redacted on the live path too"
+  && bad "SECRET LEAKED from the daemon path" \
+  || ok "history snapshot redacted on the daemon path too"
 
 python3 - <<'PYCHK' && ok "listing gathered by the binary, sorted, no . or .." \
-                    || bad "directory listing wrong on the live path"
+                    || bad "directory listing wrong on the daemon path"
 import json
 c = json.load(open('/tmp/namo_req.json'))['messages'][0]['content']
 assert '<ls>' in c, c
@@ -797,9 +797,9 @@ sleep 0.5
 grep -q '2K' "$DT/tty" && ok "short line clears the hint row" || bad "row not cleared"
 
 rm -f /tmp/namo_req.json
-printf '%s\t%s\n' "$PWD" "live daemon probe" >&"$DFD"
+printf '%s\t%s\n' "$PWD" "daemon probe" >&"$DFD"
 sleep 1.2
-[ -f /tmp/namo_req.json ] && bad "live path re-called the API for a cached line" \
+[ -f /tmp/namo_req.json ] && bad "the daemon re-called the API for a cached line" \
                           || ok "repeat line served from cache, no call"
 
 exec {DFD}>&-
@@ -966,7 +966,7 @@ source "$PWD/shell/namo_complete.bash"
 PS1='T\$ '
 RCEOF
   rm -f /tmp/namo_reqs.log
-  daemons_before=$(live_helpers)
+  daemons_before=$(running_helpers)
   cap=$(printf '[ -t 1 ] && echo ISATTY_OK\nprintf "zzprobe output\\n"\nzzq com\nexit\n' \
     | script -qec "bash --rcfile /tmp/namo_rc_out.sh -i" /dev/null 2>&1 | tr -d '\r')
   printf '%s' "$cap" | grep -q 'ISATTY_OK' \
@@ -979,7 +979,7 @@ RCEOF
     && ok "and is sent to the model with the next line" \
     || bad "captured output never reached a request"
   sleep 1
-  daemons_after=$(live_helpers)
+  daemons_after=$(running_helpers)
   [ "$daemons_before" = "$daemons_after" ] \
     && ok "no relay or daemon left behind by an exited shell" \
     || bad "a helper outlived its shell"

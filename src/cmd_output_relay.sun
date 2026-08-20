@@ -1,4 +1,9 @@
-// relay.sun - the output recorder.
+// cmd_output_relay.sun - the stand-in terminal in front of the shell.
+//
+// Two jobs, both of them because everything the shell prints comes through
+// here: keeping the last few lines a command printed, which is what the name is
+// about, and reading the line you are typing as readline echoes it (see "The
+// line being typed", further down).
 //
 // The model completes a command line much better when it can see what the last
 // one printed: the branch `git status` named, the file the compiler complained

@@ -30,13 +30,13 @@ public module namo {
     public var disabled: bool;
     public var cache_only: bool;
 
-    // Live-hint daemon (see live.sun). Empty paths mean "not launched by the
+    // The hint daemon (see daemon.sun). Empty paths mean "not launched by the
     // shell integration", which is the normal state for a one-shot run.
     public var daemon: bool;
     public var fifo: String;
     public var reply: String;
     public var dymfile: String;
-    // Output capture (relay.sun). NAMO_OUTPUT names the line count; 0 is off.
+    // Output capture (cmd_output_relay.sun). NAMO_OUTPUT names the line count; 0 is off.
     public var relay: bool;
     public var output_lines: i64;
     public var ptsfile: String;
@@ -78,9 +78,9 @@ public module namo {
 
       this.daemon = env_int(alloc, "NAMO_DAEMON", 0) != 0;
       this.fifo = env_str(alloc, "NAMO_FIFO");
-      // Where answers to the shell's own requests go back. See live.sun.
+      // Where answers to the shell's own requests go back. See daemon.sun.
       this.reply = env_str(alloc, "NAMO_REPLY");
-      // Where command_not_found_handle leaves a line for us; see live.sun.
+      // Where command_not_found_handle leaves a line for us; see daemon.sun.
       this.dymfile = env_str(alloc, "NAMO_DYMFILE");
 
       this.relay = env_int(alloc, "NAMO_RELAY", 0) != 0;
