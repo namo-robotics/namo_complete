@@ -7,11 +7,9 @@ LLM-powered autocomplete for Bash, written in the
 command in plain English](assets/demo.gif)
 
 Type as usual. A moment after you pause, a dim hint appears on the row below
-your line with the command you are most likely reaching for. Keep typing and it updates or
-disappears. Accept it with **Alt-O**, or press
-**Alt-A** to see the other candidates. Press **Alt-G** to enter *ask* mode and describe the command you want in plain-English. Mistype a command and the
-*command not found* line comes with a **did you mean**. Accepting a hint puts the command in your line —
-**nothing is ever executed**, so you can edit it before pressing Enter.
+your line with the command you are most likely reaching for. Accepting a hint
+puts the command in your line — **nothing is ever executed**, so you can edit it
+before pressing Enter.
 
 | Key | Action |
 | --- | --- |
@@ -39,17 +37,12 @@ $                                    <- prompt back at once; nothing waits
   did you mean: git status           <- row below, when the answer arrives
 ```
 
-The prompt returns the instant bash has printed its message: the correction is
-handed to the live daemon, and nothing in the shell waits for it. It lands in
-the same row the hints use, and it belongs to the command that failed
-and to nothing else — start typing and it is gone, and it is never painted over
-a hint for the line you are typing.
-
-It costs a call every time bash cannot find a command; `NAMO_DYM=0` turns it
-off, and it needs live hints to be working, since that is what draws it. A name
-that is simply not installed (`kubectl`, on a machine without it) has no
-correction, and the model is told to say nothing rather than guess, so you get
-bash's message and nothing else.
+Mistype a command and the *command not found* line comes with a **did you
+mean**. The prompt returns the instant bash has printed its message; the
+correction is handed to the daemon and nothing in the shell waits for it. It
+belongs to the command that failed and to nothing else — start typing and it is
+gone. It costs a call every time bash cannot find a command, and `NAMO_DYM=0`
+turns it off.
 
 ## Install
 
@@ -73,6 +66,18 @@ which its standard library is built on, targets ELF only
 
 See [what gets sent to Anthropic](#what-gets-sent-to-anthropic) first.
 
+## Uninstall
+
+```bash
+rm -f  ~/.local/bin/namo_complete
+rm -rf ~/.local/share/namo_complete ~/.cache/namo_complete
+sed -i '/# namo_complete/,+1d' ~/.bashrc     # drops the marker and the source line
+```
+
+Use the same `--prefix` you installed with, if it was not the default. Nothing
+else is left behind: the daemon and the relay exit with the shell that started
+them, and their FIFOs go with it.
+
 ## What gets sent to Anthropic
 
 | Sent | Default | Disable |
@@ -94,65 +99,18 @@ material.
 ## Live hints
 
 The hint appears ~200ms after you stop typing. Always on — there is no switch;
-`NAMO_DISABLE=1` turns the whole tool off.
+`NAMO_DISABLE=1` turns the whole tool off. Sourcing the shell file also adds a
+prompt hook that starts every prompt on a fresh line, so output with no trailing
+newline (`curl -s`, `printf`) no longer gets the next prompt glued to it.
 
-Sourcing the shell file also adds a prompt hook that starts every prompt on a
-fresh line, so output with no trailing newline (`curl -s`, `printf`) no longer
-gets the next prompt glued to it.
+The hint row sits one row below the cursor, is reserved by the prompt hook, and
+is given back the moment you press Enter, so nothing is left in the scrollback.
 
 Readline has no line-changed hook, so this rebinds every printable key. That
 makes paste slower, changes undo granularity, inserts multi-byte UTF-8
 byte-by-byte, and does not cover vi command mode. Rendering is a row under the
 line you are typing, not inline ghost text — that needs a full line editor such
 as [ble.sh](https://github.com/akinomyoga/ble.sh).
-
-That row is reserved by the prompt hook, one row per row the prompt occupies,
-and given back the moment you press Enter: the cursor moves into it and the
-command's output starts there, so nothing is left behind in the scrollback. The
-hint is drawn one row below the cursor and never on it. (It used to be drawn at
-the bottom of the screen, which is the line you are typing on as soon as the
-prompt gets there.) `PS0` clears the row when a command starts, before its
-output can be written over half a hint.
-
-A call takes ~700ms, far too slow per keystroke. Bash also blanks the prompt
-line before running a `bind -x` handler and repaints it afterwards, so anything
-the handler waits for — a fork included — is a visible hole in the line you are
-typing into. So the keystroke path does one thing: write the line into a FIFO.
-Everything else runs in a daemon the binary forks once per shell, which
-debounces, reads the cache, makes the request and draws the hint row itself.
-
-## Output capture
-
-On by default: the last 10 lines of what the previous command printed are sent
-along with everything else, which is the difference between guessing at your
-next command and reading the error you just got. `NAMO_OUTPUT` — set before the
-integration is sourced — changes the line count, and `NAMO_OUTPUT=0` turns the
-capture off entirely:
-
-```
-$ git push
- ! [rejected]        main -> main (fetch first)
-error: failed to push some refs to 'origin'
-$ git p
-  hint: git pull --rebase origin main   <- the hint now knows why
-```
-
-Bash cannot hand that over. When it runs a command the child inherits the
-terminal and writes to it directly; the shell never sees the bytes, and there is
-no hook that copies them. The only way to see them is to be on the other end of
-the shell's stdout — and if that end is a pipe, every command loses `isatty(1)`,
-which means no colour from `ls`, no pager from `git log`, no progress bars.
-
-So it is a pty. The shell points its stdout and stderr
-at a pty ([src/relay.sun](src/relay.sun)) and a third process copies everything
-through to the real terminal, keeping the last N lines as it goes. Commands
-still see a terminal, colour still works, `less` still pages. What is kept has
-its escape sequences stripped, is capped per line, and goes through the same
-credential filter as your history. The recording starts when a command starts,
-so the prompt and the line you typed are not in it.
-
-The cost is a second helper process, and a copy of everything your terminal
-shows passing through it. `NAMO_OUTPUT=0` buys that back.
 
 ## Configuration
 
@@ -167,7 +125,7 @@ shows passing through it. `NAMO_OUTPUT=0` buys that back.
 | `NAMO_HINT_PREFIX` | `hint: ` | Text in front of the hint row |
 | `NAMO_TIMEOUT` | `10` | Seconds before giving up |
 | `NAMO_DYM` / `NAMO_DYM_PREFIX` | `1` / `did you mean: ` | "did you mean" after *command not found*, and the text in front of it |
-| `NAMO_OUTPUT` | `10` | Lines of the last command's output to send. `0` records nothing; see [output capture](#output-capture) |
+| `NAMO_OUTPUT` | `10` | Lines of the last command's output to send; `0` records nothing |
 | `NAMO_HISTORY_LINES` | `50` | History commands sent; `0` disables |
 | `NAMO_LS_LIMIT` / `NAMO_NO_LS` | `40` / `0` | Directory listing |
 | `NAMO_MAX_SUGGESTIONS` | `3` | Candidates requested |
@@ -181,9 +139,9 @@ directory + model. Deleting the directory is safe at any time.
 
 ## Architecture
 
-Two processes and one binary, or three with output capture on. Bash owns the
-line, because readline is the only thing that can; the binary owns everything
-else.
+Two processes and one binary, or three when the last command's output is being
+recorded. Bash owns the line, because readline is the only thing that can; the
+binary owns everything else.
 
 ```mermaid
 flowchart LR
@@ -217,48 +175,35 @@ flowchart LR
     CORE -->|"exec curl, key on its stdin"| API
 ```
 
-**The shell half** is one file, and it is deliberately thin: it does the things
-only bash can do and nothing else. `READLINE_LINE` — the line you are typing —
-exists only inside a `bind -x` handler, and assigning to it is the only way to
-put a command in a prompt without running it. `fc` is a builtin, so this is the
-only process that can read the shell's own history; it leaves the daemon a
-snapshot at every prompt. `bind`, `PROMPT_COMMAND`, `PS0` and
-`command_not_found_handle` are bash's too. Everything else — what to send, what
-to keep out of it, which suggestions are worth stopping on, what the hint says
-and where it goes — is the daemon's.
-
-Rebinding every printable key is the intrusive part, and the only way to notice
-that the line changed: it costs paste speed, undo granularity, byte-wise UTF-8
-and vi command mode. Every function the file defines is named `_namo_*`, because
-sourcing it puts them in the same namespace as everything else the shell has.
+**The shell half** is one file, and deliberately thin: it does the things only
+bash can do and nothing else. `READLINE_LINE` exists only inside a `bind -x`
+handler, and assigning to it is the only way to put a command in a prompt
+without running it. `fc` is a builtin, so this is the only process that can read
+the shell's own history; it leaves the daemon a snapshot at every prompt.
+`bind`, `PROMPT_COMMAND`, `PS0` and `command_not_found_handle` are bash's too.
+Everything else — what to send, what to keep out of it, what the hint says and
+where it goes — is the daemon's.
 
 **The binary half** is one executable, and an interactive shell only ever runs
 it once. `NAMO_DAEMON=1` starts the daemon at the first prompt; it holds the
-read end of a FIFO for the lifetime of the shell, answers everything that comes
-down it — keystrokes, key presses, mistyped commands — and draws the hint row
-itself. The one-shot shape (read the environment, read history from stdin,
-print candidates, exit) is still there, and is what `run.sh`, the tests and any
-script use, but the shell integration never reaches for it.
+read end of a FIFO for the lifetime of the shell and answers everything that
+comes down it. The one-shot shape (read the environment, read history from
+stdin, print candidates, exit) is what `run.sh`, the tests and any script use.
 
 **Nothing in the interactive path forks.** That is the whole reason the split
-falls where it does. Bash blanks the prompt line before running a `bind -x`
-handler and repaints it afterwards, so anything a handler waits for is a
-visible hole in the line being typed into — and a single fork is enough to see
-it. So a keystroke is one `write()` into a pipe. Alt-O, Alt-A and Alt-G are the
-same write plus a `read` on a second FIFO the answer comes back down, labelled
-with the id that asked so an answer nobody is waiting for any more is dropped
-rather than mistaken for the next one. Alt-G reads your question a byte at a
-time with `read`, rather than handing the terminal to `stty`. And a mistyped
-command is written to a file and posted at the next prompt, so bash's message
-and your prompt come back before anything is asked of anyone. `printf` and
-`read` are builtins; the pipes are already open.
+falls where it does: bash blanks the prompt line before running a `bind -x`
+handler and repaints it afterwards, so anything a handler waits for is a visible
+hole in the line being typed into — and a single fork is enough to see it. So a
+keystroke is one `write()` into a pipe. Alt-O, Alt-A and Alt-G are the same
+write plus a `read` on a second FIFO, labelled with the id that asked so a stale
+answer is dropped rather than mistaken for the next one.
 
 | File | Owns |
 | --- | --- |
 | [`shell/namo_complete.bash`](shell/namo_complete.bash) | All of the shell side: bindings, the picker, `READLINE_LINE`, both FIFOs, the prompt hook, `command_not_found_handle` |
 | [`src/main.sun`](src/main.sun) | One-shot run: mode, the too-short guard, cache, output |
 | [`src/live.sun`](src/live.sun) | The daemon: FIFO records, debounce, replies, hint row, directory listing |
-| [`src/relay.sun`](src/relay.sun) | Output capture: the pty, the copy through to the terminal, the last N lines |
+| [`src/relay.sun`](src/relay.sun) | The pty the shell's stdout points at, the copy through to the terminal, the last N lines |
 | [`src/config.sun`](src/config.sun) | Every setting, from the environment only; the three modes |
 | [`src/prompt.sun`](src/prompt.sun) | The three system prompts, the context block, the JSON body |
 | [`src/redact.sun`](src/redact.sun) | Dropping history lines that carry a credential prefix |
@@ -268,9 +213,8 @@ and your prompt come back before anything is asked of anyone. `printf` and
 
 Three things cross a process boundary, and nothing else does: history goes into
 a file the daemon reads, settings go through the environment when the daemon is
-started, and everything after that is one line of text down a FIFO — a
-keystroke, a request, an answer. No shared memory, no sockets of our own, no
-serialization format to get wrong.
+started, and everything after that is one line of text down a FIFO. No shared
+memory, no sockets of our own, no serialization format to get wrong.
 
 ## How it works
 
@@ -285,60 +229,35 @@ flowchart TD
     F --> G["Bash puts one in your line.<br>You press Enter"]
 ```
 
-It starts in bash, because readline is where the line lives: `READLINE_LINE`
-exists only inside a `bind -x` handler, and assigning to it is the only way to
-put a command in someone's prompt without running it. That, and `fc` — a
-builtin, so the shell is the only thing that can read its own history — is all
-the shell half does for itself. Everything else is the daemon's.
+Every keystroke goes down the FIFO as `<cwd><tab><line>`, one `write()` into a
+pipe buffer and nothing else; the daemon debounces, reads the cache, makes the
+request and draws the hint row on `/dev/tty`. The daemon exits when the shell
+that owns the write end goes away.
 
-Sourcing the integration starts one (`NAMO_DAEMON=1`,
-[src/live.sun](src/live.sun)) that holds the read end of a FIFO for the life of
-the shell. Every keystroke goes down it as `<cwd><tab><line>`, one `write()`
-into a pipe buffer and nothing else; the daemon debounces, reads the cache,
-makes the request and draws the hint row on `/dev/tty`. Key presses go down the
-same pipe, marked as requests, and their answers come back on a second FIFO the
-shell is waiting on with `read -t`. History reaches the daemon as a snapshot the
-prompt hook drops for it, which is why none of this needs a process per
-keystroke — or per key press. The daemon exits when the shell that owns the
-write end goes away.
+The binary does the rest: drop history lines carrying a credential prefix, hash
+the line, directory and model into a cache key, answer straight away if a fresh
+reply is on disk, and otherwise build the JSON request and hand it to curl —
+Sun's standard library has TCP but no TLS, so curl is the transport as well as
+the installer. The reply comes back as at most three command lines, and bash
+assigns one to `READLINE_LINE`. Nothing runs: the command sits in your prompt
+waiting for you.
 
-The binary does the rest. It drops history lines carrying a credential prefix,
-hashes the line, directory and model into a cache key, and answers straight away
-if a fresh reply is already on disk. Otherwise it builds the JSON request and
-hands it to curl — Sun's standard library has TCP but no TLS, so curl is the
-transport as well as the installer.
-
-The reply comes back as at most three command lines. Bash reads them, inserts
-the first or offers the list, and assigns the result to `READLINE_LINE`. Nothing
-runs: the command sits in your prompt waiting for you.
-
-A mistyped command takes the third shape, and takes it the long way round.
-`command_not_found_handle` is bash's one hook for a line that was not a
-command, but it runs after the line has been accepted — there is no
-`READLINE_LINE` left to write to — and bash forks around it, so nothing it sets
-survives and it cannot reach the FIFO either, whose write end belongs to the
-shell. Above all it must not make anyone wait. So it writes the line to a file
-and returns, which is the whole of its work: bash prints its message and the
-prompt comes straight back. The next prompt hook posts the line down the FIFO
-with a leading SOH, the one record the daemon does not treat as something being
-typed, and the daemon pays for the call and draws the answer whenever it
-arrives. Nobody is watching by then, which is the point.
-
-The model gets its own system prompt for this
-([`DYM_SYSTEM_PROMPT`](src/prompt.sun)) — the line is known to be broken before
-it is sent, the answer replaces it rather than extending it, and "nothing
-plausible" is an allowed answer, because a confident wrong guess under *did you
-mean* is worse than no line at all. The row is given up rather than fought
-over: if keystrokes queued up while the answer was in flight, or a hint for the
-line being typed is already on the row, the answer stays in the cache and the
-row is left alone.
+A mistyped command takes the long way round. `command_not_found_handle` runs
+after the line has been accepted — there is no `READLINE_LINE` left to write to
+— and bash forks around it, so nothing it sets survives and it cannot reach the
+FIFO either. Above all it must not make anyone wait. So it writes the line to a
+file and returns; the next prompt hook posts that line down the FIFO, and the
+daemon pays for the call and draws the answer whenever it arrives. The model
+gets its own system prompt for this ([`DYM_SYSTEM_PROMPT`](src/prompt.sun)) in
+which "nothing plausible" is an allowed answer, because a confident wrong guess
+under *did you mean* is worse than no line at all.
 
 Two deliberate properties:
 
 - **No shell is ever involved.** `curl` is `exec`d directly, one argv entry per
   argument, so there is no command string for a filename or a URL to be quoted
   into. The directory listing is read with `read_dir` rather than by shelling
-  out to `ls`, so a directory name never reaches a command line either.
+  out to `ls`.
 - **The API key never appears in `ps` or on disk.** It goes down curl's stdin as
   a one-line `-K -` config; everything else — the endpoint, the fixed headers,
   the path of the request body — rides in argv, where it is harmless.
@@ -348,9 +267,9 @@ Processes, polling, directories, the environment and the clock all come from
 Sun's standard library, and only one file reaches past it:
 [`relay.sun`](src/relay.sun) declares `extern "C"` for `posix_openpt`,
 `grantpt`, `unlockpt`, `ptsname`, `ioctl` and `read`, because allocating a pty
-and setting its window size is the one thing the stdlib cannot do — and without
-a pty, capturing output would cost every command its `isatty(1)`. Nothing else
-in [`src/`](src/) declares an extern or opens an `unsafe` block.
+is the one thing the stdlib cannot do — and without a pty, recording what a
+command printed would cost every command its `isatty(1)`. Nothing else in
+[`src/`](src/) declares an extern or opens an `unsafe` block.
 
 ## Development
 
