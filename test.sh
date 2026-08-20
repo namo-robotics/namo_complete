@@ -795,6 +795,79 @@ sleep 0.6
 
 kill "$relaypid" 2>/dev/null
 
+# The window size. There is no SIGWINCH handler in the relay -- the real
+# terminal is asked on a timer -- so the case that matters is a resize in the
+# middle of output that never pauses: the poll is ready every time round, and
+# a check that only ran when the loop was idle would never run at all.
+wsz=$(python3 - "$BIN" <<'PYW' 2>/dev/null
+import fcntl, os, pty, struct, subprocess, sys, tempfile, termios, threading, time
+
+def get(fd): return struct.unpack("HHHH", fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\0" * 8))[:2]
+def put(fd, r, c): fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", r, c, 0, 0))
+
+def settles(fd, want, limit=4.0):
+    t0 = time.time()
+    while time.time() - t0 < limit:
+        if get(fd) == want: return int((time.time() - t0) * 1000)
+        time.sleep(0.02)
+    return -1
+
+d = tempfile.mkdtemp()
+master, slave = pty.openpty()          # standing in for the real terminal
+put(master, 40, 100)
+draining = True
+def drain():
+    while draining:
+        try:
+            if not os.read(master, 65536): return
+        except OSError: return
+threading.Thread(target=drain, daemon=True).start()
+
+subprocess.run([sys.argv[1]], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+               stderr=subprocess.DEVNULL,
+               env=dict(os.environ, NAMO_RELAY="1", NAMO_OUTPUT="3",
+                        NAMO_PTSFILE=d + "/pts", NAMO_OUTFILE=d + "/out",
+                        NAMO_RELAY_PIDFILE=d + "/pid", NAMO_TTY=os.ttyname(slave),
+                        NAMO_SHELL_PID=str(os.getpid())))
+pts = ""
+for _ in range(60):
+    try: pts = open(d + "/pts").read().strip()
+    except OSError: pass
+    if pts: break
+    time.sleep(0.05)
+inner = os.open(pts, os.O_RDWR | os.O_NOCTTY)
+relay = int(open(d + "/pid").read().strip())
+
+start = settles(inner, (40, 100))      # what the shell's stdout is born with
+put(master, 50, 120)
+idle = settles(inner, (50, 120))       # nothing running: the loop is waiting
+
+flooding = True
+def flood():
+    while flooding:
+        try: os.write(inner, b"x" * 2048)
+        except OSError: return
+th = threading.Thread(target=flood, daemon=True); th.start()
+time.sleep(0.4)
+put(master, 24, 80)
+busy = settles(inner, (24, 80))        # a build printing without a pause
+flooding = False; th.join(timeout=2)
+
+alive = 1 if os.path.exists("/proc/%d" % relay) else 0
+draining = False
+os.kill(relay, 9)
+print(start, idle, busy, alive)
+PYW
+)
+set -- $wsz
+[ "${1:--1}" != "-1" ] && ok "the terminal's size reaches the pty at startup" \
+                       || bad "pty never took the terminal's size"
+[ "${2:--1}" != "-1" ] && ok "a resize on an idle terminal reaches the pty (${2}ms)" \
+                       || bad "idle resize never reached the pty"
+[ "${3:--1}" != "-1" ] && ok "a resize during unbroken output reaches the pty (${3}ms)" \
+                       || bad "resize ignored while output was flowing"
+[ "${4:-0}" = 1 ] && ok "the relay survives all of it" || bad "relay died during resizes"
+
 # The context the model gets, from the one-shot path.
 printf 'on branch main\nnothing to commit\n' > "$RT/ctx"
 rm -f /tmp/namo_req.json

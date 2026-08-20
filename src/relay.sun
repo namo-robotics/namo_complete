@@ -22,6 +22,7 @@ public module namo {
   using sun;
   using sun.io;
   using sun.process;
+  using sun.time;
 
   // The pty, and the window size that has to be copied onto it. struct winsize
   // is four u16: rows, cols, and two pixel fields nothing here uses.
@@ -38,6 +39,10 @@ public module namo {
   var TIOCSWINSZ: u64 = 21524;
 
   var RELAY_BUF: i64 = 4096;
+  // How often the terminal is asked for its size. There is no SIGWINCH here
+  // -- see copy_winsize -- so this interval is the whole of the answer to a
+  // resize, and it has to hold whether the screen is busy or idle.
+  var WINSIZE_MS: i64 = 250;
   // Two markers down the captured stream, and neither ever reaches the screen.
   // RS is written by PS0, after Enter and before the command runs: everything
   // before it was the prompt and the line being typed, which the history
@@ -60,16 +65,31 @@ public module namo {
     return out;
   }
 
-  // Whatever the real terminal is set to, the pty is set to as well: a program
-  // asking its own stdout how wide the screen is has to get the right answer.
-  function copy_winsize(alloc: ref HeapAllocator, tty_fd: i32, master: i32) void {
+  function winsize_buf(alloc: ref HeapAllocator) ContiguousBuffer<u16> {
     var ws = ContiguousBuffer<u16>(alloc, 4);
     ws.set_unchecked(0, 0); ws.set_unchecked(1, 0);
     ws.set_unchecked(2, 0); ws.set_unchecked(3, 0);
+    return ws;
+  }
+
+  // Whatever the real terminal is set to, the pty is set to as well: a program
+  // asking its own stdout how wide the screen is has to get the right answer.
+  //
+  // On a timer rather than on SIGWINCH. The shell and everything it runs keep
+  // the real terminal as their controlling one -- only stdout and stderr point
+  // at the pty -- so the kernel already delivers the signal to them; the only
+  // thing missing is the size on this pty, and polling for it costs two ioctls
+  // a quarter second and needs no handler racing the loop below.
+  //
+  // The buffer is the caller's: this runs for the life of the session, and a
+  // fresh four u16 per pass would be four u16 of garbage per pass.
+  function copy_winsize(ws: ref ContiguousBuffer<u16>, tty_fd: i32, master: i32) void {
     var got: i32 = unsafe { ioctl(tty_fd, TIOCGWINSZ, ws.rawData()); };
     if (got != 0) {
       return;
     }
+    // Repeating an unchanged size is free: the kernel compares before it
+    // stores, and only signals the pty when the numbers actually moved.
     var set: i32 = unsafe { ioctl(master, TIOCSWINSZ, ws.rawData()); };
   }
 
@@ -212,6 +232,12 @@ public module namo {
     var poller = Poller(alloc);
     var buf = ContiguousBuffer<u8>(alloc, RELAY_BUF);
     var through = ContiguousBuffer<u8>(alloc, RELAY_BUF);
+    var ws = winsize_buf(alloc);
+
+    // Monotonic, so an NTP step cannot leave the window size unchecked for
+    // however far the clock jumped.
+    var clock = now();
+    var last_winsize: i64 = 0;
 
     var running: bool = true;
     while (running) {
@@ -257,8 +283,7 @@ public module namo {
           }
         }
       } else {
-        // Idle: the window may have been resized, and the shell may be gone.
-        copy_winsize(alloc, tty.get_fd(), master);
+        // Idle: the shell may be gone.
         if (shell_pid > 0) {
           // Signal 0 asks the question without sending anything.
           try {
@@ -267,6 +292,16 @@ public module namo {
             running = false;
           }
         }
+      }
+
+      // Outside the branch on purpose. A build that prints without pause for a
+      // minute leaves the poll ready every time it is called, and a resize in
+      // the middle of it must not wait for the output to stop -- everything
+      // started after it would be laid out for the old width.
+      var since: i64 = clock.elapsed().as_millis();
+      if (since - last_winsize >= WINSIZE_MS) {
+        last_winsize = since;
+        copy_winsize(ws, tty.get_fd(), master);
       }
     }
 
@@ -361,7 +396,8 @@ public module namo {
     } catch (e: IError) {
       return 0;
     }
-    copy_winsize(alloc, tty.get_fd(), master);
+    var ws = winsize_buf(alloc);
+    copy_winsize(ws, tty.get_fd(), master);
 
     return relay_loop(alloc, cfg, master, tty, shell_pid);
   }
