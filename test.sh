@@ -24,6 +24,26 @@ pass=0; fail=0
 ok()   { printf '  \033[32mPASS\033[0m  %s\n' "$1"; pass=$((pass+1)); }
 bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; fail=$((fail+1)); }
 head_() { printf '\n\033[1m%s\033[0m\n' "$1"; }
+
+# Both `kill -0` and `pgrep` answer for a process that has exited but has not
+# been reaped yet. Whether such a zombie lingers is a property of the init of
+# the environment -- CI runs in a container whose PID 1 is not a reaper -- and
+# not of the helper under test, which is gone either way. So ask for a process
+# that is still *running*, and read the state straight out of /proc: the field
+# after the last ')' in stat, 'Z' for a corpse.
+alive() {
+  case $(sed -n 's/.*) \(.\) .*/\1/p' "/proc/${1:-none}/stat" 2>/dev/null) in
+    '' | Z) return 1 ;;
+    *)      return 0 ;;
+  esac
+}
+live_helpers() {
+  local p out=""
+  for p in $(pgrep -x namo_complete 2>/dev/null | sort -n); do
+    alive "$p" && out="$out$p "
+  done
+  printf '%s' "$out"
+}
 cleanup() { [ -n "$MOCK_PID" ] && kill "$MOCK_PID" 2>/dev/null; rm -f /tmp/namo_req.json /tmp/namo_reqs.log; }
 trap cleanup EXIT
 
@@ -622,7 +642,7 @@ export ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
 source "$PWD/shell/namo_complete.bash"
 PS1='T\$ '
 RCEOF
-  daemons_before=$(pgrep -x namo_complete 2>/dev/null | sort | tr '\n' ' ')
+  daemons_before=$(live_helpers)
   jobnoise=$(printf 'READLINE_LINE=""; READLINE_POINT=0; for c in g i t " " c o; do _namo_on_printable_key "$c"; done\nsleep 1\nexit\n' \
     | script -qec "bash --rcfile /tmp/namo_rc_test.sh -i" /dev/null 2>&1 \
     | tr -d '\r' | grep -acE '^\[[0-9]+\][[:space:]]+[0-9]+')
@@ -632,7 +652,7 @@ RCEOF
   # The daemon holds the read end of the FIFO; when the shell that owns the
   # write end goes away it must see end-of-file and stop, not linger.
   sleep 0.8
-  daemons_after=$(pgrep -x namo_complete 2>/dev/null | sort | tr '\n' ' ')
+  daemons_after=$(live_helpers)
   [ "$daemons_before" = "$daemons_after" ] \
     && ok "no live daemon left behind by an exited shell" \
     || bad "a live daemon outlived its shell"
@@ -671,7 +691,7 @@ NAMO_DAEMON=1 NAMO_FIFO="$DT/fifo" NAMO_REPLY="$DT/reply" NAMO_HISTFILE="$DT/his
   NAMO_PIDFILE="$DT/pid" NAMO_TTY="$DT/tty" NAMO_DEBOUNCE=0.2 NAMO_QUIET=0.05 \
   "$BIN" </dev/null >/dev/null 2>&1
 dpid=$(cat "$DT/pid" 2>/dev/null)
-{ [ -n "$dpid" ] && kill -0 "$dpid" 2>/dev/null; } \
+{ [ -n "$dpid" ] && alive "$dpid"; } \
   && ok "daemon detaches and records its pid before returning" \
   || bad "daemon did not start"
 
@@ -742,7 +762,7 @@ sleep 1.2
 
 exec {DFD}>&-
 sleep 0.8
-kill -0 "$dpid" 2>/dev/null && bad "daemon outlived the shell that owned the FIFO" \
+alive "$dpid" && bad "daemon outlived the shell that owned the FIFO" \
                             || ok "daemon stops when the FIFO reaches end-of-file"
 [ -f "$DT/pid" ] && bad "pid file left behind" || ok "pid file removed on exit"
 rm -rf "$DT"
@@ -761,7 +781,7 @@ pts=$(cat "$RT/pts" 2>/dev/null)
 [ -n "$pts" ] && [ -c "$pts" ] && ok "relay allocates a pty and names it ($pts)" \
                               || bad "no pty allocated"
 relaypid=$(cat "$RT/pid" 2>/dev/null)
-{ [ -n "$relaypid" ] && kill -0 "$relaypid" 2>/dev/null; } \
+{ [ -n "$relaypid" ] && alive "$relaypid"; } \
   && ok "relay detaches and records its pid" || bad "relay did not start"
 
 # What a command run under it would print: a start marker, output, a flush.
@@ -853,7 +873,10 @@ put(master, 24, 80)
 busy = settles(inner, (24, 80))        # a build printing without a pause
 flooding = False; th.join(timeout=2)
 
-alive = 1 if os.path.exists("/proc/%d" % relay) else 0
+try:  # running, not merely unreaped: a crashed relay is a zombie here
+    alive = 0 if open("/proc/%d/stat" % relay).read().rsplit(") ", 1)[1][0] == "Z" else 1
+except OSError:
+    alive = 0
 draining = False
 os.kill(relay, 9)
 print(start, idle, busy, alive)
@@ -901,7 +924,7 @@ source "$PWD/shell/namo_complete.bash"
 PS1='T\$ '
 RCEOF
   rm -f /tmp/namo_reqs.log
-  daemons_before=$(pgrep -x namo_complete 2>/dev/null | sort | tr '\n' ' ')
+  daemons_before=$(live_helpers)
   cap=$(printf '[ -t 1 ] && echo ISATTY_OK\nprintf "zzprobe output\\n"\nzzq com\nexit\n' \
     | script -qec "bash --rcfile /tmp/namo_rc_out.sh -i" /dev/null 2>&1 | tr -d '\r')
   printf '%s' "$cap" | grep -q 'ISATTY_OK' \
@@ -914,7 +937,7 @@ RCEOF
     && ok "and is sent to the model with the next line" \
     || bad "captured output never reached a request"
   sleep 1
-  daemons_after=$(pgrep -x namo_complete 2>/dev/null | sort | tr '\n' ' ')
+  daemons_after=$(live_helpers)
   [ "$daemons_before" = "$daemons_after" ] \
     && ok "no relay or daemon left behind by an exited shell" \
     || bad "a helper outlived its shell"

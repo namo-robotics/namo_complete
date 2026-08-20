@@ -9,7 +9,13 @@ jobs:
   build-and-test:
     runs-on: ubuntu-latest
     # Ubuntu 26.04 for libllvm20, which the Sun toolchain package depends on.
-    container: ubuntu:26.04
+    container:
+      image: ubuntu:26.04
+      # --init gives the container a PID 1 that reaps. The daemon and the relay
+      # detach, so they are orphans by design; without a reaper their corpses
+      # pile up as zombies for the rest of the job. The tests no longer mistake
+      # a zombie for a live helper, but nothing else should have to know either.
+      options: --init
 
     steps:
       - name: Install build dependencies
