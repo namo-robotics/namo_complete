@@ -4,7 +4,7 @@
 
 [![ci](https://github.com/namo-robotics/namo_complete/actions/workflows/ci.yml/badge.svg)](https://github.com/namo-robotics/namo_complete/actions/workflows/ci.yml) [![release](https://github.com/namo-robotics/namo_complete/actions/workflows/release.yml/badge.svg)](https://github.com/namo-robotics/namo_complete/actions/workflows/release.yml)
 
-### LLM-powered autocomplete for your Bash terminal, written in [Sun](https://namo-robotics.github.io/sun/)
+### A non-obstrusive AI autocomplete for your Bash terminal, written in [Sun](https://namo-robotics.github.io/sun/)
 
 (**Linux-only** until Sun can target MacOS)
 
