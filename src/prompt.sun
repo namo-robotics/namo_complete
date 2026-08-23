@@ -99,6 +99,28 @@ public module namo {
     return model.contains("opus-3");
   }
 
+  // The same generational split as takes_temperature, read the other way: a
+  // model that refuses `temperature` is one of the current family, and those
+  // think before they answer whether or not they are asked to.
+  //
+  // Thinking is billed out of max_tokens. At the 150 the older models need,
+  // an Opus 5 answer comes back truncated mid-line, or -- when a line makes
+  // it think a little longer -- as nothing but a thinking block, which is a
+  // failed request for a hint that never appears. The budget is not a
+  // latency control (generation still stops at end_turn), so the fix is to
+  // stop competing for it.
+  //
+  // Turning thinking off would be cheaper still, but `{type: "disabled"}` is
+  // a 400 on Claude Fable 5 and is only accepted below a certain effort on
+  // Opus 5. Room costs nothing when it goes unused; a rejected parameter
+  // costs the whole request.
+  function token_budget(model: const ref String, base: i64) i64 {
+    if (takes_temperature(model)) {
+      return base;
+    }
+    return base * 4;
+  }
+
   // Serialize the request body. Note: no `output_config.effort` (errors on
   // Haiku 4.5) and no `cache_control` (Haiku's minimum cacheable prefix is
   // 4096 tokens, far above our ~150-token system prompt, so it would silently
@@ -114,13 +136,13 @@ public module namo {
     // Ask mode carries a description per line, so it needs the extra room.
     if (cfg.is_dym()) {
       // Two bare command lines: no descriptions to pay for.
-      req.set(String(alloc, "max_tokens"), Json(150));
+      req.set(String(alloc, "max_tokens"), Json(token_budget(cfg.model, 150)));
       req.set(String(alloc, "system"), json_string(alloc, DYM_SYSTEM_PROMPT));
     } else if (cfg.is_ask()) {
-      req.set(String(alloc, "max_tokens"), Json(300));
+      req.set(String(alloc, "max_tokens"), Json(token_budget(cfg.model, 300)));
       req.set(String(alloc, "system"), json_string(alloc, ASK_SYSTEM_PROMPT));
     } else {
-      req.set(String(alloc, "max_tokens"), Json(150));
+      req.set(String(alloc, "max_tokens"), Json(token_budget(cfg.model, 150)));
       req.set(String(alloc, "system"), json_string(alloc, SYSTEM_PROMPT));
     }
 

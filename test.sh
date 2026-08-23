@@ -190,6 +190,9 @@ import json
 d=json.load(open('/tmp/namo_req.json'))
 assert d['model']=='claude-opus-5', d['model']
 assert 'temperature' not in d, 'temperature must not be sent to Opus 5'
+# Thinking is billed out of max_tokens on this family and is on by default.
+# At 150 the answer comes back truncated, or as nothing but a thinking block.
+assert d['max_tokens'] > 150, 'a thinking model needs more than the 150 Haiku uses'
 PY
 
 # An unknown name is far more likely to be newer than this list than older.
@@ -200,6 +203,7 @@ python3 - <<'PY' && ok "temperature omitted for an unrecognised model" || bad "t
 import json
 d=json.load(open('/tmp/namo_req.json'))
 assert 'temperature' not in d, 'an unknown model must be treated as new, not old'
+assert d['max_tokens'] > 150, 'an unknown model gets the thinking-model budget too'
 PY
 
 # cache: second identical call must not reach the mock
