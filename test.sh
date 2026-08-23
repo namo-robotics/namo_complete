@@ -18,6 +18,9 @@ fi
 
 BIN=./bin/namo_complete
 PORT=${NAMO_TEST_PORT:-8731}
+# Taken now, because `set -- $wsz` in section 5 rewrites the positional args
+# -- gating on "$1" further down silently skipped the live section.
+LIVE="${1:-}"
 MOCK_PID=""
 pass=0; fail=0
 
@@ -1243,7 +1246,7 @@ res=$(NAMO_BIN="$PKGTMP/prefix/bin/namo_complete" bash -i -c '
 rm -rf "$PKGTMP"
 
 # --------------------------------------------------------------------------
-if [ "${1:-}" = "--live" ]; then
+if [ "$LIVE" = "--live" ]; then
   head_ "7. live Anthropic API call"
   unset NAMO_ENDPOINT
   if [ -z "${ANTHROPIC_API_KEY_REAL:-}" ]; then
@@ -1258,8 +1261,18 @@ if [ "${1:-}" = "--live" ]; then
     elif printf '%s' "$out" | grep -q '^git '; then
       ok "live call returned real completions in ${ms}ms"
       printf '%s\n' "$out" | sed 's/^/        /'
-      [ "$ms" -lt 1500 ] && ok "latency under 1.5s target" \
-                         || bad "latency ${ms}ms exceeds the 1.5s comfort target"
+      # The 1.5s target is the hint row's comfort budget on the default
+      # claude-haiku-4-5. A bigger model is slower by nature (measured:
+      # ~3.4s on Opus 5 vs ~1.0s on Haiku for the same line), so a run with
+      # NAMO_MODEL pointed at one gets a wider target instead of a red
+      # herring -- the row is still worth having, it just arrives later.
+      target=1500
+      case "${NAMO_MODEL:-claude-haiku-4-5}" in
+        *haiku*) ;;
+        *) target=5000 ;;
+      esac
+      [ "$ms" -lt "$target" ] && ok "latency under the ${target}ms target for ${NAMO_MODEL:-claude-haiku-4-5}" \
+                              || bad "latency ${ms}ms exceeds the ${target}ms target for ${NAMO_MODEL:-claude-haiku-4-5}"
     else
       bad "live call returned no usable completion (got: ${out:-<empty>})"
     fi

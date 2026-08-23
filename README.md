@@ -112,7 +112,9 @@ kill "$(cat "${XDG_RUNTIME_DIR:-/tmp/namo-$UID}/namo_complete/daemon_pid.$$")"
 
 Put the `export` in `~/.bashrc` to make it stick. A bigger model is slower, and
 the hint row is drawn while you type: `claude-haiku-4-5` is the default because
-it answers in well under a second. If a call fails -- a model that does not
+it answers in about a second, where `claude-opus-5` takes three or more. The
+current models also think before they answer, which is billed out of the same
+token budget the answer comes from, so they are asked for a larger one. If a call fails -- a model that does not
 exist, a key that has expired, no network -- the row says so instead of staying
 empty.
 
