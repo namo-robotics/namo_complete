@@ -1267,97 +1267,6 @@ if [ "${1:-}" = "--live" ]; then
   fi
 fi
 
-# --------------------------------------------------------------------------
-head_ "8. thinking blocks, and failures the user can see"
-# --------------------------------------------------------------------------
-# Two things that only show up once NAMO_MODEL names a current model:
-# the completions are no longer in content[0], and a request the API refuses
-# used to be indistinguishable from having nothing to suggest.
-PORT2=$(( PORT + 1 ))
-kill_mock2() { [ -n "${MOCK2_PID:-}" ] && kill "$MOCK2_PID" 2>/dev/null; MOCK2_PID=""; }
-trap 'kill_mock2' EXIT
-
-# ---- content[0] is a thinking block, as it is on Opus 5 ----
-cat > /tmp/namo_mock2.py <<PY
-import http.server, json
-MODE = open('/tmp/namo_mock2_mode').read().strip()
-class H(http.server.BaseHTTPRequestHandler):
-    def do_POST(self):
-        self.rfile.read(int(self.headers.get('content-length', 0)))
-        if MODE == 'error':
-            r = {"type":"error","error":{"type":"invalid_request_error",
-                 "message":"\`temperature\` is deprecated for this model."}}
-        else:
-            # Thinking first, exactly as the real API orders it.
-            r = {"id":"m","type":"message","role":"assistant","model":"claude-opus-5",
-                 "content":[{"type":"thinking","thinking":"","signature":"sig"},
-                            {"type":"text","text":"git commit\ngit commit --amend"}],
-                 "stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}
-        o = json.dumps(r).encode()
-        self.send_response(200); self.send_header('content-type','application/json')
-        self.send_header('content-length', str(len(o))); self.end_headers(); self.wfile.write(o)
-    def log_message(self, *a): pass
-http.server.HTTPServer(('127.0.0.1', $PORT2), H).serve_forever()
-PY
-
-echo thinking > /tmp/namo_mock2_mode
-python3 /tmp/namo_mock2.py & MOCK2_PID=$!
-sleep 1.2
-kill -0 "$MOCK2_PID" 2>/dev/null \
-  || bad "second mock did not start (port $PORT2 busy?); section 8 results are meaningless"
-out=$(payload | env NAMO_LINE='git com' NAMO_CWD="$PWD" NAMO_CACHE=0 \
-      NAMO_MODEL=claude-opus-5 NAMO_ENDPOINT="http://127.0.0.1:$PORT2/v1/messages" \
-      "$BIN" 2>/dev/null)
-printf '%s' "$out" | grep -q '^git commit$' \
-  && ok "completions found past a leading thinking block" \
-  || bad "a thinking block at content[0] hid the completions (got: ${out:-<empty>})"
-kill_mock2
-
-# ---- a refused request reaches the row instead of vanishing ----
-echo error > /tmp/namo_mock2_mode
-python3 /tmp/namo_mock2.py & MOCK2_PID=$!
-sleep 1.2
-
-err=$(payload | env NAMO_LINE='git com' NAMO_CWD="$PWD" NAMO_CACHE=0 \
-      NAMO_ENDPOINT="http://127.0.0.1:$PORT2/v1/messages" "$BIN" 2>&1 >/dev/null)
-printf '%s' "$err" | grep -q 'deprecated for this model' \
-  && ok "the one-shot path prints the API's own message" \
-  || bad "one-shot path swallowed the API error (got: ${err:-<empty>})"
-
-# The daemon has no stderr: it is started with 2>/dev/null by the shell
-# integration, so the hint row is the only channel it has.
-ET=$(mktemp -d)
-mkfifo -m 600 "$ET/fifo"
-printf 'git status\n' > "$ET/hist"
-exec {EFD}<>"$ET/fifo"
-NAMO_DAEMON=1 NAMO_FIFO="$ET/fifo" NAMO_HISTFILE="$ET/hist" NAMO_PIDFILE="$ET/pid" \
-  NAMO_TTY="$ET/tty" NAMO_DEBOUNCE=0.2 NAMO_QUIET=0.05 NAMO_CACHE=0 NAMO_MIN_GAP=0 \
-  NAMO_ENDPOINT="http://127.0.0.1:$PORT2/v1/messages" "$BIN" </dev/null >/dev/null 2>&1
-sleep 0.3
-printf '%s\t%s\n' "$PWD" "git co" >&$EFD
-sleep 1.5
-grep -q 'namo: .*deprecated for this model' "$ET/tty" \
-  && ok "the daemon draws the failure in the hint row" \
-  || bad "the daemon failed silently, which is the bug this test exists for"
-grep -q 'hint: ' "$ET/tty" \
-  && bad "a hint was drawn for a call that failed" \
-  || ok "no hint row is drawn alongside the error"
-
-# And it must go away again once the API answers.
-kill_mock2
-echo thinking > /tmp/namo_mock2_mode
-python3 /tmp/namo_mock2.py & MOCK2_PID=$!
-sleep 1.2
-printf '%s\t%s\n' "$PWD" "git com" >&$EFD
-sleep 1.5
-tail -c 400 "$ET/tty" | grep -q 'namo: ' \
-  && bad "the error row survived a call that succeeded" \
-  || ok "the error row clears once a call works again"
-
-[ -s "$ET/pid" ] && kill "$(cat "$ET/pid")" 2>/dev/null
-exec {EFD}>&-
-rm -rf "$ET"
-kill_mock2
 
 # ---- an answer that outlives its line is dropped, not painted ----
 # The user typed, paused, and pressed Enter while the call was still in
@@ -1401,6 +1310,99 @@ grep -q 'hint: ' "$RT/tty" \
 exec {RFD}>&-
 rm -rf "$RT" /tmp/namo_mock_slow.py
 kill "$SLOW_PID" 2>/dev/null
+
+# --------------------------------------------------------------------------
+head_ "8. thinking blocks, and failures the user can see"
+# --------------------------------------------------------------------------
+# Two things that only show up once NAMO_MODEL names a current model:
+# the completions are no longer in content[0], and a request the API refuses
+# used to be indistinguishable from having nothing to suggest.
+PORT8=$(( PORT + 4 ))
+kill_mock8() { [ -n "${MOCK8_PID:-}" ] && kill "$MOCK8_PID" 2>/dev/null; MOCK8_PID=""; }
+
+# ---- content[0] is a thinking block, as it is on Opus 5 ----
+cat > /tmp/namo_mock8.py <<PY
+import http.server, json
+MODE = open('/tmp/namo_mock8_mode').read().strip()
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get('content-length', 0)))
+        if MODE == 'error':
+            r = {"type":"error","error":{"type":"invalid_request_error",
+                 "message":"\`temperature\` is deprecated for this model."}}
+        else:
+            # Thinking first, exactly as the real API orders it.
+            r = {"id":"m","type":"message","role":"assistant","model":"claude-opus-5",
+                 "content":[{"type":"thinking","thinking":"","signature":"sig"},
+                            {"type":"text","text":"git commit\ngit commit --amend"}],
+                 "stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}
+        o = json.dumps(r).encode()
+        self.send_response(200); self.send_header('content-type','application/json')
+        self.send_header('content-length', str(len(o))); self.end_headers(); self.wfile.write(o)
+    def log_message(self, *a): pass
+http.server.HTTPServer(('127.0.0.1', $PORT8), H).serve_forever()
+PY
+
+echo thinking > /tmp/namo_mock8_mode
+python3 /tmp/namo_mock8.py & MOCK8_PID=$!
+sleep 1.2
+kill -0 "$MOCK8_PID" 2>/dev/null \
+  || bad "second mock did not start (port $PORT8 busy?); section 8 results are meaningless"
+out=$(payload | env NAMO_LINE='git com' NAMO_CWD="$PWD" NAMO_CACHE=0 \
+      NAMO_MODEL=claude-opus-5 NAMO_ENDPOINT="http://127.0.0.1:$PORT8/v1/messages" \
+      "$BIN" 2>/dev/null)
+printf '%s' "$out" | grep -q '^git commit$' \
+  && ok "completions found past a leading thinking block" \
+  || bad "a thinking block at content[0] hid the completions (got: ${out:-<empty>})"
+kill_mock8
+
+# ---- a refused request reaches the row instead of vanishing ----
+echo error > /tmp/namo_mock8_mode
+python3 /tmp/namo_mock8.py & MOCK8_PID=$!
+sleep 1.2
+
+err=$(payload | env NAMO_LINE='git com' NAMO_CWD="$PWD" NAMO_CACHE=0 \
+      NAMO_ENDPOINT="http://127.0.0.1:$PORT8/v1/messages" "$BIN" 2>&1 >/dev/null)
+printf '%s' "$err" | grep -q 'deprecated for this model' \
+  && ok "the one-shot path prints the API's own message" \
+  || bad "one-shot path swallowed the API error (got: ${err:-<empty>})"
+
+# The daemon has no stderr: it is started with 2>/dev/null by the shell
+# integration, so the hint row is the only channel it has.
+ET=$(mktemp -d)
+mkfifo -m 600 "$ET/fifo"
+printf 'git status\n' > "$ET/hist"
+exec {EFD}<>"$ET/fifo"
+NAMO_DAEMON=1 NAMO_FIFO="$ET/fifo" NAMO_HISTFILE="$ET/hist" NAMO_PIDFILE="$ET/pid" \
+  NAMO_TTY="$ET/tty" NAMO_DEBOUNCE=0.2 NAMO_QUIET=0.05 NAMO_CACHE=0 NAMO_MIN_GAP=0 \
+  NAMO_ENDPOINT="http://127.0.0.1:$PORT8/v1/messages" "$BIN" </dev/null >/dev/null 2>&1
+sleep 0.3
+printf '%s\t%s\n' "$PWD" "git co" >&$EFD
+sleep 1.5
+grep -q 'namo: .*deprecated for this model' "$ET/tty" \
+  && ok "the daemon draws the failure in the hint row" \
+  || bad "the daemon failed silently, which is the bug this test exists for"
+grep -q 'hint: ' "$ET/tty" \
+  && bad "a hint was drawn for a call that failed" \
+  || ok "no hint row is drawn alongside the error"
+
+# And it must go away again once the API answers.
+kill_mock8
+echo thinking > /tmp/namo_mock8_mode
+python3 /tmp/namo_mock8.py & MOCK8_PID=$!
+sleep 1.2
+printf '%s\t%s\n' "$PWD" "git com" >&$EFD
+sleep 1.5
+tail -c 400 "$ET/tty" | grep -q 'namo: ' \
+  && bad "the error row survived a call that succeeded" \
+  || ok "the error row clears once a call works again"
+
+[ -s "$ET/pid" ] && kill "$(cat "$ET/pid")" 2>/dev/null
+exec {EFD}>&-
+rm -rf "$ET"
+kill_mock8
+
+rm -f /tmp/namo_mock8.py /tmp/namo_mock8_mode
 
 # --------------------------------------------------------------------------
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$pass" "$fail"
