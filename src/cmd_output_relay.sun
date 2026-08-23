@@ -29,15 +29,14 @@ public module namo {
   using sun.process;
   using sun.time;
 
-  // The pty, and the window size that has to be copied onto it. struct winsize
-  // is four u16: rows, cols, and two pixel fields nothing here uses.
+  // The pty, and the window size that has to be copied onto it -- the one
+  // thing the stdlib cannot do (SUN_FEEDBACK.md). struct winsize is four u16:
+  // rows, cols, and two pixel fields nothing here uses.
   extern "C" function posix_openpt(flags: i32) i32;
   extern "C" function grantpt(fd: i32) i32;
   extern "C" function unlockpt(fd: i32) i32;
   extern "C" function ptsname(fd: i32) raw_ptr<u8>;
   extern "C" function ioctl(fd: i32, req: u64, arg: raw_ptr<u8>) i32;
-  extern "C" function read(fd: i32, buf: raw_ptr<u8>, n: i64) i64;
-  extern "C" function strlen(s: raw_ptr<u8>) i64;
   // The daemon's FIFO, opened read-write so that it neither blocks waiting for
   // a reader nor takes a SIGPIPE if the daemon goes away, and non-blocking so
   // that a full pipe costs a dropped hint rather than a stalled terminal.
@@ -66,18 +65,6 @@ public module namo {
   // taken back out before the bytes reach the screen.
   var MARK_PROMPT: u8 = 29;
   var MAX_LINE: i64 = 400;
-
-  function from_cstr(alloc: ref HeapAllocator, p: raw_ptr<u8>) String {
-    var out = String(alloc, "");
-    if (p == null) {
-      return out;
-    }
-    var n: i64 = unsafe { strlen(p); };
-    for (var i: i64 = 0; i < n; i = i + 1) {
-      out.append_char(unsafe { _load<u8>(p, i); });
-    }
-    return out;
-  }
 
   function winsize_buf(alloc: ref HeapAllocator) ContiguousBuffer<u16> {
     var ws = ContiguousBuffer<u16>(alloc, 4);
@@ -127,7 +114,7 @@ public module namo {
 
   // Colour, cursor moves and the rest are for a terminal to act on, not for a
   // model to read: they are dropped here rather than sent and paid for.
-  function strip_escapes(alloc: ref HeapAllocator, line: ref String) String {
+  function strip_escapes(alloc: ref HeapAllocator, line: const ref String) String {
     var out = String(alloc, "");
     var i: i64 = 0;
     while (i < line.length()) {
@@ -165,7 +152,7 @@ public module namo {
     return out;
   }
 
-  function tail_of(alloc: ref HeapAllocator, lines: ref Vec<String>, keep: i64) Vec<String> {
+  function tail_of(alloc: ref HeapAllocator, lines: const ref Vec<String>, keep: i64) Vec<String> {
     var out = Vec<String>(alloc, 16);
     var from: i64 = lines.size() - keep;
     if (from < 0) {
@@ -177,7 +164,7 @@ public module namo {
     return out;
   }
 
-  function record_line(alloc: ref HeapAllocator, rec: ref Recorder, raw: ref String) void {
+  function record_line(alloc: ref HeapAllocator, rec: ref Recorder, raw: const ref String) void {
     var line = strip_escapes(alloc, raw);
     line.trim_end();
     if (line.length() == 0) {
@@ -229,7 +216,7 @@ public module namo {
       out.append("\n");
     }
     try {
-      write_file(alloc, cfg.outfile, out);
+      write_string(cfg.outfile, out);
     } catch (e: IError) {
       // The daemon simply sends no output section this time.
     }
@@ -495,6 +482,8 @@ public module namo {
     var trk = Tracker(alloc);
     var hints = Hints(alloc);
     var poller = Poller(alloc);
+    var pty = File();
+    pty.adopt(master);
     var buf = ContiguousBuffer<u8>(alloc, RELAY_BUF);
     var through = ContiguousBuffer<u8>(alloc, RELAY_BUF);
     var ws = winsize_buf(alloc);
@@ -516,7 +505,7 @@ public module namo {
       }
 
       if (ready > 0 and poller.is_readable(0)) {
-        var n: i64 = unsafe { read(master, buf.rawData(), RELAY_BUF); };
+        var n: i64 = pty.read_into(buf.rawData(), RELAY_BUF);
         if (n <= 0) {
           // The shell closed its end, or the pty went away with it.
           running = false;
@@ -612,7 +601,7 @@ public module namo {
     if (g != 0 or u != 0) {
       return 1;
     }
-    var slave = from_cstr(alloc, unsafe { ptsname(master); });
+    var slave = from_c_str(alloc, unsafe { ptsname(master); });
     if (slave.length() == 0) {
       return 1;
     }
@@ -631,7 +620,7 @@ public module namo {
       var path = slave.clone(alloc);
       path.append("\n");
       try {
-        write_file(alloc, cfg.ptsfile, path);
+        write_string(cfg.ptsfile, path);
       } catch (e: IError) {
         return 1;
       }
@@ -639,7 +628,7 @@ public module namo {
       pid.append(child);
       pid.append("\n");
       try {
-        write_file(alloc, cfg.relay_pidfile, pid);
+        write_string(cfg.relay_pidfile, pid);
       } catch (e: IError) {
         return 1;
       }
@@ -663,7 +652,7 @@ public module namo {
 
     var tty = File();
     try {
-      tty.open(cfg.tty_path.c_str(), FileMode.Write);
+      tty.open(cfg.tty_path, FileMode.Write);
     } catch (e: IError) {
       return 0;
     }
@@ -672,7 +661,7 @@ public module namo {
     // opening its end, and the loop would stop before it began.
     var keep_slave = File();
     try {
-      keep_slave.open(slave.c_str(), FileMode.Write);
+      keep_slave.open(slave, FileMode.Write);
     } catch (e: IError) {
       return 0;
     }

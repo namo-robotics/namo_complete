@@ -5,6 +5,7 @@
 
 public module namo {
   using sun;
+  using sun.io;
 
   public var SYSTEM_PROMPT: static_ptr<u8> = "You complete bash command lines. Output ONLY command lines, nothing else.\n\nRules:\n- Return the FULL command line, not just the missing suffix.\n- Return at most 3 alternatives, best first, one per line.\n- No explanations, no markdown, no backticks, no comments, no prose.\n- Never invent file or directory names that were not shown to you.\n- Prefer the simplest command that satisfies the intent.\n- If you cannot produce a useful completion, output nothing at all.";
 
@@ -23,7 +24,7 @@ public module namo {
 
   // Assemble the tagged context block shown to the model. The cursor position
   // is marked explicitly so the model knows where the user is typing.
-  public function build_context(alloc: ref HeapAllocator, cfg: ref Config, history: ref Vec<String>, listing: ref String) String {
+  public function build_context(alloc: ref HeapAllocator, cfg: ref Config, history: const ref Vec<String>, listing: const ref String) String {
     var ctx = String(alloc, "<shell>bash</shell>\n<cwd>");
     ctx.append(cfg.cwd);
     ctx.append("</cwd>\n");
@@ -39,7 +40,7 @@ public module namo {
     if (cfg.outfile.length() > 0) {
       var recorded = String(alloc, "");
       try {
-        recorded = read_file(alloc, cfg.outfile);
+        recorded = read_to_string(alloc, cfg.outfile);
       } catch (e: IError) {
         recorded = String(alloc, "");
       }
@@ -80,10 +81,9 @@ public module namo {
   // Haiku 4.5) and no `cache_control` (Haiku's minimum cacheable prefix is
   // 4096 tokens, far above our ~150-token system prompt, so it would silently
   // no-op). Local caching does that job instead.
-  public function build_body(alloc: ref HeapAllocator, cfg: ref Config, context: ref String) String {
+  public function build_body(alloc: ref HeapAllocator, cfg: const ref Config, context: const ref String) String {
     var req = json_object(alloc);
-    // Json(...) takes ownership of its String, so hand it a clone.
-    req.set(String(alloc, "model"), Json(cfg.model.clone(alloc)));
+    req.set(String(alloc, "model"), json_string(alloc, cfg.model));
     req.set(String(alloc, "temperature"), Json(0));
     // Ask mode carries a description per line, so it needs the extra room.
     if (cfg.is_dym()) {
@@ -108,7 +108,7 @@ public module namo {
     var msgs = json_array(alloc);
     var turn = json_object(alloc);
     turn.set(String(alloc, "role"), json_string(alloc, "user"));
-    turn.set(String(alloc, "content"), Json(context.clone(alloc)));
+    turn.set(String(alloc, "content"), json_string(alloc, context));
     msgs.push(turn);
     req.set(String(alloc, "messages"), msgs);
 

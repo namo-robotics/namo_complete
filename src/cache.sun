@@ -6,11 +6,12 @@
 
 public module namo {
   using sun;
+  using sun.io;
   using sun.time;
 
   // Two independent rolling hashes, concatenated -- ~60 bits of key. This is
   // a cache key, not a security primitive.
-  public function cache_key(alloc: ref HeapAllocator, cfg: ref Config) String {
+  public function cache_key(alloc: ref HeapAllocator, cfg: const ref Config) String {
     var subject = String(alloc, "");
     if (cfg.is_dym()) {
       subject.append("dym:");
@@ -34,7 +35,7 @@ public module namo {
     return key;
   }
 
-  function cache_file(alloc: ref HeapAllocator, cfg: ref Config, key: ref String) String {
+  function cache_file(alloc: ref HeapAllocator, cfg: const ref Config, key: const ref String) String {
     var p = String(alloc, "");
     p.append(cfg.cache_dir);
     p.append("/");
@@ -45,13 +46,13 @@ public module namo {
 
   // Cache format: first line is the unix timestamp, remaining lines are the
   // suggestions. Returns an empty Vec on miss or expiry.
-  public function cache_lookup(alloc: ref HeapAllocator, cfg: ref Config, key: ref String) Vec<String> {
+  public function cache_lookup(alloc: ref HeapAllocator, cfg: const ref Config, key: const ref String) Vec<String> {
     var out = Vec<String>(alloc, 4);
     var path = cache_file(alloc, cfg, key);
 
     var raw = String(alloc, "");
     try {
-      raw = read_file(alloc, path);
+      raw = read_to_string(alloc, path);
     } catch (e: IError) {
       return out;
     }
@@ -76,7 +77,7 @@ public module namo {
     return out;
   }
 
-  public function cache_store(alloc: ref HeapAllocator, cfg: ref Config, key: ref String, items: ref Vec<String>) void {
+  public function cache_store(alloc: ref HeapAllocator, cfg: const ref Config, key: const ref String, items: const ref Vec<String>) void {
     if (items.size() == 0) {
       return;
     }
@@ -92,7 +93,7 @@ public module namo {
 
     var path = cache_file(alloc, cfg, key);
     try {
-      write_file(alloc, path, body);
+      write_string(path, body);
     } catch (e: IError) {
       // A cache write failure is never fatal.
     }
@@ -100,7 +101,7 @@ public module namo {
 
   // Minimum interval between API calls, enforced with a stamp file.
   // Returns false when the caller should back off.
-  public function rate_limit_ok(alloc: ref HeapAllocator, cfg: ref Config, min_gap: i64) bool {
+  public function rate_limit_ok(alloc: ref HeapAllocator, cfg: const ref Config, min_gap: i64) bool {
     ensure_dir_p(alloc, cfg.cache_dir);
     var path = String(alloc, "");
     path.append(cfg.cache_dir);
@@ -109,7 +110,7 @@ public module namo {
     var current: i64 = unix_time();
     var last: i64 = 0;
     try {
-      var raw = read_file(alloc, path);
+      var raw = read_to_string(alloc, path);
       raw.trim();
       var parsed = raw.parse_i64();
       last = match parsed {
@@ -127,7 +128,7 @@ public module namo {
     var stamp = String(alloc, "");
     stamp.append(current);
     try {
-      write_file(alloc, path, stamp);
+      write_string(path, stamp);
     } catch (e: IError) {
       // Non-fatal.
     }

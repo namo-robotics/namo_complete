@@ -12,6 +12,7 @@
 
 public module namo {
   using sun;
+  using sun.io;
   using sun.process;
 
   public class Reply {
@@ -28,7 +29,7 @@ public module namo {
   // inside a quoted value, so a key carrying a newline or a quote could add
   // directives of its own. Keys never contain either; one that does is
   // rejected rather than escaped.
-  function usable_key(key: ref String) bool {
+  function usable_key(key: const ref String) bool {
     if (key.length() == 0) {
       return false;
     }
@@ -42,14 +43,14 @@ public module namo {
   }
 
   // The whole of curl's stdin: the header that must stay out of `ps`.
-  function build_conf(alloc: ref HeapAllocator, cfg: ref Config) String {
+  function build_conf(alloc: ref HeapAllocator, cfg: const ref Config) String {
     var conf = String(alloc, "header = \"x-api-key: ");
     conf.append(cfg.api_key);
     conf.append("\"\n");
     return conf;
   }
 
-  public function call_api(alloc: ref HeapAllocator, cfg: ref Config, body: ref String) Reply, IError {
+  public function call_api(alloc: ref HeapAllocator, cfg: const ref Config, body: ref String) Reply, IError {
     var reply = Reply(alloc);
 
     if (usable_key(cfg.api_key) == false) {
@@ -64,7 +65,7 @@ public module namo {
     var p_body = cfg.rt_path(alloc, "body.");
     p_body.append(pid());
     p_body.append(".json");
-    write_file(alloc, p_body, body);
+    write_string(p_body, body);
 
     var data_arg = String(alloc, "@");
     data_arg.append(p_body);
@@ -111,7 +112,7 @@ public module namo {
   }
 
   // Pull the completion lines out of a Messages API response.
-  public function parse_reply(alloc: ref HeapAllocator, cfg: ref Config, raw: ref String, reply: ref Reply) void {
+  public function parse_reply(alloc: ref HeapAllocator, cfg: const ref Config, raw: const ref String, reply: ref Reply) void {
     try {
       var doc = json_parse(alloc, raw);
 

@@ -1,13 +1,22 @@
 #!/usr/bin/env bash
 # Build the namo_complete binary.
 #
-# Needs a Sun whose stdlib carries sun.process / sun.env / sun.time (the
-# 2026-08-19 dev build or newer); an older one fails on the first `using`.
+# Needs the 2026-08-22 dev build of Sun or newer: sun.io and sun.env take
+# `ref String` paths, and the code is written against that. An older compiler
+# fails with "No matching overload of 'make_dir' / 'open' ..." or on `const`.
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-: "${SUN_PATH:=/usr/lib/sun}"
+# stdlib.moon must come from the same install as the compiler. A toolchain
+# unpacked under a prefix other than /usr (no root: `dpkg-deb -x sun.deb
+# ~/.local/sun`) keeps its stdlib beside its binary, so look there first.
+if [ -z "${SUN_PATH:-}" ]; then
+  SUN_BIN="$(command -v sun 2>/dev/null || true)"
+  SUN_BIN="$(readlink -f "$SUN_BIN" 2>/dev/null || printf '%s' "$SUN_BIN")"
+  SUN_PATH="$(dirname "$(dirname "$SUN_BIN")")/lib/sun"
+  [ -f "$SUN_PATH/stdlib.moon" ] || SUN_PATH=/usr/lib/sun
+fi
 export SUN_PATH
 
 if ! command -v sun >/dev/null 2>&1; then
@@ -46,9 +55,10 @@ SUNEOF
 echo "building bin/namo_complete $VERSION ($COMMIT) ..."
 if ! sun -c -o bin/namo_complete src/main.sun; then
   echo >&2
-  echo "error: build failed. If the errors mention 'sun.process', 'sun.env' or" >&2
-  echo "       an unknown member on a stdlib type, the installed Sun predates" >&2
-  echo "       the stdlib modules this project needs. Update it:" >&2
+  echo "error: build failed. If the errors mention a missing overload of a" >&2
+  echo "       sun.io call ('make_dir', 'open', 'read_dir'), 'const', or an" >&2
+  echo "       unknown member on a stdlib type, the installed Sun predates the" >&2
+  echo "       2026-08-22 dev build this project needs. Update it:" >&2
   echo "         curl -LO https://github.com/namo-robotics/sun/releases/download/dev/sun_0.dev_amd64.deb" >&2
   echo "         sudo apt install ./sun_0.dev_amd64.deb" >&2
   exit 1

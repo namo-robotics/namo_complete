@@ -107,7 +107,7 @@ public module namo {
   // Hint table
   // ------------------------------------------------------------------------
 
-  function table_find(st: ref Daemon, line: ref String) i64 {
+  function table_find(st: const ref Daemon, line: const ref String) i64 {
     for (var i: i64 = 0; i < st.keys.size(); i = i + 1) {
       if (st.keys.get_unchecked(i).equals(line)) {
         return i;
@@ -116,7 +116,7 @@ public module namo {
     return -1;
   }
 
-  function table_put(alloc: ref HeapAllocator, st: ref Daemon, line: ref String, hint: ref String) void {
+  function table_put(alloc: ref HeapAllocator, st: ref Daemon, line: const ref String, hint: const ref String) void {
     var at = table_find(st, line);
     if (at >= 0) {
       st.vals.set_unchecked(at, hint.clone(alloc));
@@ -142,7 +142,7 @@ public module namo {
   // which is most of the time. Relative positioning cannot do that, and it
   // still emits no newline: a newline at the bottom would scroll the screen
   // and leave the saved cursor pointing a row too low.
-  function paint(alloc: ref HeapAllocator, st: ref Daemon, row: ref String) void {
+  function paint(alloc: ref HeapAllocator, st: ref Daemon, row: const ref String) void {
     if (st.screen.equals(row)) {
       return;
     }
@@ -174,7 +174,7 @@ public module namo {
 
   // Decide what the row should show for `line` and put it there. Reads only
   // the in-memory table, so this is safe to run on every single keystroke.
-  function render(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, line: ref String) void {
+  function render(alloc: ref HeapAllocator, cfg: const ref Config, st: ref Daemon, line: const ref String) void {
     if (line.length() < cfg.hint_min) {
       st.last = String(alloc, "");
       clear_row(alloc, st);
@@ -215,7 +215,7 @@ public module namo {
     var out = String(alloc, "");
     var names = Vec<DirEntry>(alloc, 8);
     try {
-      names = read_dir(alloc, path.c_str());
+      names = read_dir(alloc, path);
     } catch (e: IError) {
       return out;
     }
@@ -269,7 +269,7 @@ public module namo {
   // FIFO records: "<cwd>\t<line>\n"
   // ------------------------------------------------------------------------
 
-  function rec_cwd(alloc: ref HeapAllocator, rec: ref String) String {
+  function rec_cwd(alloc: ref HeapAllocator, rec: const ref String) String {
     var out = String(alloc, "");
     var found = rec.find_char(CH_TAB);
     var idx: i64 = match found {
@@ -285,7 +285,7 @@ public module namo {
     return out;
   }
 
-  function rec_line(alloc: ref HeapAllocator, rec: ref String) String {
+  function rec_line(alloc: ref HeapAllocator, rec: const ref String) String {
     var out = String(alloc, "");
     var found = rec.find_char(CH_TAB);
     var idx: i64 = match found {
@@ -301,7 +301,7 @@ public module namo {
     return out;
   }
 
-  function rec_mark(alloc: ref HeapAllocator, rec: ref String, mark: u8) bool {
+  function rec_mark(alloc: ref HeapAllocator, rec: const ref String, mark: u8) bool {
     var line = rec_line(alloc, rec);
     if (line.length() == 0) {
       return false;
@@ -309,11 +309,11 @@ public module namo {
     return line.at(0) == mark;
   }
 
-  function rec_is_sync(alloc: ref HeapAllocator, rec: ref String) bool {
+  function rec_is_sync(alloc: ref HeapAllocator, rec: const ref String) bool {
     return rec_mark(alloc, rec, SYNC_MARK);
   }
 
-  function rec_is_dym(alloc: ref HeapAllocator, rec: ref String) bool {
+  function rec_is_dym(alloc: ref HeapAllocator, rec: const ref String) bool {
     var line = rec_line(alloc, rec);
     if (line.length() == 0) {
       return false;
@@ -420,7 +420,7 @@ public module namo {
 
   // The paid call. Everything it needs beyond the line itself comes from the
   // shell's history snapshot and from the directory the line was typed in.
-  function daemon_call(alloc: ref HeapAllocator, cfg: ref Config, key: ref String) Vec<String> {
+  function daemon_call(alloc: ref HeapAllocator, cfg: ref Config, key: const ref String) Vec<String> {
     var out = Vec<String>(alloc, 4);
     if (cfg.api_key.length() == 0) {
       return out;
@@ -434,7 +434,7 @@ public module namo {
     var history = Vec<String>(alloc, 8);
     if (cfg.history_lines > 0 and cfg.histfile.length() > 0) {
       try {
-        var raw = read_file(alloc, cfg.histfile);
+        var raw = read_to_string(alloc, cfg.histfile);
         history = parse_history(alloc, raw, cfg.history_lines);
       } catch (e: IError) {
         history = Vec<String>(alloc, 8);
@@ -472,7 +472,7 @@ public module namo {
   // network=false stays local (a cache read, ~2ms); network=true may pay for
   // an API call. Either way the answer lands in the table and the row is
   // repainted from it.
-  function serve(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, rec: ref String, network: bool) void {
+  function serve(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, rec: const ref String, network: bool) void {
     var line = rec_line(alloc, rec);
     if (line.length() < cfg.hint_min) {
       return;
@@ -511,7 +511,7 @@ public module namo {
   // own message and handed the prompt back -- the whole point of doing this
   // here is that nobody is waiting for it. Paid immediately rather than
   // debounced: the line is finished, there is no next keystroke to wait for.
-  function serve_dym(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, rec: ref String) void {
+  function serve_dym(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, rec: const ref String) void {
     // The record is a knock on the door; the line itself is in the file the
     // handler wrote, as "<word> TAB <fallback> TAB <what `history 1` printed>".
     // Reading it here rather than in the shell keeps the picking-apart -- the
@@ -521,7 +521,7 @@ public module namo {
     }
     var content = String(alloc, "");
     try {
-      content = read_file(alloc, cfg.dymfile);
+      content = read_to_string(alloc, cfg.dymfile);
     } catch (e: IError) {
       return;
     }
@@ -612,13 +612,13 @@ public module namo {
   // The shell is inside `read -t`, so an answer always goes back -- even an
   // empty one. A request that got no reply at all would leave it there until
   // the timeout, for nothing.
-  function reply_send(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, id: ref String, items: ref Vec<String>) void {
+  function reply_send(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, id: const ref String, items: const ref Vec<String>) void {
     if (cfg.reply.length() == 0) {
       return;
     }
     if (st.reply_open == false) {
       try {
-        st.reply.open(cfg.reply.c_str(), FileMode.Write);
+        st.reply.open(cfg.reply, FileMode.Write);
       } catch (e: IError) {
         return;
       }
@@ -669,7 +669,7 @@ public module namo {
   // nothing to do but wait, so this is paid immediately and never debounced,
   // and the answer goes straight back down the reply FIFO. The hint row is
   // not touched: the shell owns what happens to the line it asked about.
-  function serve_sync(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, rec: ref String) void {
+  function serve_sync(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, rec: const ref String) void {
     var marked = rec_line(alloc, rec);
     var body = String(alloc, "");
     for (var i: i64 = 1; i < marked.length(); i = i + 1) {
@@ -820,7 +820,7 @@ public module namo {
     s.append(child);
     s.append("\n");
     try {
-      write_file(alloc, cfg.pidfile, s);
+      write_string(cfg.pidfile, s);
     } catch (e: IError) {
       // Without the pid file the shell simply never respawns us.
     }
@@ -888,14 +888,14 @@ public module namo {
 
     var st = Daemon(alloc);
     try {
-      st.tty.open(cfg.tty_path.c_str(), FileMode.Write);
+      st.tty.open(cfg.tty_path, FileMode.Write);
     } catch (e: IError) {
       return 0;
     }
     // Read-only, so that when the shell closes its end we see end-of-file and
     // stop rather than outliving the shell we were drawing for.
     try {
-      st.fifo.open(cfg.fifo.c_str(), FileMode.Read);
+      st.fifo.open(cfg.fifo, FileMode.Read);
     } catch (e: IError) {
       st.tty.close();
       return 0;

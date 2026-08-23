@@ -171,9 +171,9 @@ Two deliberate properties:
 Everything the binary needs is inside the one file — it links nothing at run
 time and depends on nothing but `curl`. One source file reaches outside Sun's
 standard library: [`cmd_output_relay.sun`](src/cmd_output_relay.sun) calls a handful of C functions
-directly (`posix_openpt`, `grantpt`, `unlockpt`, `ptsname`, `ioctl`, `read`,
-`open`), because creating a stand-in terminal is the one thing the standard
-library cannot yet do. No other file in [`src/`](src/) calls C or uses an
+directly (`posix_openpt`, `grantpt`, `unlockpt`, `ptsname`, `ioctl`, `open`),
+because creating a stand-in terminal is the one thing the standard library
+cannot yet do. No other file in [`src/`](src/) calls C or uses an
 `unsafe` block.
 
 ## Development

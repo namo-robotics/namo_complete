@@ -1,7 +1,7 @@
-// util.sun - the few string helpers the stdlib still does not provide.
-//
-// Everything else (trim, to_lower, contains, split, clone, append_hex) now
-// lives on sun.String; see SUN_FEEDBACK.md §7.
+// util.sun - string helpers with no stdlib equivalent: a line splitter that
+// also drops blank lines, a cache-key hash, and the heuristics that judge what
+// the model sent back. Everything else (trim, to_lower, contains, split,
+// split_whitespace, join, clone, append_hex) lives on sun.String.
 
 public module namo {
   using sun;
@@ -11,15 +11,11 @@ public module namo {
   public var CH_TAB: u8 = 9;
   public var CH_CR: u8 = 13;
 
-  public function is_space(c: u8) bool {
-    return c == CH_SP or c == CH_TAB or c == CH_NL or c == CH_CR;
-  }
-
   // Split on '\n', dropping empty/whitespace-only lines. Trailing CR goes with
   // the surrounding whitespace.
-  public function split_lines(alloc: ref HeapAllocator, s: ref String) Vec<String> {
+  public function split_lines(alloc: ref HeapAllocator, s: const ref String) Vec<String> {
     var out = Vec<String>(alloc, 8);
-    var parts = s.split(alloc, CH_NL);
+    var parts = s.split_nonempty(alloc, CH_NL);
     for (var i: i64 = 0; i < parts.size(); i = i + 1) {
       var line = parts.get_unchecked(i).clone(alloc);
       line.trim();
@@ -31,28 +27,14 @@ public module namo {
   }
 
   // Collapse whitespace runs to a single space; used for cache-key stability.
-  public function normalize_ws(alloc: ref HeapAllocator, s: ref String) String {
-    var out = String(alloc, "");
-    var prev_space: bool = false;
-    for (var i: i64 = 0; i < s.length(); i = i + 1) {
-      var c: u8 = s.at(i);
-      if (is_space(c)) {
-        if (prev_space == false and out.length() > 0) {
-          out.append_char(CH_SP);
-        }
-        prev_space = true;
-      } else {
-        out.append_char(c);
-        prev_space = false;
-      }
-    }
-    out.trim();
-    return out;
+  public function normalize_ws(alloc: ref HeapAllocator, s: const ref String) String {
+    var words = s.split_whitespace(alloc);
+    return join(alloc, words, " ");
   }
 
   // Polynomial rolling hash, reduced each step so it cannot overflow i64.
   // This is a cache key, not a security primitive.
-  public function hash_str(s: ref String, seed: i64) i64 {
+  public function hash_str(s: const ref String, seed: i64) i64 {
     var h: i64 = seed;
     for (var i: i64 = 0; i < s.length(); i = i + 1) {
       h = (h * 131 + s.at(i)) % 1000000007;
@@ -69,7 +51,7 @@ public module namo {
 
   // Punctuation that is everywhere in shell syntax and almost nowhere in an
   // English sentence: - / = $ | * ~ ; > <
-  function has_shell_punct(s: ref String) bool {
+  function has_shell_punct(s: const ref String) bool {
     for (var i: i64 = 0; i < s.length(); i = i + 1) {
       var c: u8 = s.at(i);
       if (c == 45 or c == 47 or c == 61 or c == 36 or c == 124) {
@@ -84,7 +66,7 @@ public module namo {
 
   // English function words. Two of them in a line that carries no shell
   // punctuation is what separates a sentence from a command.
-  function is_stopword(w: ref String) bool {
+  function is_stopword(w: const ref String) bool {
     if (w.equals_literal("the") or w.equals_literal("a") or w.equals_literal("an")) {
       return true;
     }
@@ -113,7 +95,7 @@ public module namo {
   }
 
   // The sentences the model falls back on when it has nothing to offer.
-  function sounds_like_refusal(low: ref String) bool {
+  function sounds_like_refusal(low: const ref String) bool {
     if (low.contains("i cannot") or low.contains("i can't") or low.contains("i am unable")) {
       return true;
     }
@@ -137,7 +119,7 @@ public module namo {
   // sentence instead ("I cannot produce a useful completion ..."). A sentence
   // in the hint row is worse than an empty row, so it is dropped here -- once,
   // before caching, so every caller sees the same filtered set.
-  public function looks_like_command(alloc: ref HeapAllocator, cmd: ref String) bool {
+  public function looks_like_command(alloc: ref HeapAllocator, cmd: const ref String) bool {
     if (cmd.length() == 0) {
       return false;
     }
@@ -183,7 +165,7 @@ public module namo {
     // Anything else long and wordy: several English function words with none
     // of the punctuation a real command line carries.
     if (has_shell_punct(cmd) == false) {
-      var words = low.split(alloc, CH_SP);
+      var words = low.split_whitespace(alloc);
       var stops: i64 = 0;
       for (var i: i64 = 0; i < words.size(); i = i + 1) {
         var w = words.get_unchecked(i);
@@ -201,7 +183,7 @@ public module namo {
   // A command one keystroke from running, in someone else's prompt. The shell
   // used to carry this list; it lives here so there is one copy of it, and so
   // the tests can reach it.
-  public function looks_destructive(alloc: ref HeapAllocator, cmd: ref String) bool {
+  public function looks_destructive(alloc: ref HeapAllocator, cmd: const ref String) bool {
     var low = cmd.clone(alloc);
     low.to_lower();
     low.trim();
@@ -241,7 +223,7 @@ public module namo {
   // line was never recorded at all -- HISTCONTROL=ignorespace, HISTIGNORE and
   // `set +o history` all leave entry 1 belonging to some earlier command, and
   // the first word is what gives that away.
-  public function history_line(alloc: ref HeapAllocator, raw: ref String, word: ref String, fallback: ref String) String {
+  public function history_line(alloc: ref HeapAllocator, raw: const ref String, word: const ref String, fallback: const ref String) String {
     var line = raw.clone(alloc);
     line.trim();
 
@@ -249,24 +231,11 @@ public module namo {
     while (i < line.length() and line.at(i) >= 48 and line.at(i) <= 57) {
       i = i + 1;
     }
-    var typed = String(alloc, "");
-    if (i > 0) {
-      for (var k: i64 = i; k < line.length(); k = k + 1) {
-        typed.append_char(line.at(k));
-      }
-    } else {
-      typed = line.clone(alloc);
-    }
+    var typed = line.substr(alloc, i, line.length() - i);
     typed.trim();
 
-    var first = String(alloc, "");
-    for (var j: i64 = 0; j < typed.length(); j = j + 1) {
-      if (is_space(typed.at(j))) {
-        break;
-      }
-      first.append_char(typed.at(j));
-    }
-    if (first.equals(word) == false) {
+    var words = typed.split_whitespace(alloc);
+    if (words.size() == 0 or words.get_unchecked(0).equals(word) == false) {
       return fallback.clone(alloc);
     }
     return typed;
@@ -275,7 +244,7 @@ public module namo {
   // True when the line carries a known credential prefix. Only these are
   // matched: keyword heuristics ("password", "token", `export `) dropped far
   // too much ordinary history to be worth the recall.
-  public function looks_secret(line: ref String) bool {
+  public function looks_secret(line: const ref String) bool {
     if (line.contains("sk-") or line.contains("ghp_")) {
       return true;
     }

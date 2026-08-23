@@ -1,12 +1,18 @@
-// fs.sun - the String-shaped file helpers the rest of the program uses.
+// fs.sun - the few file helpers sun.io does not already provide.
 //
-// sun.io speaks in `raw_ptr<u8>` paths, which a String hands over through
-// c_str(); these wrappers are that bridge and little else. Everything that
-// used to be hand-declared libc in this file -- open, read, write, close,
-// unlink, mkdir -- now comes from the stdlib.
+// sun.io takes a `ref String` path directly, so reading and writing whole
+// files is done with read_to_string / write_string at the call site. What is
+// left here is the handful of calls whose failure is not an error to anyone --
+// a directory that already exists, a file that is already gone -- and two
+// descriptor helpers for fds we did not open ourselves.
 //
 // Directories are created 0700 and every file we write lives inside one, so
 // nothing here needs to name a file mode.
+//
+// sun.io borrows its paths as `ref String`, not `const ref`, so a path read
+// out of a `const ref Config` cannot be opened. That is why `cfg` stays `ref`
+// in every function that opens one of its files (and `path` does here), while
+// the rest of the program borrows it const.
 
 public module namo {
   using sun;
@@ -17,7 +23,7 @@ public module namo {
   // Create a directory, tolerating "already exists".
   public function ensure_dir(alloc: ref HeapAllocator, path: ref String) void {
     try {
-      make_dir(path.c_str(), MODE_0700);
+      make_dir(path, MODE_0700);
     } catch (e: IError) {
       // Already there, or the parent is missing; the caller finds out when
       // the write fails.
@@ -25,7 +31,7 @@ public module namo {
   }
 
   // mkdir -p: create every component of an absolute path.
-  public function ensure_dir_p(alloc: ref HeapAllocator, path: ref String) void {
+  public function ensure_dir_p(alloc: ref HeapAllocator, path: const ref String) void {
     var acc = String(alloc, "");
     for (var i: i64 = 0; i < path.length(); i = i + 1) {
       var c: u8 = path.at(i);
@@ -41,18 +47,10 @@ public module namo {
 
   public function remove_path(alloc: ref HeapAllocator, path: ref String) void {
     try {
-      remove_file(path.c_str());
+      remove_file(path);
     } catch (e: IError) {
       // Not there is the state we wanted anyway.
     }
-  }
-
-  public function write_file(alloc: ref HeapAllocator, path: ref String, data: ref String) void, IError {
-    write_string(path.c_str(), data);
-  }
-
-  public function read_file(alloc: ref HeapAllocator, path: ref String) String, IError {
-    return read_to_string(alloc, path.c_str());
   }
 
   // Drain a descriptor to end-of-file. Used for stdin, which arrives as fd 0

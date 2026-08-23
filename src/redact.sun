@@ -15,7 +15,7 @@ public module namo {
   // History lines carrying a known credential prefix are dropped entirely
   // rather than partially masked; the rest is trimmed to the most recent
   // `keep` commands.
-  public function parse_history(alloc: ref HeapAllocator, raw: ref String, keep: i64) Vec<String> {
+  public function parse_history(alloc: ref HeapAllocator, raw: const ref String, keep: i64) Vec<String> {
     var out = Vec<String>(alloc, 16);
     if (keep <= 0) {
       return out;

@@ -126,7 +126,7 @@ public module namo {
     // Point the config at one line from the daemon's FIFO, so cache_key and
     // build_context -- both written against a one-shot run -- can be reused
     // unchanged for every keystroke.
-    public function set_target(alloc: ref HeapAllocator, line: ref String, cwd: ref String) void {
+    public function set_target(alloc: ref HeapAllocator, line: const ref String, cwd: const ref String) void {
       this.line = line.clone(alloc);
       this.cwd = cwd.clone(alloc);
     }
@@ -135,7 +135,7 @@ public module namo {
     // so anything that is not a keystroke borrows the config and hands it
     // back: set_query_target before the call, clear_query_target after it, and
     // the keystrokes that follow are served exactly as before.
-    public function set_query_target(alloc: ref HeapAllocator, mode: static_ptr<u8>, query: ref String, cwd: ref String) void {
+    public function set_query_target(alloc: ref HeapAllocator, mode: static_ptr<u8>, query: const ref String, cwd: const ref String) void {
       this.mode = String(alloc, mode);
       this.query = query.clone(alloc);
       this.cwd = cwd.clone(alloc);
@@ -146,23 +146,23 @@ public module namo {
       this.query = String(alloc, "");
     }
 
-    public function is_ask() bool {
+    public const function is_ask() bool {
       return this.mode.equals_literal("ask");
     }
 
     // "Did you mean": bash could not find the command, and the line the user
     // typed arrives in NAMO_QUERY to be corrected rather than completed.
-    public function is_dym() bool {
+    public const function is_dym() bool {
       return this.mode.equals_literal("dym");
     }
 
     // Both of the modes whose subject is NAMO_QUERY rather than NAMO_LINE.
-    public function from_query() bool {
+    public const function from_query() bool {
       return this.is_ask() or this.is_dym();
     }
 
     // Path inside the runtime dir.
-    public function rt_path(alloc: ref HeapAllocator, name: static_ptr<u8>) String {
+    public const function rt_path(alloc: ref HeapAllocator, name: static_ptr<u8>) String {
       var p = String(alloc, "");
       p.append(this.runtime_dir);
       p.append("/");
@@ -173,14 +173,14 @@ public module namo {
 
   // sun.env.get returns an Option; almost everything here wants "" for unset,
   // and the two callers that do not use env_or.
-  public function env_str(alloc: ref HeapAllocator, name: raw_ptr<u8>) String {
+  public function env_str(alloc: ref HeapAllocator, name: static_ptr<u8>) String {
     return match sun.env.get(alloc, name) {
       Option.Some(v) => v,
       Option.None => String(alloc, "")
     };
   }
 
-  public function env_or(alloc: ref HeapAllocator, name: raw_ptr<u8>, fallback: static_ptr<u8>) String {
+  public function env_or(alloc: ref HeapAllocator, name: static_ptr<u8>, fallback: static_ptr<u8>) String {
     var v = env_str(alloc, name);
     if (v.length() == 0) {
       return String(alloc, fallback);
@@ -190,7 +190,7 @@ public module namo {
 
   // Seconds as a decimal ("0.2", ".05", "1") to whole milliseconds. Anything
   // that is not a plain decimal number falls back rather than half-parsing.
-  public function env_ms(alloc: ref HeapAllocator, name: raw_ptr<u8>, fallback: i64) i64 {
+  public function env_ms(alloc: ref HeapAllocator, name: static_ptr<u8>, fallback: i64) i64 {
     var raw = env_str(alloc, name);
     raw.trim();
     if (raw.length() == 0) {
@@ -231,7 +231,7 @@ public module namo {
     return whole * 1000 + frac;
   }
 
-  public function env_int(alloc: ref HeapAllocator, name: raw_ptr<u8>, fallback: i64) i64 {
+  public function env_int(alloc: ref HeapAllocator, name: static_ptr<u8>, fallback: i64) i64 {
     var raw = env_str(alloc, name);
     if (raw.length() == 0) {
       return fallback;
