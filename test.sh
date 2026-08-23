@@ -258,12 +258,7 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_response(200); self.send_header('content-type','application/json')
         self.send_header('content-length', str(len(o))); self.end_headers(); self.wfile.write(o)
     def log_message(self, *a): pass
-class S(http.server.HTTPServer):
-    # A mock from an interrupted run can still hold the port in TIME_WAIT,
-    # and every assertion below would then fail for a reason that has
-    # nothing to do with what is being tested.
-    allow_reuse_address = True
-S(('127.0.0.1', $PORT2), H).serve_forever()
+http.server.HTTPServer(('127.0.0.1', $PORT2), H).serve_forever()
 PY
 python3 /tmp/namo_mock2.py & MOCK2_PID=$!
 sleep 1.2
@@ -1340,7 +1335,12 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_response(200); self.send_header('content-type','application/json')
         self.send_header('content-length', str(len(o))); self.end_headers(); self.wfile.write(o)
     def log_message(self, *a): pass
-http.server.HTTPServer(('127.0.0.1', $PORT8), H).serve_forever()
+class S(http.server.HTTPServer):
+    # A mock from an interrupted run can still hold the port in TIME_WAIT,
+    # and every assertion below would then fail for a reason that has
+    # nothing to do with what is being tested.
+    allow_reuse_address = True
+S(('127.0.0.1', $PORT8), H).serve_forever()
 PY
 
 echo thinking > /tmp/namo_mock8_mode
