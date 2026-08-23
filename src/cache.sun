@@ -48,6 +48,11 @@ public module namo {
   // suggestions. Returns an empty Vec on miss or expiry.
   public function cache_lookup(alloc: ref HeapAllocator, cfg: const ref Config, key: const ref String) Vec<String> {
     var out = Vec<String>(alloc, 4);
+    // NAMO_CACHE=0 means neither read nor written -- checked here rather than
+    // at every call site, because the daemon's sites forgot to.
+    if (cfg.use_cache == false) {
+      return out;
+    }
     var path = cache_file(alloc, cfg, key);
 
     var raw = String(alloc, "");
@@ -78,6 +83,9 @@ public module namo {
   }
 
   public function cache_store(alloc: ref HeapAllocator, cfg: const ref Config, key: const ref String, items: const ref Vec<String>) void {
+    if (cfg.use_cache == false) {
+      return;
+    }
     if (items.size() == 0) {
       return;
     }

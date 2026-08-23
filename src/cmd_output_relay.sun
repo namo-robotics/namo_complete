@@ -261,6 +261,7 @@ public module namo {
                                   // no longer agree, so the next cursor move
                                   // would be guesswork
     public var dirty: bool;       // changed since the last record went out
+    public var ended: bool;       // Enter went by, or a command started
     public var state: i32;
     public var param: i64;
     public var got_param: bool;
@@ -272,6 +273,7 @@ public module namo {
       this.armed = false;
       this.wide = false;
       this.dirty = false;
+      this.ended = false;
       this.state = TRK_TEXT;
       this.param = 0;
       this.got_param = false;
@@ -285,6 +287,7 @@ public module namo {
     t.armed = armed;
     t.wide = false;
     t.dirty = armed;
+    t.ended = false;
     t.state = TRK_TEXT;
   }
 
@@ -396,6 +399,7 @@ public module namo {
     // Enter, or a command starting. Either way the line is no longer ours.
     if (c == 10 or c == MARK_START) {
       t.armed = false;
+      t.ended = true;
       return;
     }
     if (t.armed == false) {
@@ -446,8 +450,44 @@ public module namo {
     }
   }
 
+  function hints_open(h: ref Hints, cfg: ref Config) bool {
+    if (h.ready) {
+      return true;
+    }
+    var fd: i32 = unsafe { open(cfg.fifo.c_str(), O_RDWR_NONBLOCK, 0); };
+    if (fd < 0) {
+      return false;
+    }
+    h.fifo.adopt(fd);
+    h.ready = true;
+    return true;
+  }
+
   function hints_send(alloc: ref HeapAllocator, cfg: ref Config, h: ref Hints, t: ref Tracker) void {
-    if (t.dirty == false or cfg.fifo.length() == 0) {
+    if (cfg.fifo.length() == 0) {
+      return;
+    }
+
+    // Enter went by, or a command started: the line the daemon last saw is
+    // over, and this says so *now*. The prompt hook says the same thing, but
+    // only once the command has finished -- and an answer that has been in
+    // flight since before Enter can land inside that gap, get painted, and
+    // sit under a prompt whose line is empty. The daemon drops a stale answer
+    // when input it has not read is waiting (see serve() in daemon.sun);
+    // this record is that input, posted the moment the line ended. Gated on
+    // `sent`, so the newlines of a command's own output say it only once.
+    if (t.ended) {
+      t.ended = false;
+      if (h.sent.length() > 0 and hints_open(h, cfg)) {
+        h.sent = String(alloc, "");
+        var bye = String(alloc, "");
+        bye.append_char(CH_TAB);
+        bye.append_char(CH_NL);
+        var wrote: i64 = h.fifo.write(bye);
+      }
+    }
+
+    if (t.dirty == false) {
       return;
     }
     t.dirty = false;
@@ -457,13 +497,8 @@ public module namo {
     if (t.line.equals(h.sent)) {
       return;
     }
-    if (h.ready == false) {
-      var fd: i32 = unsafe { open(cfg.fifo.c_str(), O_RDWR_NONBLOCK, 0); };
-      if (fd < 0) {
-        return;
-      }
-      h.fifo.adopt(fd);
-      h.ready = true;
+    if (hints_open(h, cfg) == false) {
+      return;
     }
     h.sent = t.line.clone(alloc);
     var msg = String(alloc, "");

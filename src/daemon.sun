@@ -49,6 +49,9 @@ public module namo {
 
   var FIFO_BUF: i64 = 4096;
   var TABLE_MAX: i64 = 256;
+  // How much of a failure message the row will carry. API messages can run to
+  // a paragraph; the row is one line under a prompt of unknown width.
+  var ERR_MAX: i64 = 120;
   // Nothing the shell had open is of any use to us; see daemon_run.
   var MAX_INHERITED_FD: i32 = 256;
 
@@ -86,6 +89,10 @@ public module namo {
     // a shell, and has no business guessing where that shell is -- so this is
     // what fills the field in for them.
     public var last_cwd: String;
+    // Why the last paid call failed, or empty if it did not. Set by
+    // daemon_call, cleared by the next call that works, and drawn by render
+    // in place of the hint -- the daemon has no stderr anyone can read.
+    public var err: String;
 
     public function init(alloc: ref HeapAllocator) {
       this.tty = File();
@@ -99,6 +106,7 @@ public module namo {
       this.chunk = ContiguousBuffer<u8>(alloc, FIFO_BUF);
       this.reply = File();
       this.last_cwd = String(alloc, "");
+      this.err = String(alloc, "");
       this.reply_open = false;
     }
   }
@@ -178,6 +186,22 @@ public module namo {
     if (line.length() < cfg.hint_min) {
       st.last = String(alloc, "");
       clear_row(alloc, st);
+      return;
+    }
+
+    // A failure outranks the hint table. Whatever is cached there was true
+    // before the API started refusing, and leaving it up while every new
+    // keystroke fails is how a broken model name stays invisible for a week.
+    if (st.err.length() > 0) {
+      var erow = String(alloc, "");
+      erow.append(cfg.err_prefix);
+      erow.append(st.err);
+      // One row, and it is drawn under a prompt of unknown width.
+      if (erow.length() > ERR_MAX) {
+        erow.truncate(ERR_MAX);
+        erow.append("...");
+      }
+      paint(alloc, st, erow);
       return;
     }
 
@@ -420,9 +444,10 @@ public module namo {
 
   // The paid call. Everything it needs beyond the line itself comes from the
   // shell's history snapshot and from the directory the line was typed in.
-  function daemon_call(alloc: ref HeapAllocator, cfg: ref Config, key: const ref String) Vec<String> {
+  function daemon_call(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, key: const ref String) Vec<String> {
     var out = Vec<String>(alloc, 4);
     if (cfg.api_key.length() == 0) {
+      st.err = String(alloc, "ANTHROPIC_API_KEY is not set");
       return out;
     }
     if (cfg.min_gap > 0 and rate_limit_ok(alloc, cfg, cfg.min_gap) == false) {
@@ -453,11 +478,21 @@ public module namo {
     try {
       reply = call_api(alloc, cfg, body);
     } catch (e: IError) {
+      st.err = String(alloc, "the request could not be sent");
       return out;
     }
     if (reply.failed) {
+      st.err = reply.error.clone(alloc);
+      if (st.err.length() == 0) {
+        st.err = String(alloc, "the request failed");
+      }
       return out;
     }
+
+    // The call worked. An answer with nothing usable in it is not a failure --
+    // the model is allowed to have no suggestion -- so the row goes quiet
+    // rather than showing an error.
+    st.err = String(alloc, "");
     if (reply.suggestions.size() == 0) {
       return out;
     }
@@ -488,7 +523,7 @@ public module namo {
     var key = cache_key(alloc, cfg);
     var hit = cache_lookup(alloc, cfg, key);
     if (hit.size() == 0 and network) {
-      hit = daemon_call(alloc, cfg, key);
+      hit = daemon_call(alloc, cfg, st, key);
     }
 
     if (hit.size() > 0) {
@@ -560,7 +595,7 @@ public module namo {
     var key = cache_key(alloc, cfg);
     var hit = cache_lookup(alloc, cfg, key);
     if (hit.size() == 0) {
-      hit = daemon_call(alloc, cfg, key);
+      hit = daemon_call(alloc, cfg, st, key);
     }
 
     cfg.min_gap = saved_gap;
@@ -713,7 +748,7 @@ public module namo {
       var key = cache_key(alloc, cfg);
       out = cache_lookup(alloc, cfg, key);
       if (out.size() == 0) {
-        out = daemon_call(alloc, cfg, key);
+        out = daemon_call(alloc, cfg, st, key);
       }
 
       cfg.min_gap = saved_gap;

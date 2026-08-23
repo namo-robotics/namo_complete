@@ -48,6 +48,7 @@ public module namo {
     public var tty_path: String;
     public var hint_prefix: String;
     public var hint_suffix: String;
+    public var err_prefix: String;
     public var dym_prefix: String;
     public var debounce_ms: i64;
     public var quiet_ms: i64;
@@ -98,6 +99,10 @@ public module namo {
       // The correction row carries no suffix: Alt-O runs a completion, and
       // offering it next to a line that is not one would be a lie.
       this.dym_prefix = env_or(alloc, "NAMO_DYM_PREFIX", "did you mean: ");
+      // The row a failed call draws instead of a hint. Without it a broken
+      // NAMO_MODEL, an expired key or an unreachable API all look exactly
+      // like a shell that simply has nothing to suggest.
+      this.err_prefix = env_or(alloc, "NAMO_ERR_PREFIX", "error: ");
       // Documented in seconds, used in milliseconds by poll(2).
       this.debounce_ms = env_ms(alloc, "NAMO_DEBOUNCE", 200);
       this.quiet_ms = env_ms(alloc, "NAMO_QUIET", 50);

@@ -18,10 +18,15 @@ public module namo {
   public class Reply {
     public var suggestions: Vec<String>;
     public var failed: bool;
+    // Why it failed, short enough for the hint row. The daemon's stderr goes
+    // to /dev/null -- the shell integration starts it that way -- so this
+    // string is the only way a failure can reach the user; see daemon.sun.
+    public var error: String;
 
     public function init(alloc: ref HeapAllocator) {
       this.suggestions = Vec<String>(alloc, 4);
       this.failed = false;
+      this.error = String(alloc, "");
     }
   }
 
@@ -104,6 +109,8 @@ public module namo {
       m.append("\n");
       eprint(m);
       reply.failed = true;
+      reply.error = String(alloc, "curl exit ");
+      reply.error.append(result.status());
       return reply;
     }
 
@@ -123,10 +130,29 @@ public module namo {
         m.append("\n");
         eprint(m);
         reply.failed = true;
+        reply.error = msg.clone(alloc);
         return;
       }
 
-      var text = doc.get("content").at(0).get("text").as_string();
+      // Not content[0]: a model with thinking on -- which is the default from
+      // Claude Opus 5 on -- puts a `thinking` block first, and the block the
+      // completions are in is somewhere after it. Blocks with no "text"
+      // member are skipped rather than assumed away.
+      var ti: i64 = -1;
+      for (var i: i64 = 0; i < doc.get("content").len(); i = i + 1) {
+        if (doc.get("content").at(i).has("text")) {
+          ti = i;
+          break;
+        }
+      }
+      if (ti < 0) {
+        eprint("[namo] api response carried no text block\n");
+        reply.failed = true;
+        reply.error = String(alloc, "response had no text block");
+        return;
+      }
+
+      var text = doc.get("content").at(ti).get("text").as_string();
       var lines = split_lines(alloc, text);
 
       // A truncated response leaves a partial final line; drop it.
@@ -159,6 +185,7 @@ public module namo {
     } catch (e: IError) {
       eprint("[namo] could not parse api response\n");
       reply.failed = true;
+      reply.error = String(alloc, "could not parse api response");
     }
   }
 }

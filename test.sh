@@ -179,6 +179,29 @@ assert 'output_config' not in d and 'thinking' not in d
 assert all(x.strip() for x in d['stop_sequences']), 'whitespace-only stop sequence'
 PY
 
+# `temperature` is a 400 from the 4.6 generation on -- "`temperature` is
+# deprecated for this model" -- which silently took out every hint for anyone
+# who pointed NAMO_MODEL at a current model. Omitting it is valid everywhere.
+rm -f /tmp/namo_req.json
+payload | env NAMO_LINE='git com' NAMO_CWD="$PWD" NAMO_CACHE=0 \
+  NAMO_MODEL=claude-opus-5 "$BIN" >/dev/null 2>&1
+python3 - <<'PY' && ok "temperature omitted for a model that rejects it" || bad "temperature sent to a model that rejects it"
+import json
+d=json.load(open('/tmp/namo_req.json'))
+assert d['model']=='claude-opus-5', d['model']
+assert 'temperature' not in d, 'temperature must not be sent to Opus 5'
+PY
+
+# An unknown name is far more likely to be newer than this list than older.
+rm -f /tmp/namo_req.json
+payload | env NAMO_LINE='git com' NAMO_CWD="$PWD" NAMO_CACHE=0 \
+  NAMO_MODEL=claude-model-from-the-future "$BIN" >/dev/null 2>&1
+python3 - <<'PY' && ok "temperature omitted for an unrecognised model" || bad "temperature sent to an unrecognised model"
+import json
+d=json.load(open('/tmp/namo_req.json'))
+assert 'temperature' not in d, 'an unknown model must be treated as new, not old'
+PY
+
 # cache: second identical call must not reach the mock
 rm -f /tmp/namo_req.json
 payload | env NAMO_LINE='cached probe xyz' NAMO_CWD="$PWD" "$BIN" >/dev/null 2>&1
@@ -235,7 +258,12 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_response(200); self.send_header('content-type','application/json')
         self.send_header('content-length', str(len(o))); self.end_headers(); self.wfile.write(o)
     def log_message(self, *a): pass
-http.server.HTTPServer(('127.0.0.1', $PORT2), H).serve_forever()
+class S(http.server.HTTPServer):
+    # A mock from an interrupted run can still hold the port in TIME_WAIT,
+    # and every assertion below would then fail for a reason that has
+    # nothing to do with what is being tested.
+    allow_reuse_address = True
+S(('127.0.0.1', $PORT2), H).serve_forever()
 PY
 python3 /tmp/namo_mock2.py & MOCK2_PID=$!
 sleep 1.2
@@ -1037,6 +1065,25 @@ if [ -n "$tpts" ] && [ -n "$tpid" ]; then
   [ -z "$res" ] && ok "nothing is tracked once the line has been accepted" \
                 || bad "output after Enter tracked as typing: [$res]"
 
+  # And Enter says so at once: one empty record the moment the line is over,
+  # not at the next prompt. An answer still in flight for the finished line is
+  # dropped because of it, instead of being painted under an empty prompt
+  # seconds later -- the slower the model, the wider that window.
+  printf '%s' "T\$ ${GS}git pu" > "$tpts"; sleep 0.35
+  while IFS= read -r -t 0.2 -u "$TFD" rec; do :; done
+  printf '\r\n' > "$tpts"; sleep 0.35
+  n=0; last="x"
+  while IFS= read -r -t 0.2 -u "$TFD" rec; do n=$((n+1)); last=$rec; done
+  [ "$n" = 1 ] && [ "$last" = "$(printf '\t')" ] \
+    && ok "Enter posts one line-over record immediately" \
+    || bad "Enter posted $n records (last: [$last])"
+  # The newlines of the command's own output must not repeat it.
+  printf 'output line one\noutput line two\n' > "$tpts"; sleep 0.35
+  m=0
+  while IFS= read -r -t 0.2 -u "$TFD" rec; do m=$((m+1)); done
+  [ "$m" = 0 ] && ok "a command's own output does not repeat it" \
+               || bad "output newlines posted $m extra records"
+
   # Reverse search repaints with a prompt of its own, which carries no marker:
   # the CR that starts it is where the tracker gives up.
   res=$(typed "T\$ ${GS}git st$(printf '\r\033[K')(reverse-i-search)\`': ls")
@@ -1219,6 +1266,141 @@ if [ "${1:-}" = "--live" ]; then
     fi
   fi
 fi
+
+# --------------------------------------------------------------------------
+head_ "8. thinking blocks, and failures the user can see"
+# --------------------------------------------------------------------------
+# Two things that only show up once NAMO_MODEL names a current model:
+# the completions are no longer in content[0], and a request the API refuses
+# used to be indistinguishable from having nothing to suggest.
+PORT2=$(( PORT + 1 ))
+kill_mock2() { [ -n "${MOCK2_PID:-}" ] && kill "$MOCK2_PID" 2>/dev/null; MOCK2_PID=""; }
+trap 'kill_mock2' EXIT
+
+# ---- content[0] is a thinking block, as it is on Opus 5 ----
+cat > /tmp/namo_mock2.py <<PY
+import http.server, json
+MODE = open('/tmp/namo_mock2_mode').read().strip()
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get('content-length', 0)))
+        if MODE == 'error':
+            r = {"type":"error","error":{"type":"invalid_request_error",
+                 "message":"\`temperature\` is deprecated for this model."}}
+        else:
+            # Thinking first, exactly as the real API orders it.
+            r = {"id":"m","type":"message","role":"assistant","model":"claude-opus-5",
+                 "content":[{"type":"thinking","thinking":"","signature":"sig"},
+                            {"type":"text","text":"git commit\ngit commit --amend"}],
+                 "stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}
+        o = json.dumps(r).encode()
+        self.send_response(200); self.send_header('content-type','application/json')
+        self.send_header('content-length', str(len(o))); self.end_headers(); self.wfile.write(o)
+    def log_message(self, *a): pass
+http.server.HTTPServer(('127.0.0.1', $PORT2), H).serve_forever()
+PY
+
+echo thinking > /tmp/namo_mock2_mode
+python3 /tmp/namo_mock2.py & MOCK2_PID=$!
+sleep 1.2
+kill -0 "$MOCK2_PID" 2>/dev/null \
+  || bad "second mock did not start (port $PORT2 busy?); section 8 results are meaningless"
+out=$(payload | env NAMO_LINE='git com' NAMO_CWD="$PWD" NAMO_CACHE=0 \
+      NAMO_MODEL=claude-opus-5 NAMO_ENDPOINT="http://127.0.0.1:$PORT2/v1/messages" \
+      "$BIN" 2>/dev/null)
+printf '%s' "$out" | grep -q '^git commit$' \
+  && ok "completions found past a leading thinking block" \
+  || bad "a thinking block at content[0] hid the completions (got: ${out:-<empty>})"
+kill_mock2
+
+# ---- a refused request reaches the row instead of vanishing ----
+echo error > /tmp/namo_mock2_mode
+python3 /tmp/namo_mock2.py & MOCK2_PID=$!
+sleep 1.2
+
+err=$(payload | env NAMO_LINE='git com' NAMO_CWD="$PWD" NAMO_CACHE=0 \
+      NAMO_ENDPOINT="http://127.0.0.1:$PORT2/v1/messages" "$BIN" 2>&1 >/dev/null)
+printf '%s' "$err" | grep -q 'deprecated for this model' \
+  && ok "the one-shot path prints the API's own message" \
+  || bad "one-shot path swallowed the API error (got: ${err:-<empty>})"
+
+# The daemon has no stderr: it is started with 2>/dev/null by the shell
+# integration, so the hint row is the only channel it has.
+ET=$(mktemp -d)
+mkfifo -m 600 "$ET/fifo"
+printf 'git status\n' > "$ET/hist"
+exec {EFD}<>"$ET/fifo"
+NAMO_DAEMON=1 NAMO_FIFO="$ET/fifo" NAMO_HISTFILE="$ET/hist" NAMO_PIDFILE="$ET/pid" \
+  NAMO_TTY="$ET/tty" NAMO_DEBOUNCE=0.2 NAMO_QUIET=0.05 NAMO_CACHE=0 NAMO_MIN_GAP=0 \
+  NAMO_ENDPOINT="http://127.0.0.1:$PORT2/v1/messages" "$BIN" </dev/null >/dev/null 2>&1
+sleep 0.3
+printf '%s\t%s\n' "$PWD" "git co" >&$EFD
+sleep 1.5
+grep -q 'namo: .*deprecated for this model' "$ET/tty" \
+  && ok "the daemon draws the failure in the hint row" \
+  || bad "the daemon failed silently, which is the bug this test exists for"
+grep -q 'hint: ' "$ET/tty" \
+  && bad "a hint was drawn for a call that failed" \
+  || ok "no hint row is drawn alongside the error"
+
+# And it must go away again once the API answers.
+kill_mock2
+echo thinking > /tmp/namo_mock2_mode
+python3 /tmp/namo_mock2.py & MOCK2_PID=$!
+sleep 1.2
+printf '%s\t%s\n' "$PWD" "git com" >&$EFD
+sleep 1.5
+tail -c 400 "$ET/tty" | grep -q 'namo: ' \
+  && bad "the error row survived a call that succeeded" \
+  || ok "the error row clears once a call works again"
+
+[ -s "$ET/pid" ] && kill "$(cat "$ET/pid")" 2>/dev/null
+exec {EFD}>&-
+rm -rf "$ET"
+kill_mock2
+
+# ---- an answer that outlives its line is dropped, not painted ----
+# The user typed, paused, and pressed Enter while the call was still in
+# flight. The relay posts a line-over record at Enter (see 5d); the daemon
+# sees it waiting when the late answer lands, and leaves the row alone
+# instead of painting a hint under a prompt whose line is empty.
+PORT4=$(( PORT + 3 ))
+cat > /tmp/namo_mock_slow.py <<PY
+import http.server, json, time
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get('content-length', 0)))
+        time.sleep(1.5)
+        r = {"id":"m","type":"message","role":"assistant","model":"claude-haiku-4-5",
+             "content":[{"type":"text","text":"git commit"}],
+             "stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}
+        o = json.dumps(r).encode()
+        self.send_response(200); self.send_header('content-type','application/json')
+        self.send_header('content-length', str(len(o))); self.end_headers(); self.wfile.write(o)
+    def log_message(self, *a): pass
+http.server.HTTPServer(('127.0.0.1', $PORT4), H).serve_forever()
+PY
+python3 /tmp/namo_mock_slow.py & SLOW_PID=$!
+sleep 1
+RT=$(mktemp -d)
+mkfifo -m 600 "$RT/fifo"
+: > "$RT/hist"
+exec {RFD}<>"$RT/fifo"
+NAMO_DAEMON=1 NAMO_FIFO="$RT/fifo" NAMO_HISTFILE="$RT/hist" NAMO_PIDFILE="$RT/pid" \
+  NAMO_TTY="$RT/tty" NAMO_DEBOUNCE=0.2 NAMO_QUIET=0.05 NAMO_CACHE=0 NAMO_MIN_GAP=0 \
+  NAMO_ENDPOINT="http://127.0.0.1:$PORT4/v1/messages" "$BIN" </dev/null >/dev/null 2>&1
+sleep 0.3
+printf '%s\tgit com\n' "$PWD" >&$RFD
+sleep 0.7                      # the call is now in flight; Enter goes by:
+printf '\t\n' >&$RFD
+sleep 2.0
+grep -q 'hint: ' "$RT/tty" \
+  && bad "an answer for a finished line was painted under the empty prompt" \
+  || ok "an answer that outlives its line is dropped"
+[ -s "$RT/pid" ] && kill "$(cat "$RT/pid")" 2>/dev/null
+exec {RFD}>&-
+rm -rf "$RT" /tmp/namo_mock_slow.py
+kill "$SLOW_PID" 2>/dev/null
 
 # --------------------------------------------------------------------------
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$pass" "$fail"

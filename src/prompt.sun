@@ -77,6 +77,28 @@ public module namo {
     return ctx;
   }
 
+  // Which models still accept `temperature`. Every model from the 4.6
+  // generation on rejects it outright -- "`temperature` is deprecated for this
+  // model", a 400 that costs the whole request -- so NAMO_MODEL=claude-opus-5
+  // used to mean no hints at all, silently.
+  //
+  // The test is written the safe way round: sending nothing is valid on every
+  // model, sending it is what breaks, so temperature goes in only for the
+  // older names known to want it and an unrecognised NAMO_MODEL gets nothing.
+  // A model released after this list was written therefore works by default.
+  function takes_temperature(model: const ref String) bool {
+    if (model.contains("haiku-4-5") or model.contains("haiku-3")) {
+      return true;
+    }
+    if (model.contains("sonnet-4-5") or model.contains("sonnet-3")) {
+      return true;
+    }
+    if (model.contains("opus-4-5") or model.contains("opus-4-1")) {
+      return true;
+    }
+    return model.contains("opus-3");
+  }
+
   // Serialize the request body. Note: no `output_config.effort` (errors on
   // Haiku 4.5) and no `cache_control` (Haiku's minimum cacheable prefix is
   // 4096 tokens, far above our ~150-token system prompt, so it would silently
@@ -84,7 +106,11 @@ public module namo {
   public function build_body(alloc: ref HeapAllocator, cfg: const ref Config, context: const ref String) String {
     var req = json_object(alloc);
     req.set(String(alloc, "model"), json_string(alloc, cfg.model));
-    req.set(String(alloc, "temperature"), Json(0));
+    // Determinism for the models that allow it: the same line in the same
+    // directory should not produce a different hint each time it is typed.
+    if (takes_temperature(cfg.model)) {
+      req.set(String(alloc, "temperature"), Json(0));
+    }
     // Ask mode carries a description per line, so it needs the extra room.
     if (cfg.is_dym()) {
       // Two bare command lines: no descriptions to pay for.

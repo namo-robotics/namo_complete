@@ -85,6 +85,7 @@ history at all.
 | `NAMO_DEBOUNCE` / `NAMO_QUIET`               | `0.2` / `0.05`         | Seconds of not typing before a request; how long a burst of typing is left to settle |
 | `NAMO_HINT_MIN`                              | `3`                    | Minimum characters before hinting                                                    |
 | `NAMO_HINT_PREFIX`                           | `hint: `               | Text in front of the hint row                                                        |
+| `NAMO_ERR_PREFIX`                            | `error: `               | Text in front of the row a failed call draws in place of a hint                      |
 | `NAMO_TIMEOUT`                               | `10`                   | Seconds before giving up                                                             |
 | `NAMO_DYM` / `NAMO_DYM_PREFIX`               | `1` / `did you mean: ` | "did you mean" after *command not found*, and the text in front of it                |
 | `NAMO_OUTPUT`                                | `10`                   | Lines of the last command's output to send; `0` keeps none (hints still work)        |
@@ -98,6 +99,22 @@ history at all.
 Answers are cached in `~/.cache/namo_complete`, looked up by what you had typed,
 which directory you were in, and which model answered. Deleting that directory
 is safe at any time.
+
+`NAMO_MODEL` takes any Claude model id. The daemon reads it once, at the first
+prompt of a shell, and keeps it for as long as that shell lives -- so changing
+it in a shell that is already running means killing the daemon, and the next
+prompt starts a new one:
+
+```sh
+export NAMO_MODEL=claude-opus-5
+kill "$(cat "${XDG_RUNTIME_DIR:-/tmp/namo-$UID}/namo_complete/daemon_pid.$$")"
+```
+
+Put the `export` in `~/.bashrc` to make it stick. A bigger model is slower, and
+the hint row is drawn while you type: `claude-haiku-4-5` is the default because
+it answers in well under a second. If a call fails -- a model that does not
+exist, a key that has expired, no network -- the row says so instead of staying
+empty.
 
 ## Architecture
 
