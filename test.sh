@@ -1379,7 +1379,7 @@ NAMO_DAEMON=1 NAMO_FIFO="$ET/fifo" NAMO_HISTFILE="$ET/hist" NAMO_PIDFILE="$ET/pi
 sleep 0.3
 printf '%s\t%s\n' "$PWD" "git co" >&$EFD
 sleep 1.5
-grep -q 'namo: .*deprecated for this model' "$ET/tty" \
+grep -q 'error: .*deprecated for this model' "$ET/tty" \
   && ok "the daemon draws the failure in the hint row" \
   || bad "the daemon failed silently, which is the bug this test exists for"
 grep -q 'hint: ' "$ET/tty" \
@@ -1393,9 +1393,14 @@ python3 /tmp/namo_mock8.py & MOCK8_PID=$!
 sleep 1.2
 printf '%s\t%s\n' "$PWD" "git com" >&$EFD
 sleep 1.5
-tail -c 400 "$ET/tty" | grep -q 'namo: ' \
-  && bad "the error row survived a call that succeeded" \
-  || ok "the error row clears once a call works again"
+# The tty log keeps every paint, so presence proves nothing -- the error row
+# from the failed call above is still in the bytes. The check is on order: the
+# last error paint must have been superseded by a later hint paint.
+last_err=$(grep -bo 'error: ' "$ET/tty" | tail -1 | cut -d: -f1)
+last_hint=$(grep -bo 'hint: ' "$ET/tty" | tail -1 | cut -d: -f1)
+[ -n "$last_hint" ] && [ "${last_hint:-0}" -gt "${last_err:-0}" ] \
+  && ok "the error row clears once a call works again" \
+  || bad "the error row survived a call that succeeded"
 
 [ -s "$ET/pid" ] && kill "$(cat "$ET/pid")" 2>/dev/null
 exec {EFD}>&-
