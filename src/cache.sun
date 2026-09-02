@@ -2,12 +2,12 @@
 //
 // Terminal autocomplete gets re-triggered on near-identical input constantly,
 // and every miss is a paid round trip. The cache is keyed on the normalized
-// prefix plus cwd plus model, so a different directory gets different answers.
+// prefix plus cwd plus shell plus model, so a different directory gets different answers.
 
 public module namo {
-  using sun;
-  using sun.io;
-  using sun.time;
+  using std;
+  using std.io;
+  using std.time;
 
   // Two independent rolling hashes, concatenated -- ~60 bits of key. This is
   // a cache key, not a security primitive.
@@ -25,6 +25,8 @@ public module namo {
     var material = normalize_ws(alloc, subject);
     material.append(" ");
     material.append(cfg.cwd);
+    material.append(" ");
+    material.append(cfg.shell_name);
     material.append(" ");
     material.append(cfg.model);
 
@@ -72,7 +74,7 @@ public module namo {
       Option.Some(v) => v,
       Option.None => 0
     };
-    if (ts <= 0 or unix_time() - ts > cfg.cache_ttl) {
+    if (ts <= 0 or read_unix_time() - ts > cfg.cache_ttl) {
       return out;
     }
 
@@ -82,6 +84,7 @@ public module namo {
     return out;
   }
 
+  // Store non-empty suggestions under a cache key.
   public function cache_store(alloc: ref HeapAllocator, cfg: const ref Config, key: const ref String, items: const ref Vec<String>) void {
     if (cfg.use_cache == false) {
       return;
@@ -92,7 +95,7 @@ public module namo {
     ensure_dir_p(alloc, cfg.cache_dir);
 
     var body = String(alloc, "");
-    body.append(unix_time());
+    body.append(read_unix_time());
     body.append("\n");
     for (var i: i64 = 0; i < items.size(); i = i + 1) {
       body.append(items.get_unchecked(i));
@@ -115,7 +118,7 @@ public module namo {
     path.append(cfg.cache_dir);
     path.append("/.last_call");
 
-    var current: i64 = unix_time();
+    var current: i64 = read_unix_time();
     var last: i64 = 0;
     try {
       var raw = read_to_string(alloc, path);

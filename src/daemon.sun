@@ -7,7 +7,7 @@
 // the shell's own stdout and posts it here (cmd_output_relay.sun), with the cwd field
 // empty for the last one the shell reported at a prompt to fill.
 //
-// Bash is the reason for that split. It blanks the prompt line before running
+// Bash requires that split. It blanks the prompt line before running
 // a `bind -x` command and repaints it in full afterwards, so a handler on every
 // printable key is a repaint on every character -- flicker on a terminal that
 // draws as the bytes arrive -- and however long that handler takes is a hole
@@ -18,9 +18,9 @@
 // write end goes away.
 
 public module namo {
-  using sun;
-  using sun.io;
-  using sun.process;
+  using std;
+  using std.io;
+  using std.process;
 
   var REC_OK: i32 = 0;
   var REC_TIMEOUT: i32 = 1;
@@ -55,6 +55,7 @@ public module namo {
   // Nothing the shell had open is of any use to us; see daemon_run.
   var MAX_INHERITED_FD: i32 = 256;
 
+  // Holds the long-lived state used by the interactive hint daemon.
   public class Daemon {
     // The terminal we draw the hint row on, and the pipe the shell types
     // into. Both are owned here: closing them is what ends the daemon.
@@ -94,7 +95,7 @@ public module namo {
     // in place of the hint -- the daemon has no stderr anyone can read.
     public var err: String;
 
-    public function init(alloc: ref HeapAllocator) {
+    init(alloc: ref HeapAllocator) {
       this.tty = File();
       this.fifo = File();
       this.poller = Poller(alloc);
@@ -420,7 +421,7 @@ public module namo {
       if (pr < 0) {
         return REC_EOF;
       }
-      var n: i64 = st.fifo.read_into(st.chunk.rawData(), FIFO_BUF);
+      var n: i64 = st.fifo.read_into(st.chunk.raw_data(), FIFO_BUF);
       if (n <= 0) {
         return REC_EOF;
       }
@@ -542,7 +543,7 @@ public module namo {
     render(alloc, cfg, st, line);
   }
 
-  // bash could not find the command, and the shell has already printed its
+  // The shell could not find the command, and the shell has already printed its
   // own message and handed the prompt back -- the whole point of doing this
   // here is that nobody is waiting for it. Paid immediately rather than
   // debounced: the line is finished, there is no next keystroke to wait for.
@@ -588,7 +589,7 @@ public module namo {
     cfg.set_query_target(alloc, "dym", typed, cwd);
 
     // The gap between API calls exists to bound what a burst of typing can
-    // spend. One correction per command bash could not find is not a burst.
+    // spend. One correction per command the shell could not find is not a burst.
     var saved_gap: i64 = cfg.min_gap;
     cfg.min_gap = 0;
 
@@ -879,6 +880,7 @@ public module namo {
     }
   }
 
+  // Start the detached process that serves interactive hint requests.
   public function daemon_run(alloc: ref HeapAllocator, cfg: ref Config) i32 {
     if (cfg.fifo.length() == 0) {
       return 0;

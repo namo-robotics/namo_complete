@@ -1,10 +1,10 @@
 // util.sun - string helpers with no stdlib equivalent: a line splitter that
 // also drops blank lines, a cache-key hash, and the heuristics that judge what
 // the model sent back. Everything else (trim, to_lower, contains, split,
-// split_whitespace, join, clone, append_hex) lives on sun.String.
+// split_whitespace, join, clone, append_hex) lives on std.String.
 
 public module namo {
-  using sun;
+  using std;
 
   public var CH_NL: u8 = 10;
   public var CH_SP: u8 = 32;
@@ -114,7 +114,7 @@ public module namo {
     return false;
   }
 
-  // True when the line reads like something bash could run. The model is told
+  // True when the line reads like something a shell could run. The model is told
   // to stay silent when it has nothing useful, but it sometimes answers with a
   // sentence instead ("I cannot produce a useful completion ..."). A sentence
   // in the hint row is worse than an empty row, so it is dropped here -- once,
@@ -219,7 +219,7 @@ public module namo {
   //     "  512  grpe -r TODO *.md"  ->  "grpe -r TODO *.md"
   //
   // The shell hands over the whole line rather than picking it apart itself,
-  // along with the word bash could not find and the words it would use if the
+  // along with the word the shell could not find and the words it would use if the
   // line was never recorded at all -- HISTCONTROL=ignorespace, HISTIGNORE and
   // `set +o history` all leave entry 1 belonging to some earlier command, and
   // the first word is what gives that away.

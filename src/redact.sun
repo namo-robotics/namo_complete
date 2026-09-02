@@ -10,7 +10,7 @@
 // applied in one place for both callers.
 
 public module namo {
-  using sun;
+  using std;
 
   // History lines carrying a known credential prefix are dropped entirely
   // rather than partially masked; the rest is trimmed to the most recent

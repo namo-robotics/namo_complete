@@ -1,23 +1,26 @@
 // config.sun - runtime configuration, entirely from the environment.
 //
-// Input arrives via environment variables rather than argv: bash `export`
+// Input arrives via environment variables rather than argv: shell `export`
 // handles arbitrary bytes with no quoting concerns, and the values we need
 // (READLINE_LINE, PWD) are already shell variables.
 
 public module namo {
-  using sun;
-  using sun.env;
-  using sun.process;
+  using std;
+  using std.env;
+  using std.process;
 
+  // Holds all runtime settings captured from the process environment.
   public class Config {
+    public var environment: Env;
     public var line: String;
     public var query: String;
     public var mode: String;
+    // Shell syntax used for model context and cache separation.
+    public var shell_name: String;
     public var cwd: String;
     public var model: String;
     public var api_key: String;
     public var endpoint: String;
-    public var runtime_dir: String;
     public var cache_dir: String;
     public var history_lines: i64;
     public var max_suggestions: i64;
@@ -53,74 +56,66 @@ public module namo {
     public var debounce_ms: i64;
     public var quiet_ms: i64;
 
-    public function init(alloc: ref HeapAllocator) {
-      this.line = env_str(alloc, "NAMO_LINE");
-      this.query = env_str(alloc, "NAMO_QUERY");
-      this.mode = env_or(alloc, "NAMO_MODE", "complete");
-      this.cwd = env_or(alloc, "NAMO_CWD", ".");
-      this.model = env_or(alloc, "NAMO_MODEL", "claude-haiku-4-5");
-      this.api_key = env_str(alloc, "ANTHROPIC_API_KEY");
+    init(alloc: ref HeapAllocator) {
+      this.environment = Env(alloc);
+      this.line = env_str(alloc, this.environment, "NAMO_LINE");
+      this.query = env_str(alloc, this.environment, "NAMO_QUERY");
+      this.mode = env_or(alloc, this.environment, "NAMO_MODE", "complete");
+      this.shell_name = env_or(alloc, this.environment, "NAMO_SHELL", "shell");
+      this.cwd = env_or(alloc, this.environment, "NAMO_CWD", ".");
+      this.model = env_or(alloc, this.environment, "NAMO_MODEL", "claude-haiku-4-5");
+      this.api_key = env_str(alloc, this.environment, "ANTHROPIC_API_KEY");
       this.endpoint = env_or(
         alloc,
+        this.environment,
         "NAMO_ENDPOINT",
         "https://api.anthropic.com/v1/messages"
       );
 
-      this.history_lines = env_int(alloc, "NAMO_HISTORY_LINES", 50);
-      this.ls_limit = env_int(alloc, "NAMO_LS_LIMIT", 40);
-      this.hint_min = env_int(alloc, "NAMO_HINT_MIN", 3);
-      this.max_suggestions = env_int(alloc, "NAMO_MAX_SUGGESTIONS", 3);
-      this.cache_ttl = env_int(alloc, "NAMO_CACHE_TTL", 900);
-      this.min_gap = env_int(alloc, "NAMO_MIN_GAP", 1);
-      this.use_cache = env_int(alloc, "NAMO_CACHE", 1) != 0;
-      this.send_ls = env_int(alloc, "NAMO_NO_LS", 0) == 0;
-      this.disabled = env_int(alloc, "NAMO_DISABLE", 0) != 0;
-      this.cache_only = env_int(alloc, "NAMO_CACHE_ONLY", 0) != 0;
+      this.history_lines = env_int(alloc, this.environment, "NAMO_HISTORY_LINES", 50);
+      this.ls_limit = env_int(alloc, this.environment, "NAMO_LS_LIMIT", 40);
+      this.hint_min = env_int(alloc, this.environment, "NAMO_HINT_MIN", 3);
+      this.max_suggestions = env_int(alloc, this.environment, "NAMO_MAX_SUGGESTIONS", 3);
+      this.cache_ttl = env_int(alloc, this.environment, "NAMO_CACHE_TTL", 900);
+      this.min_gap = env_int(alloc, this.environment, "NAMO_MIN_GAP", 1);
+      this.use_cache = env_int(alloc, this.environment, "NAMO_CACHE", 1) != 0;
+      this.send_ls = env_int(alloc, this.environment, "NAMO_NO_LS", 0) == 0;
+      this.disabled = env_int(alloc, this.environment, "NAMO_DISABLE", 0) != 0;
+      this.cache_only = env_int(alloc, this.environment, "NAMO_CACHE_ONLY", 0) != 0;
 
-      this.daemon = env_int(alloc, "NAMO_DAEMON", 0) != 0;
-      this.fifo = env_str(alloc, "NAMO_FIFO");
+      this.daemon = env_int(alloc, this.environment, "NAMO_DAEMON", 0) != 0;
+      this.fifo = env_str(alloc, this.environment, "NAMO_FIFO");
       // Where answers to the shell's own requests go back. See daemon.sun.
-      this.reply = env_str(alloc, "NAMO_REPLY");
-      // Where command_not_found_handle leaves a line for us; see daemon.sun.
-      this.dymfile = env_str(alloc, "NAMO_DYMFILE");
+      this.reply = env_str(alloc, this.environment, "NAMO_REPLY");
+      // Where the shell command-not-found hook leaves a line for us; see daemon.sun.
+      this.dymfile = env_str(alloc, this.environment, "NAMO_DYMFILE");
 
-      this.relay = env_int(alloc, "NAMO_RELAY", 0) != 0;
-      this.output_lines = env_int(alloc, "NAMO_OUTPUT", 10);
-      this.ptsfile = env_str(alloc, "NAMO_PTSFILE");
-      this.outfile = env_str(alloc, "NAMO_OUTFILE");
-      this.relay_pidfile = env_str(alloc, "NAMO_RELAY_PIDFILE");
-      this.shell_pid = _convert<i32>(env_int(alloc, "NAMO_SHELL_PID", 0));
-      this.histfile = env_str(alloc, "NAMO_HISTFILE");
-      this.pidfile = env_str(alloc, "NAMO_PIDFILE");
+      this.relay = env_int(alloc, this.environment, "NAMO_RELAY", 0) != 0;
+      this.output_lines = env_int(alloc, this.environment, "NAMO_OUTPUT", 10);
+      this.ptsfile = env_str(alloc, this.environment, "NAMO_PTSFILE");
+      this.outfile = env_str(alloc, this.environment, "NAMO_OUTFILE");
+      this.relay_pidfile = env_str(alloc, this.environment, "NAMO_RELAY_PIDFILE");
+      this.shell_pid = _convert<i32>(env_int(alloc, this.environment, "NAMO_SHELL_PID", 0));
+      this.histfile = env_str(alloc, this.environment, "NAMO_HISTFILE");
+      this.pidfile = env_str(alloc, this.environment, "NAMO_PIDFILE");
       // Overridable so the test suite can watch what would have been drawn.
-      this.tty_path = env_or(alloc, "NAMO_TTY", "/dev/tty");
-      this.hint_prefix = env_or(alloc, "NAMO_HINT_PREFIX", "hint: ");
-      this.hint_suffix = env_or(alloc, "NAMO_HINT_SUFFIX", "  (Alt-O / Alt-A for more)");
+      this.tty_path = env_or(alloc, this.environment, "NAMO_TTY", "/dev/tty");
+      this.hint_prefix = env_or(alloc, this.environment, "NAMO_HINT_PREFIX", "hint: ");
+      this.hint_suffix = env_or(alloc, this.environment, "NAMO_HINT_SUFFIX", "  (Alt-O / Alt-A for more)");
       // The correction row carries no suffix: Alt-O runs a completion, and
       // offering it next to a line that is not one would be a lie.
-      this.dym_prefix = env_or(alloc, "NAMO_DYM_PREFIX", "did you mean: ");
+      this.dym_prefix = env_or(alloc, this.environment, "NAMO_DYM_PREFIX", "did you mean: ");
       // The row a failed call draws instead of a hint. Without it a broken
       // NAMO_MODEL, an expired key or an unreachable API all look exactly
       // like a shell that simply has nothing to suggest.
-      this.err_prefix = env_or(alloc, "NAMO_ERR_PREFIX", "error: ");
+      this.err_prefix = env_or(alloc, this.environment, "NAMO_ERR_PREFIX", "error: ");
       // Documented in seconds, used in milliseconds by poll(2).
-      this.debounce_ms = env_ms(alloc, "NAMO_DEBOUNCE", 200);
-      this.quiet_ms = env_ms(alloc, "NAMO_QUIET", 50);
+      this.debounce_ms = env_ms(alloc, this.environment, "NAMO_DEBOUNCE", 200);
+      this.quiet_ms = env_ms(alloc, this.environment, "NAMO_QUIET", 50);
 
-      // Runtime dir holds the API key for the duration of one call, so it
-      // must be user-private. XDG_RUNTIME_DIR is tmpfs mode 0700.
-      var rt = env_str(alloc, "XDG_RUNTIME_DIR");
-      if (rt.length() == 0) {
-        rt = String(alloc, "/tmp/namo-");
-        rt.append(uid());
-      } else {
-        rt.append("/namo_complete");
-      }
-      this.runtime_dir = rt;
-
-      var cd = env_str(alloc, "XDG_CACHE_HOME");
+      var cd = env_str(alloc, this.environment, "XDG_CACHE_HOME");
       if (cd.length() == 0) {
-        cd = env_or(alloc, "HOME", "/tmp");
+        cd = env_or(alloc, this.environment, "HOME", "/tmp");
         cd.append("/.cache/namo_complete");
       } else {
         cd.append("/namo_complete");
@@ -131,7 +126,7 @@ public module namo {
     // Point the config at one line from the daemon's FIFO, so cache_key and
     // build_context -- both written against a one-shot run -- can be reused
     // unchanged for every keystroke.
-    public function set_target(alloc: ref HeapAllocator, line: const ref String, cwd: const ref String) void {
+    public method set_target(alloc: ref HeapAllocator, line: const ref String, cwd: const ref String) void {
       this.line = line.clone(alloc);
       this.cwd = cwd.clone(alloc);
     }
@@ -140,53 +135,49 @@ public module namo {
     // so anything that is not a keystroke borrows the config and hands it
     // back: set_query_target before the call, clear_query_target after it, and
     // the keystrokes that follow are served exactly as before.
-    public function set_query_target(alloc: ref HeapAllocator, mode: static_ptr<u8>, query: const ref String, cwd: const ref String) void {
+    public method set_query_target(alloc: ref HeapAllocator, mode: static_ptr<u8>, query: const ref String, cwd: const ref String) void {
       this.mode = String(alloc, mode);
       this.query = query.clone(alloc);
       this.cwd = cwd.clone(alloc);
     }
 
-    public function clear_query_target(alloc: ref HeapAllocator) void {
+    // Restore the config after serving a synchronous query.
+    public method clear_query_target(alloc: ref HeapAllocator) void {
       this.mode = String(alloc, "complete");
       this.query = String(alloc, "");
     }
 
-    public const function is_ask() bool {
+    // Report whether the current request asks for a command from prose.
+    public const method is_ask() bool {
       return this.mode.equals_literal("ask");
     }
 
-    // "Did you mean": bash could not find the command, and the line the user
+    // "Did you mean": the shell could not find the command, and the line the user
     // typed arrives in NAMO_QUERY to be corrected rather than completed.
-    public const function is_dym() bool {
+    public const method is_dym() bool {
       return this.mode.equals_literal("dym");
     }
 
     // Both of the modes whose subject is NAMO_QUERY rather than NAMO_LINE.
-    public const function from_query() bool {
+    public const method from_query() bool {
       return this.is_ask() or this.is_dym();
     }
-
-    // Path inside the runtime dir.
-    public const function rt_path(alloc: ref HeapAllocator, name: static_ptr<u8>) String {
-      var p = String(alloc, "");
-      p.append(this.runtime_dir);
-      p.append("/");
-      p.append(name);
-      return p;
-    }
   }
 
-  // sun.env.get returns an Option; almost everything here wants "" for unset,
+  // Env.get returns an Option; almost everything here wants "" for unset,
   // and the two callers that do not use env_or.
-  public function env_str(alloc: ref HeapAllocator, name: static_ptr<u8>) String {
-    return match sun.env.get(alloc, name) {
-      Option.Some(v) => v,
-      Option.None => String(alloc, "")
+  public function env_str(alloc: ref HeapAllocator, environment: ref Env, name: static_ptr<u8>) String {
+    var out = String(alloc, "");
+    match environment.get(name) {
+      Option.Some(v) => out.append(v),
+      Option.None => {}
     };
+    return out;
   }
 
-  public function env_or(alloc: ref HeapAllocator, name: static_ptr<u8>, fallback: static_ptr<u8>) String {
-    var v = env_str(alloc, name);
+  // Read an environment variable, using a fallback when it is unset.
+  public function env_or(alloc: ref HeapAllocator, environment: ref Env, name: static_ptr<u8>, fallback: static_ptr<u8>) String {
+    var v = env_str(alloc, environment, name);
     if (v.length() == 0) {
       return String(alloc, fallback);
     }
@@ -195,8 +186,8 @@ public module namo {
 
   // Seconds as a decimal ("0.2", ".05", "1") to whole milliseconds. Anything
   // that is not a plain decimal number falls back rather than half-parsing.
-  public function env_ms(alloc: ref HeapAllocator, name: static_ptr<u8>, fallback: i64) i64 {
-    var raw = env_str(alloc, name);
+  public function env_ms(alloc: ref HeapAllocator, environment: ref Env, name: static_ptr<u8>, fallback: i64) i64 {
+    var raw = env_str(alloc, environment, name);
     raw.trim();
     if (raw.length() == 0) {
       return fallback;
@@ -236,8 +227,9 @@ public module namo {
     return whole * 1000 + frac;
   }
 
-  public function env_int(alloc: ref HeapAllocator, name: static_ptr<u8>, fallback: i64) i64 {
-    var raw = env_str(alloc, name);
+  // Read a decimal environment variable, using a fallback when invalid.
+  public function env_int(alloc: ref HeapAllocator, environment: ref Env, name: static_ptr<u8>, fallback: i64) i64 {
+    var raw = env_str(alloc, environment, name);
     if (raw.length() == 0) {
       return fallback;
     }

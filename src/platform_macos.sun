@@ -1,0 +1,46 @@
+// platform_macos.sun - macOS terminal and descriptor operations for the relay.
+
+public module namo {
+  using std;
+
+  extern "C" function posix_openpt(flags: i32) i32;
+  extern "C" function grantpt(fd: i32) i32;
+  extern "C" function unlockpt(fd: i32) i32;
+  extern "C" function ptsname(fd: i32) raw_ptr<u8>;
+  extern "C" function ioctl(fd: i32, req: u64, arg: raw_ptr<u8>) i32;
+  extern "C" function open(path: raw_ptr<u8>, flags: i32, mode: i32) i32;
+
+  var PLATFORM_PTY_FLAGS: i32 = 131074;  // O_RDWR | O_NOCTTY
+  var PLATFORM_FIFO_FLAGS: i32 = 6;  // O_RDWR | O_NONBLOCK
+  var PLATFORM_TIOCGWINSZ: u64 = 1074295912;  // _IOR('t', 104, winsize)
+  var PLATFORM_TIOCSWINSZ: u64 = 2148037735;  // _IOW('t', 103, winsize)
+
+  // Allocate a new pseudo-terminal master.
+  function platform_pty_open() i32 {
+    return unsafe { posix_openpt(PLATFORM_PTY_FLAGS); };
+  }
+
+  // Grant and unlock a pseudo-terminal master.
+  function platform_pty_prepare(master: i32) bool {
+    var granted: i32 = unsafe { grantpt(master); };
+    var unlocked: i32 = unsafe { unlockpt(master); };
+    return granted == 0 and unlocked == 0;
+  }
+
+  // Return the slave path for a pseudo-terminal master.
+  function platform_pty_name(alloc: const ref HeapAllocator, master: i32) String {
+    return from_c_str(alloc, unsafe { ptsname(master); });
+  }
+
+  // Copy a terminal window size to a pseudo-terminal.
+  function platform_copy_winsize(ws: ref ContiguousBuffer<u16>, tty_fd: i32, master: i32) void {
+    if (unsafe { ioctl(tty_fd, PLATFORM_TIOCGWINSZ, ws.raw_data()); } == 0) {
+      unsafe { ioctl(master, PLATFORM_TIOCSWINSZ, ws.raw_data()); };
+    }
+  }
+
+  // Open a FIFO read-write and non-blocking.
+  function platform_fifo_open(path: ref String) i32 {
+    return unsafe { open(path.c_str(), PLATFORM_FIFO_FLAGS, 0); };
+  }
+}

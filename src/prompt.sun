@@ -4,28 +4,30 @@
 // so escaping (quotes, backslashes, newlines, unicode) is handled for us.
 
 public module namo {
-  using sun;
-  using sun.io;
+  using std;
+  using std.io;
 
-  public var SYSTEM_PROMPT: static_ptr<u8> = "You complete bash command lines. Output ONLY command lines, nothing else.\n\nRules:\n- Return the FULL command line, not just the missing suffix.\n- Return at most 3 alternatives, best first, one per line.\n- No explanations, no markdown, no backticks, no comments, no prose.\n- Never invent file or directory names that were not shown to you.\n- Prefer the simplest command that satisfies the intent.\n- If you cannot produce a useful completion, output nothing at all.";
+  public var SYSTEM_PROMPT: static_ptr<u8> = "You complete shell command lines. Output ONLY command lines, nothing else.\n\nRules:\n- Return the FULL command line, not just the missing suffix.\n- Return at most 3 alternatives, best first, one per line.\n- No explanations, no markdown, no backticks, no comments, no prose.\n- Never invent file or directory names that were not shown to you.\n- Prefer the simplest command that satisfies the intent.\n- If you cannot produce a useful completion, output nothing at all.";
 
   // Natural-language mode: the user describes what they want in English and
   // gets runnable commands back. Unlike completion, the user has not typed a
   // prefix and cannot judge the answers at a glance, so each alternative
   // carries a short description. Format is COMMAND, one tab, DESCRIPTION --
   // a tab never occurs inside a suggested command, so the split is unambiguous.
-  public var ASK_SYSTEM_PROMPT: static_ptr<u8> = "You turn a plain-English description into runnable bash commands.\n\nOutput at most 3 alternatives, best first, one per line, in exactly this form:\n\nCOMMAND<TAB>DESCRIPTION\n\nRules:\n- Separate the command from its description with ONE literal tab character.\n- Every line must contain a tab. Never omit the description.\n- DESCRIPTION is a short phrase, at most 8 words, no trailing period.\n- COMMAND is one runnable line: no markdown, backticks, comments, or prose.\n- Make the alternatives meaningfully different, not spelling variants.\n- Use the files and directories shown in context; never invent names.\n- Prefer portable, widely available tools.\n- If the request is destructive, still answer, but prefer the least\n  destructive form that satisfies it.";
+  public var ASK_SYSTEM_PROMPT: static_ptr<u8> = "You turn a plain-English description into runnable shell commands.\n\nOutput at most 3 alternatives, best first, one per line, in exactly this form:\n\nCOMMAND<TAB>DESCRIPTION\n\nRules:\n- Separate the command from its description with ONE literal tab character.\n- Every line must contain a tab. Never omit the description.\n- DESCRIPTION is a short phrase, at most 8 words, no trailing period.\n- COMMAND is one runnable line: no markdown, backticks, comments, or prose.\n- Make the alternatives meaningfully different, not spelling variants.\n- Use the files and directories shown in context; never invent names.\n- Prefer portable, widely available tools.\n- If the request is destructive, still answer, but prefer the least\n  destructive form that satisfies it.";
 
-  // Correction mode: bash has already failed to find the first word, so the
+  // Correction mode: the shell has already failed to find the first word, so the
   // line is known to be wrong before the model sees it. The answer replaces
   // the line rather than extending it, and "no idea" is a valid answer -- a
   // confident wrong guess under "did you mean" is worse than no line at all.
-  public var DYM_SYSTEM_PROMPT: static_ptr<u8> = "You correct bash command lines that do not run.\n\nThe user typed a line whose first word is not a command on this system: a typo, the wrong name for a tool, or a tool that is not installed.\n\nRules:\n- Output ONLY command lines, at most 2, best first, one per line.\n- Output the whole corrected line, keeping the arguments that were typed.\n- Correct only what is wrong; do not rewrite a line that would have worked.\n- No explanations, no markdown, no backticks, no comments, no prose.\n- Never invent file or directory names that were not shown to you.\n- Prefer a command that appears in the history or the listing you were shown.\n- If nothing plausible fits, output nothing at all.";
+  public var DYM_SYSTEM_PROMPT: static_ptr<u8> = "You correct shell command lines that do not run.\n\nThe user typed a line whose first word is not a command on this system: a typo, the wrong name for a tool, or a tool that is not installed.\n\nRules:\n- Output ONLY command lines, at most 2, best first, one per line.\n- Output the whole corrected line, keeping the arguments that were typed.\n- Correct only what is wrong; do not rewrite a line that would have worked.\n- No explanations, no markdown, no backticks, no comments, no prose.\n- Never invent file or directory names that were not shown to you.\n- Prefer a command that appears in the history or the listing you were shown.\n- If nothing plausible fits, output nothing at all.";
 
   // Assemble the tagged context block shown to the model. The cursor position
   // is marked explicitly so the model knows where the user is typing.
   public function build_context(alloc: ref HeapAllocator, cfg: ref Config, history: const ref Vec<String>, listing: const ref String) String {
-    var ctx = String(alloc, "<shell>bash</shell>\n<cwd>");
+    var ctx = String(alloc, "<shell>");
+    ctx.append(cfg.shell_name);
+    ctx.append("</shell>\n<cwd>");
     ctx.append(cfg.cwd);
     ctx.append("</cwd>\n");
 
@@ -126,8 +128,8 @@ public module namo {
   // 4096 tokens, far above our ~150-token system prompt, so it would silently
   // no-op). Local caching does that job instead.
   public function build_body(alloc: ref HeapAllocator, cfg: const ref Config, context: const ref String) String {
-    var req = json_object(alloc);
-    req.set(String(alloc, "model"), json_string(alloc, cfg.model));
+    var req = create_json_object(alloc);
+    req.set(String(alloc, "model"), create_json_string(alloc, cfg.model));
     // Determinism for the models that allow it: the same line in the same
     // directory should not produce a different hint each time it is typed.
     if (takes_temperature(cfg.model)) {
@@ -137,26 +139,26 @@ public module namo {
     if (cfg.is_dym()) {
       // Two bare command lines: no descriptions to pay for.
       req.set(String(alloc, "max_tokens"), Json(token_budget(cfg.model, 150)));
-      req.set(String(alloc, "system"), json_string(alloc, DYM_SYSTEM_PROMPT));
+      req.set(String(alloc, "system"), create_json_string(alloc, DYM_SYSTEM_PROMPT));
     } else if (cfg.is_ask()) {
       req.set(String(alloc, "max_tokens"), Json(token_budget(cfg.model, 300)));
-      req.set(String(alloc, "system"), json_string(alloc, ASK_SYSTEM_PROMPT));
+      req.set(String(alloc, "system"), create_json_string(alloc, ASK_SYSTEM_PROMPT));
     } else {
       req.set(String(alloc, "max_tokens"), Json(token_budget(cfg.model, 150)));
-      req.set(String(alloc, "system"), json_string(alloc, SYSTEM_PROMPT));
+      req.set(String(alloc, "system"), create_json_string(alloc, SYSTEM_PROMPT));
     }
 
     // Only non-whitespace stop sequences are accepted -- the API rejects
     // "\n\n" with "each stop sequence must contain non-whitespace".
     // max_tokens plus the system prompt already bound the response length.
-    var stops = json_array(alloc);
-    stops.push(json_string(alloc, "```"));
+    var stops = create_json_array(alloc);
+    stops.push(create_json_string(alloc, "```"));
     req.set(String(alloc, "stop_sequences"), stops);
 
-    var msgs = json_array(alloc);
-    var turn = json_object(alloc);
-    turn.set(String(alloc, "role"), json_string(alloc, "user"));
-    turn.set(String(alloc, "content"), json_string(alloc, context));
+    var msgs = create_json_array(alloc);
+    var turn = create_json_object(alloc);
+    turn.set(String(alloc, "role"), create_json_string(alloc, "user"));
+    turn.set(String(alloc, "content"), create_json_string(alloc, context));
     msgs.push(turn);
     req.set(String(alloc, "messages"), msgs);
 

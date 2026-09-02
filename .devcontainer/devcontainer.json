@@ -1,82 +1,39 @@
 {
-  "name": "namo_complete (Ubuntu 26.04)",
-  "build": {
-    "dockerfile": "Dockerfile",
-    "args": {
-      "USER_UID": "1000",
-      "USER_GID": "1000"
-    }
-  },
-
-  "remoteUser": "dev",
-  "workspaceFolder": "/workspace",
-
-  // Bind ONLY the project directory. Nothing else from the host is visible,
-  // which is the entire point of this container.
-  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
-
-  // Pass the API key through without baking it into the image.
-  "containerEnv": {
-    "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
-
-    // Pulls ~/.claude.json (account + onboarding state) inside ~/.claude, so
-    // the single volume below covers it too. Without this it sits beside the
-    // directory, outside the volume, and every rebuild re-runs login.
-    "CLAUDE_CONFIG_DIR": "/home/dev/.claude"
-  },
-
-  // Claude Code's credentials are container-home state, so a rebuild loses
-  // them. A named volume survives rebuilds -- and unlike a host $HOME bind it
-  // exposes nothing of the host, so the isolation rule below still holds.
-  // Credentials only; the settings this repo relies on come from the project
-  // itself (/workspace/.claude/settings.json), not from anything in here.
-  "mounts": [
-    "source=namo-claude-config,target=/home/dev/.claude,type=volume"
-  ],
-
-  // Git auth reaches this container WITHOUT any credential file crossing the
-  // boundary, so there is deliberately no ~/.ssh mount here:
-  //   - SSH: VS Code forwards the host ssh-agent socket and sets SSH_AUTH_SOCK.
-  //     Private keys stay on the host; the container can ask for signatures
-  //     while it is attached, and loses that the moment it detaches. The image
-  //     supplies openssh-client + GitHub's host keys (see Dockerfile).
-  //   - HTTPS: VS Code installs its own git credential helper, which proxies
-  //     to the host's.
-  // Both need the host ssh-agent running with the key added (`ssh-add -l` on
-  // the host) before the window is attached.
-
-  // Drop privileges the container has no use for. Deliberately absent:
-  //   - a docker.sock mount (would hand out host root)
-  //   - any host $HOME / ~/.ssh / ~/.aws mount
-  //   - "privileged": true
-  "runArgs": [
-    "--cap-drop=ALL",
-    "--security-opt=no-new-privileges"
-  ],
-
-  "customizations": {
-    "vscode": {
-      "extensions": [
-        "anthropic.claude-code",
-        "timonwong.shellcheck",
-        "namo-robotics.sun-language",
-        "yzhang.markdown-all-in-one"
-      ],
-      "settings": {
-        "terminal.integrated.defaultProfile.linux": "bash",
-        "files.eol": "\n",
-
-        // Prompt-free Claude Code, scoped to this container.
-        //
-        // A VS Code-owned session ignores "defaultMode": "bypassPermissions"
-        // from .claude/settings.json unless the host also allows it -- that is
-        // what the first setting does. Because both live in devcontainer.json
-        // they apply to windows attached to this container and nowhere else,
-        // which is the containment the old require-devcontainer.sh hook used to
-        // enforce, now enforced by where the setting is written instead.
-        "claudeCode.allowDangerouslySkipPermissions": true,
-        "claudeCode.initialPermissionMode": "bypassPermissions"
-      }
-    }
-  }
+	"name": "namo_complete (Ubuntu 26.04)",
+	"build": {
+		"context": "..",
+		"dockerfile": "../Dockerfile"
+	},
+	"remoteUser": "ubuntu",
+	"updateRemoteUserUID": true,
+	"workspaceFolder": "/workspace",
+	"workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+	"mounts": [
+		"source=${localEnv:HOME}${localEnv:USERPROFILE}/.ssh,target=/home/ubuntu/.ssh,type=bind,readonly",
+		"source=sun-ccache,target=/home/ubuntu/.cache/ccache,type=volume",
+		"source=sun-claude,target=/home/ubuntu/.claude,type=volume",
+		"source=${localEnv:HOME}${localEnv:USERPROFILE}/.config/gh,target=/home/ubuntu/.config/gh,type=bind",
+		"source=${localEnv:HOME}${localEnv:USERPROFILE}/.codex,target=/home/ubuntu/.codex,type=bind"
+	],
+	"runArgs": [
+		"--cap-drop=ALL",
+		"--security-opt=no-new-privileges"
+	],
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"Anthropic.claude-code",
+				"timonwong.shellcheck",
+				"namo-robotics.sun-language",
+				"yzhang.markdown-all-in-one",
+				"openai.chatgpt"
+			],
+			"settings": {
+				"terminal.integrated.defaultProfile.linux": "bash",
+				"files.eol": "\n",
+				"claudeCode.allowDangerouslySkipPermissions": true,
+				"claudeCode.initialPermissionMode": "bypassPermissions"
+			}
+		}
+	}
 }

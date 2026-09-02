@@ -24,29 +24,10 @@
 // the one part of this program that puts itself between you and your terminal.
 
 public module namo {
-  using sun;
-  using sun.io;
-  using sun.process;
-  using sun.time;
-
-  // The pty, and the window size that has to be copied onto it -- the one
-  // thing the stdlib cannot do (SUN_FEEDBACK.md). struct winsize is four u16:
-  // rows, cols, and two pixel fields nothing here uses.
-  extern "C" function posix_openpt(flags: i32) i32;
-  extern "C" function grantpt(fd: i32) i32;
-  extern "C" function unlockpt(fd: i32) i32;
-  extern "C" function ptsname(fd: i32) raw_ptr<u8>;
-  extern "C" function ioctl(fd: i32, req: u64, arg: raw_ptr<u8>) i32;
-  // The daemon's FIFO, opened read-write so that it neither blocks waiting for
-  // a reader nor takes a SIGPIPE if the daemon goes away, and non-blocking so
-  // that a full pipe costs a dropped hint rather than a stalled terminal.
-  // sun.io opens read-only, write-only or append; this needs all three flags.
-  extern "C" function open(path: raw_ptr<u8>, flags: i32, mode: i32) i32;
-
-  var O_RDWR_NOCTTY: i32 = 258;      // O_RDWR | O_NOCTTY
-  var O_RDWR_NONBLOCK: i32 = 2050;   // O_RDWR | O_NONBLOCK
-  var TIOCGWINSZ: u64 = 21523;
-  var TIOCSWINSZ: u64 = 21524;
+  using std;
+  using std.io;
+  using std.process;
+  using std.time;
 
   var RELAY_BUF: i64 = 4096;
   // How often the terminal is asked for its size. There is no SIGWINCH here
@@ -68,8 +49,10 @@ public module namo {
 
   function winsize_buf(alloc: ref HeapAllocator) ContiguousBuffer<u16> {
     var ws = ContiguousBuffer<u16>(alloc, 4);
-    ws.set_unchecked(0, 0); ws.set_unchecked(1, 0);
-    ws.set_unchecked(2, 0); ws.set_unchecked(3, 0);
+    ws.set_unchecked(0, 0);
+    ws.set_unchecked(1, 0);
+    ws.set_unchecked(2, 0);
+    ws.set_unchecked(3, 0);
     return ws;
   }
 
@@ -85,26 +68,23 @@ public module namo {
   // The buffer is the caller's: this runs for the life of the session, and a
   // fresh four u16 per pass would be four u16 of garbage per pass.
   function copy_winsize(ws: ref ContiguousBuffer<u16>, tty_fd: i32, master: i32) void {
-    var got: i32 = unsafe { ioctl(tty_fd, TIOCGWINSZ, ws.rawData()); };
-    if (got != 0) {
-      return;
-    }
     // Repeating an unchanged size is free: the kernel compares before it
     // stores, and only signals the pty when the numbers actually moved.
-    var set: i32 = unsafe { ioctl(master, TIOCSWINSZ, ws.rawData()); };
+    platform_copy_winsize(ws, tty_fd, master);
   }
 
   // ------------------------------------------------------------------------
   // The last few lines
   // ------------------------------------------------------------------------
 
+  // Retains the most recent command-output lines for prompt context.
   public class Recorder {
-    public var lines: Vec<String>;   // whole lines, oldest first
-    public var pending: String;      // bytes since the last newline
+    public var lines: Vec<String>;  // whole lines, oldest first
+    public var pending: String;  // bytes since the last newline
     public var keep: i64;
     public var dirty: bool;
 
-    public function init(alloc: ref HeapAllocator, keep: i64) {
+    init(alloc: ref HeapAllocator, keep: i64) {
       this.lines = Vec<String>(alloc, 16);
       this.pending = String(alloc, "");
       this.keep = keep;
@@ -253,21 +233,22 @@ public module namo {
   var TRK_ESC: i32 = 1;
   var TRK_CSI: i32 = 2;
 
+  // Tracks the editable command line observed in the terminal byte stream.
   public class Tracker {
     public var line: String;
-    public var point: i64;        // in bytes, which is why `wide` exists
-    public var armed: bool;       // between the prompt marker and the newline
-    public var wide: bool;        // a byte >= 0x80 went by: bytes and columns
-                                  // no longer agree, so the next cursor move
-                                  // would be guesswork
-    public var dirty: bool;       // changed since the last record went out
-    public var ended: bool;       // Enter went by, or a command started
+    public var point: i64;  // in bytes, which is why `wide` exists
+    public var armed: bool;  // between the prompt marker and the newline
+    public var wide: bool;  // a byte >= 0x80 went by: bytes and columns
+    // no longer agree, so the next cursor move
+    // would be guesswork
+    public var dirty: bool;  // changed since the last record went out
+    public var ended: bool;  // Enter went by, or a command started
     public var state: i32;
     public var param: i64;
     public var got_param: bool;
-    public var known: bool;       // this CSI is one of the six we follow
+    public var known: bool;  // this CSI is one of the six we follow
 
-    public function init(alloc: ref HeapAllocator) {
+    init(alloc: ref HeapAllocator) {
       this.line = String(alloc, "");
       this.point = 0;
       this.armed = false;
@@ -327,24 +308,30 @@ public module namo {
       t.armed = false;
       return;
     }
-    if (fin == 75) {                       // K: erase to the end of the row
+    if (fin == 75) {
+      // K: erase to the end of the row
       t.line.truncate(t.point);
       t.dirty = true;
-    } else if (fin == 64) {                // @: open a gap of n
+    } else if (fin == 64) {
+      // @: open a gap of n
       trk_splice(alloc, t, n, 0);
-    } else if (fin == 80) {                // P: close a gap of n
+    } else if (fin == 80) {
+      // P: close a gap of n
       trk_splice(alloc, t, 0, n);
-    } else if (fin == 67) {                // C: right
+    } else if (fin == 67) {
+      // C: right
       t.point = t.point + n;
       if (t.point > t.line.length()) {
         t.point = t.line.length();
       }
-    } else if (fin == 68) {                // D: left
+    } else if (fin == 68) {
+      // D: left
       t.point = t.point - n;
       if (t.point < 0) {
         t.point = 0;
       }
-    } else if (fin == 109) {               // m: colour, and none of our business
+    } else if (fin == 109) {
+      // m: colour, and none of our business
       var ignored: bool = true;
     } else {
       t.armed = false;
@@ -356,7 +343,8 @@ public module namo {
 
   function trk_feed(alloc: ref HeapAllocator, t: ref Tracker, c: u8) void {
     if (t.state == TRK_ESC) {
-      if (c == 91) {                       // ESC [
+      if (c == 91) {
+        // ESC [
         t.state = TRK_CSI;
         t.param = 0;
         t.got_param = false;
@@ -368,16 +356,19 @@ public module namo {
       return;
     }
     if (t.state == TRK_CSI) {
-      if (c >= 48 and c <= 57) {           // 0-9
+      if (c >= 48 and c <= 57) {
+        // 0-9
         t.param = t.param * 10 + _convert<i64>(c - 48);
         t.got_param = true;
         return;
       }
-      if (c >= 32 and c <= 63) {           // ';' '?' and the intermediates
+      if (c >= 32 and c <= 63) {
+        // ';' '?' and the intermediates
         t.known = false;
         return;
       }
-      if (c >= 64 and c <= 126) {          // the final byte
+      if (c >= 64 and c <= 126) {
+        // the final byte
         t.state = TRK_TEXT;
         trk_csi(alloc, t, c);
         return;
@@ -412,7 +403,8 @@ public module namo {
       t.armed = false;
       return;
     }
-    if (c == 8) {                          // BS: one column left
+    if (c == 8) {
+      // BS: one column left
       if (t.wide) {
         t.armed = false;
         return;
@@ -423,7 +415,7 @@ public module namo {
       return;
     }
     if (c == 7 or c == 9 or c == MARK_FLUSH) {
-      return;                              // bell, tab, end of a recording
+      return;  // bell, tab, end of a recording
     }
     if (c < 32 or c == 127) {
       t.armed = false;
@@ -438,12 +430,13 @@ public module namo {
   // The line goes to the daemon down the same FIFO the shell uses, in the same
   // shape, with the cwd left empty: the daemon fills in the one the shell told
   // it at the last prompt, which is the directory this line is being typed in.
+  // Sends observed command lines to the hint daemon without blocking output.
   public class Hints {
     public var fifo: File;
     public var ready: bool;
     public var sent: String;
 
-    public function init(alloc: ref HeapAllocator) {
+    init(alloc: ref HeapAllocator) {
       this.fifo = File();
       this.ready = false;
       this.sent = String(alloc, "");
@@ -454,7 +447,7 @@ public module namo {
     if (h.ready) {
       return true;
     }
-    var fd: i32 = unsafe { open(cfg.fifo.c_str(), O_RDWR_NONBLOCK, 0); };
+    var fd: i32 = platform_fifo_open(cfg.fifo);
     if (fd < 0) {
       return false;
     }
@@ -540,7 +533,7 @@ public module namo {
       }
 
       if (ready > 0 and poller.is_readable(0)) {
-        var n: i64 = pty.read_into(buf.rawData(), RELAY_BUF);
+        var n: i64 = pty.read_into(buf.raw_data(), RELAY_BUF);
         if (n <= 0) {
           // The shell closed its end, or the pty went away with it.
           running = false;
@@ -627,16 +620,14 @@ public module namo {
       return 0;
     }
 
-    var master: i32 = unsafe { posix_openpt(O_RDWR_NOCTTY); };
+    var master: i32 = platform_pty_open();
     if (master < 0) {
       return 1;
     }
-    var g: i32 = unsafe { grantpt(master); };
-    var u: i32 = unsafe { unlockpt(master); };
-    if (g != 0 or u != 0) {
+    if (platform_pty_prepare(master) == false) {
       return 1;
     }
-    var slave = from_c_str(alloc, unsafe { ptsname(master); });
+    var slave = platform_pty_name(alloc, master);
     if (slave.length() == 0) {
       return 1;
     }

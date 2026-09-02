@@ -3,67 +3,83 @@ name: ci
 on:
   pull_request:
   workflow_dispatch:
-# Pushes to main are built and published by release.yml (rolling `dev`).
 
 jobs:
-  build-and-test:
+  linux:
     runs-on: ubuntu-latest
-    # Ubuntu 26.04 for libllvm20, which the Sun toolchain package depends on.
     container:
       image: ubuntu:26.04
-      # --init gives the container a PID 1 that reaps. The daemon and the relay
-      # detach, so they are orphans by design; without a reaper their corpses
-      # pile up as zombies for the rest of the job. The tests no longer mistake
-      # a zombie for a live helper, but nothing else should have to know either.
       options: --init
 
     steps:
-      - name: Install build dependencies
+      - name: Install build and test dependencies
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ca-certificates curl git file bash \
-            python3 util-linux \
-            build-essential
-        # build-essential is required: `sun -c` shells out to cc/ld to link, and
-        # static linking needs libc.a. Verified in a clean ubuntu:26.04 container
-        # that `gcc` + `libc6-dev` alone is NOT enough.
-        # libllvm20/libstdc++6/libgcc-s1 are deliberately absent -- they are
-        # declared by the Sun package and apt resolves them (see below).
-        # util-linux provides `script`, which test.sh uses to allocate a pty
-        # for the job-control regression test.
+            ca-certificates curl git file bash zsh python3 util-linux build-essential
 
       - uses: actions/checkout@v4
 
-      - name: Install Sun toolchain
+      - name: Install latest Sun dev artifact
         run: |
           curl -fsSL -o /tmp/sun.deb \
             https://github.com/namo-robotics/sun/releases/download/dev/sun_0.dev_amd64.deb
-          # `apt-get install ./file.deb` resolves the package's declared
-          # dependencies (libllvm20 etc). `dpkg -i` would not.
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends /tmp/sun.deb
           sun --version
 
-      - name: Build
-        run: ./build.sh
-
-      - name: Verify the binary is statically linked
-        # The whole distribution story depends on this: a static binary runs on
-        # any x86_64 Linux with no runtime dependency but curl.
+      - name: Build and verify Linux binary
         run: |
+          ./build.sh
           file bin/namo_complete
-          if ldd bin/namo_complete 2>&1 | grep -qv 'not a dynamic executable'; then
-            echo "::error::binary is dynamically linked; it will not be portable"
+          if ! file bin/namo_complete | grep -Eq 'static-pie linked|statically linked'; then
+            echo "::error::binary is not statically linked"
             exit 1
           fi
 
       - name: Test
-        # No API key: the suite runs against a local mock. `--live` is
-        # deliberately not used in CI so pull requests cost nothing.
-        run: ./test.sh
+        run: |
+          ./test.sh
+          ./test-zsh.sh
 
       - name: Shellcheck
         continue-on-error: true
         run: |
           apt-get install -y --no-install-recommends shellcheck || exit 0
-          shellcheck -S warning shell/*.bash install.sh build.sh run.sh test.sh || true
+          shellcheck -S warning shell/*.bash install.sh build.sh run.sh test.sh test-zsh.sh packaging/*.sh || true
+
+  macos-arm64:
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build and test dependencies
+        # Bash only exercises the optional Bash integration; macOS users run zsh.
+        run: brew install llvm@20 bash
+
+      - name: Install latest Sun dev artifact
+        run: |
+          test "$(uname -m)" = arm64
+          curl -fsSL -o /tmp/sun.tar.gz \
+            https://github.com/namo-robotics/sun/releases/download/dev/sun-0.dev-arm64-apple-darwin.tar.gz
+          mkdir -p /tmp/sun
+          tar -C /tmp/sun -xzf /tmp/sun.tar.gz
+          echo "/tmp/sun/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+
+      - name: Build and verify macOS binary
+        run: |
+          sun --version
+          bash ./build.sh
+          file bin/namo_complete
+          file bin/namo_complete | grep -q 'arm64'
+          otool -L bin/namo_complete
+          if otool -L bin/namo_complete | grep -Eq 'lib(ssl|crypto)'; then
+            echo "::error::binary unexpectedly depends on shared OpenSSL"
+            exit 1
+          fi
+
+      - name: Test
+        run: |
+          bash ./test.sh
+          ./test-zsh.sh

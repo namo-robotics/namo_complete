@@ -41,6 +41,11 @@
 
 case $- in *i*) ;; *) return 0 ;; esac
 
+if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
+  printf 'namo_complete requires Bash 4.4 or newer (found %s).\n' "$BASH_VERSION" >&2
+  return 0
+fi
+
 # What the shell itself needs. Every other setting is the daemon's, and it
 # reads them from its own environment -- where the defaults are, in
 # src/config.sun -- so they are exported below rather than defaulted here.
@@ -146,7 +151,7 @@ _namo_daemon_ensure() {
 
   # The binary forks and detaches itself, so this returns immediately -- no
   # background job, no "[1] 12345" notice, nothing to disown.
-  NAMO_DAEMON=1 NAMO_FIFO="$_NAMO_FIFO" NAMO_REPLY="$_NAMO_REPLYFIFO" \
+  NAMO_SHELL=bash NAMO_DAEMON=1 NAMO_FIFO="$_NAMO_FIFO" NAMO_REPLY="$_NAMO_REPLYFIFO" \
     NAMO_HISTFILE="$_NAMO_HISTFILE" NAMO_PIDFILE="$_NAMO_PIDFILE" \
     NAMO_DYMFILE="$_NAMO_DYMFILE" NAMO_OUTFILE="$_NAMO_OUTFILE" \
     "$_NAMO_BIN_PATH" </dev/null >/dev/null 2>&1

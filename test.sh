@@ -27,6 +27,14 @@ pass=0; fail=0
 ok()   { printf '  \033[32mPASS\033[0m  %s\n' "$1"; pass=$((pass+1)); }
 bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; fail=$((fail+1)); }
 head_() { printf '\n\033[1m%s\033[0m\n' "$1"; }
+ns_now() { python3 -c 'import time; print(time.time_ns())'; }
+script_shell() {
+  if [ "$(uname -s)" = Darwin ]; then
+    script -q /dev/null bash --rcfile "$1" -i
+  else
+    script -qec "bash --rcfile $1 -i" /dev/null
+  fi
+}
 
 # Both `kill -0` and `pgrep` answer for a process that has exited but has not
 # been reaped yet. Whether such a zombie lingers is a property of the init of
@@ -35,9 +43,15 @@ head_() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 # that is still *running*, and read the state straight out of /proc: the field
 # after the last ')' in stat, 'Z' for a corpse.
 alive() {
+  if [ "$(uname -s)" = Darwin ]; then
+    case $(ps -o stat= -p "${1:-none}" 2>/dev/null) in
+      '' | *Z*) return 1 ;;
+      *) return 0 ;;
+    esac
+  fi
   case $(sed -n 's/.*) \(.\) .*/\1/p' "/proc/${1:-none}/stat" 2>/dev/null) in
     '' | Z) return 1 ;;
-    *)      return 0 ;;
+    *) return 0 ;;
   esac
 }
 running_helpers() {
@@ -76,9 +90,31 @@ out=$(run_bare NAMO_LINE='git commit' NAMO_CWD="$PWD"); rc=$?
 [ -z "$out" ] && [ "$rc" = 1 ] && grep -q 'API_KEY' /tmp/namo_err \
   && ok "missing key: stdout clean, message on stderr" || bad "missing key (rc=$rc)"
 
-out=$(env ANTHROPIC_API_KEY=x NAMO_ENDPOINT='http://127.0.0.1:9/v1' \
+out=$(env ANTHROPIC_API_KEY=x NAMO_MIN_GAP=0 NAMO_CACHE=0 NAMO_ENDPOINT='http://127.0.0.1:9/v1' \
         NAMO_LINE='git commit' NAMO_CWD="$PWD" "$BIN" </dev/null 2>/dev/null); rc=$?
-[ -z "$out" ] && ok "unreachable endpoint: stdout stays clean" || bad "unreachable endpoint"
+[ -z "$out" ] && [ "$rc" = 1 ] \
+  && ok "unreachable endpoint: stdout stays clean" || bad "unreachable endpoint"
+
+out=$(env ANTHROPIC_API_KEY=x NAMO_MIN_GAP=0 NAMO_CACHE=0 NAMO_ENDPOINT='https://127.0.0.1:9/v1' \
+        NAMO_LINE='git commit' NAMO_CWD="$PWD" "$BIN" </dev/null 2>/dev/null); rc=$?
+[ -z "$out" ] && [ "$rc" = 1 ] \
+  && ok "TLS connection failure: stdout stays clean" || bad "TLS connection failure"
+
+for endpoint in 'ftp://example.com/v1' 'https:///v1' 'https://example.com:bad/v1' \
+                'https://user@example.com/v1' 'https://example.com:443:2/v1' \
+                'https://example.com:4294967739/v1' 'https://example.com/a b' \
+                'https://example.com/v1#fragment'; do
+  out=$(env ANTHROPIC_API_KEY=x NAMO_MIN_GAP=0 NAMO_CACHE=0 NAMO_ENDPOINT="$endpoint" NAMO_LINE='git commit' \
+          NAMO_CWD="$PWD" "$BIN" </dev/null 2>/dev/null); rc=$?
+  [ -z "$out" ] && [ "$rc" = 1 ] \
+    && ok "malformed endpoint rejected: $endpoint" || bad "malformed endpoint accepted: $endpoint"
+done
+
+out=$(env ANTHROPIC_API_KEY="bad
+header" NAMO_MIN_GAP=0 NAMO_CACHE=0 NAMO_ENDPOINT='http://127.0.0.1:9/v1' \
+        NAMO_LINE='git commit' NAMO_CWD="$PWD" "$BIN" </dev/null 2>/dev/null); rc=$?
+[ -z "$out" ] && [ "$rc" = 1 ] \
+  && ok "invalid API-key header rejected" || bad "invalid API-key header accepted"
 
 # Which build is this? `dev` is a rolling tag, so the commit is the only thing
 # that identifies a binary -- and the question has to be answerable on a machine
@@ -114,6 +150,11 @@ class H(http.server.BaseHTTPRequestHandler):
         # caller, since the daemon is asking for its own hints throughout.
         open('/tmp/namo_reqs.log','ab').write(body + b'\\n')
         open('/tmp/namo_hdr.txt','w').write(str(self.headers))
+        open('/tmp/namo_path.txt','w').write(self.path)
+        if self.path == '/status':
+            o = b'service unavailable'
+            self.send_response(503); self.send_header('content-length', str(len(o)))
+            self.end_headers(); self.wfile.write(o); return
         # Correction mode gets its own answer, so a "did you mean" test cannot
         # pass on a completion that happened to be in flight.
         if b'<typed>' in body:
@@ -127,7 +168,11 @@ class H(http.server.BaseHTTPRequestHandler):
              "stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}
         o = json.dumps(r).encode()
         self.send_response(200); self.send_header('content-type','application/json')
-        self.send_header('content-length', str(len(o))); self.end_headers(); self.wfile.write(o)
+        if self.path == '/chunked':
+            self.send_header('transfer-encoding', 'chunked'); self.end_headers()
+            self.wfile.write((format(len(o), 'x') + '\r\n').encode() + o + b'\r\n0\r\n\r\n')
+        else:
+            self.send_header('content-length', str(len(o))); self.end_headers(); self.wfile.write(o)
     def log_message(self, *a): pass
 http.server.HTTPServer(('127.0.0.1', $PORT), H).serve_forever()
 PY
@@ -169,6 +214,21 @@ assert names == sorted(names), names
 PY
 grep -qi "x-api-key: sk-ant-TESTKEY" /tmp/namo_hdr.txt \
   && ok "api key sent as a header" || bad "api key header missing"
+[ "$(cat /tmp/namo_path.txt)" = /v1/messages ] \
+  && ok "custom endpoint path sent unchanged" || bad "custom endpoint path missing"
+grep -qi "^Host: 127.0.0.1:$PORT" /tmp/namo_hdr.txt \
+  && ok "custom endpoint port included in Host" || bad "custom port missing from Host"
+
+out=$(payload | env NAMO_LINE='git com' NAMO_CWD="$PWD" NAMO_CACHE=0 \
+      NAMO_ENDPOINT="http://127.0.0.1:$PORT/chunked" "$BIN" 2>/dev/null)
+printf '%s\n' "$out" | grep -q '^git commit -m' \
+  && ok "chunked HTTP response decoded" || bad "chunked response failed"
+
+err=$(payload | env NAMO_LINE='git com' NAMO_CWD="$PWD" NAMO_CACHE=0 \
+      NAMO_ENDPOINT="http://127.0.0.1:$PORT/status" "$BIN" 2>&1 >/dev/null); rc=$?
+printf '%s' "$err" | grep -q 'HTTP status 503' && [ "$rc" = 1 ] \
+  && ok "non-2xx status reported" || bad "non-2xx status hidden (rc=$rc err=$err)"
+
 grep -rl 'sk-ant-TESTKEY' "$XDG_RUNTIME_DIR" >/dev/null 2>&1 \
   && bad "api key left behind on disk" || ok "no key left on disk after the call"
 
@@ -220,9 +280,9 @@ payload | env NAMO_LINE='cached probe xyz' NAMO_CWD="$PWD" "$BIN" >/dev/null 2>&
 # --------------------------------------------------------------------------
 head_ "2c. the api key never reaches the process table"
 # --------------------------------------------------------------------------
-# curl is exec'd directly and gets its x-api-key header on stdin (-K -), so the
-# key is in no argv anywhere. A listener that accepts and then says nothing
-# holds curl open long enough to look at `ps`.
+# The native client keeps the key in this process and never creates a child.
+# A listener that accepts and then says nothing holds the request open long
+# enough to inspect both the process table and the client's child list.
 PORT3=$((PORT + 2))
 python3 - <<PY3 & STALL_PID=$!
 import socket
@@ -241,6 +301,9 @@ probe=$!
 sleep 1
 # The bracket keeps the pattern from matching this grep's own command line.
 seen=$(ps -ww -eo args 2>/dev/null | grep -c '[s]k-ant-TESTKEY')
+children=$(pgrep -P "$probe" 2>/dev/null || true)
+[ -z "$children" ] && ok "native client starts no transport subprocess" \
+                    || bad "native client spawned children: $children"
 kill "$probe" "$STALL_PID" 2>/dev/null
 wait "$probe" 2>/dev/null
 [ "${seen:-1}" = 0 ] && ok "api key absent from every command line" \
@@ -477,7 +540,7 @@ grep -q '<line>\|<request>' /tmp/namo_req.json \
 python3 - <<'PYX' && ok "correction mode uses the correction prompt" || bad "wrong system prompt"
 import json
 d=json.load(open('/tmp/namo_req.json'))
-assert 'correct bash command lines' in d['system'], d['system'][:80]
+assert 'correct shell command lines' in d['system'], d['system'][:80]
 assert 'output nothing at all' in d['system'], "the model is not allowed to stay silent"
 assert d['max_tokens'] == 150, d['max_tokens']
 PYX
@@ -574,7 +637,6 @@ unset -f dym_rows
 # The history entry belongs to some earlier command (HISTCONTROL=ignorespace
 # and friends): the first word does not match, so the words bash passed the
 # handler are used instead.
-before=$(dym_rows)
 rm -f /tmp/namo_reqs.log
 dym_file grpe "grpe -r FIXME lib" "  17  cd /workspace"
 printf '%s\t\001\n' "$PWD" >&$CFD
@@ -598,8 +660,8 @@ export ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
 source "$PWD/shell/namo_complete.bash"
 PS1='T\$ '
 RCEOF
-  runpty() { script -qec "bash --rcfile /tmp/namo_rc_dym.sh -i" /dev/null 2>&1 | tr -d '\r'; }
-  ms_now() { echo $(( $(date +%s%N) / 1000000 )); }
+  runpty() { script_shell /tmp/namo_rc_dym.sh 2>&1 | tr -d '\r'; }
+  ms_now() { echo $(( $(ns_now) / 1000000 )); }
 
   # The mock holds a correction for a full second. A session that types one and
   # leaves must not have waited for it: nothing in the shell is watching.
@@ -659,11 +721,11 @@ out=$(env NAMO_CACHE_ONLY=1 NAMO_LINE='git com' NAMO_CWD="$PWD" \
 python3 /tmp/namo_mock.py & MOCK_PID=$!; sleep 1
 
 # cache-only latency budget: this runs on every keystroke
-start=$(date +%s%N)
+start=$(ns_now)
 for _ in 1 2 3 4 5 6 7 8 9 10; do
   env NAMO_CACHE_ONLY=1 NAMO_LINE='git com' NAMO_CWD="$PWD" "$BIN" </dev/null >/dev/null 2>&1
 done
-per=$(( ($(date +%s%N) - start) / 10000000 ))
+per=$(( ($(ns_now) - start) / 10000000 ))
 [ "$per" -le 15 ] && ok "cache-only lookup ${per}ms per keystroke" \
                   || bad "cache-only too slow for live use: ${per}ms"
 
@@ -716,7 +778,7 @@ PS1='T\$ '
 RCEOF
   daemons_before=$(running_helpers)
   jobnoise=$(printf 'git com\nsleep 1\nexit\n' \
-    | script -qec "bash --rcfile /tmp/namo_rc_test.sh -i" /dev/null 2>&1 \
+    | script_shell /tmp/namo_rc_test.sh 2>&1 \
     | tr -d '\r' | grep -acE '^\[[0-9]+\][[:space:]]+[0-9]+')
   [ "$jobnoise" = 0 ] && ok "no job-control noise while typing" \
                       || bad "$jobnoise job notifications leaked to the terminal"
@@ -732,7 +794,7 @@ RCEOF
   # Output with no trailing newline must not swallow the next prompt: the hook
   # pads to the end of the row so the wrap happens before the prompt is drawn.
   eolcap=$(printf 'printf hi\nexit\n' \
-    | script -qec "bash --rcfile /tmp/namo_rc_test.sh -i" /dev/null 2>&1)
+    | script_shell /tmp/namo_rc_test.sh 2>&1)
   printf '%s' "$eolcap" | grep -q "hi  *$(printf '\r')" \
     && ok "prompt starts on a fresh line after unterminated output" \
     || bad "no end-of-line padding emitted after unterminated output"
@@ -946,8 +1008,12 @@ busy = settles(inner, (24, 80))        # a build printing without a pause
 flooding = False; th.join(timeout=2)
 
 try:  # running, not merely unreaped: a crashed relay is a zombie here
-    alive = 0 if open("/proc/%d/stat" % relay).read().rsplit(") ", 1)[1][0] == "Z" else 1
-except OSError:
+    if sys.platform == "darwin":
+        stat = subprocess.check_output(["ps", "-o", "stat=", "-p", str(relay)], text=True).strip()
+        alive = 0 if not stat or "Z" in stat else 1
+    else:
+        alive = 0 if open("/proc/%d/stat" % relay).read().rsplit(") ", 1)[1][0] == "Z" else 1
+except (OSError, subprocess.CalledProcessError):
     alive = 0
 draining = False
 os.kill(relay, 9)
@@ -998,7 +1064,7 @@ RCEOF
   rm -f /tmp/namo_reqs.log
   daemons_before=$(running_helpers)
   cap=$(printf '[ -t 1 ] && echo ISATTY_OK\nprintf "zzprobe output\\n"\nzzq com\nexit\n' \
-    | script -qec "bash --rcfile /tmp/namo_rc_out.sh -i" /dev/null 2>&1 | tr -d '\r')
+    | script_shell /tmp/namo_rc_out.sh 2>&1 | tr -d '\r')
   printf '%s' "$cap" | grep -q 'ISATTY_OK' \
     && ok "commands still see a terminal on stdout" \
     || bad "isatty(1) is false with capture on -- the pty is not working"
@@ -1128,7 +1194,7 @@ source "$PWD/shell/namo_complete.bash"
 PS1='T\$ '
 RCEOF
   trkcap=$( { printf 'zzhint com'; sleep 2.5; printf '\nexit\n'; sleep 0.5; } \
-    | script -qec "bash --rcfile /tmp/namo_rc_trk.sh -i" /dev/null 2>&1 | tr -d '\r' )
+    | script_shell /tmp/namo_rc_trk.sh 2>&1 | tr -d '\r' )
   printf '%s' "$trkcap" | grep -q 'hint: git commit' \
     && ok "typing into a real shell paints a hint, with nothing rebound" \
     || bad "no hint painted: $(printf '%s' "$trkcap" | cat -v | tail -3)"
@@ -1145,7 +1211,7 @@ RCEOF
   sed 's/NAMO_CACHE=0/NAMO_CACHE=0 NAMO_OUTPUT=0/' /tmp/namo_rc_trk.sh > /tmp/namo_rc_trk0.sh
   rm -f /tmp/namo_req.json
   zerocap=$( { printf 'zzquiet com'; sleep 2.5; printf '\nexit\n'; sleep 0.5; } \
-    | script -qec "bash --rcfile /tmp/namo_rc_trk0.sh -i" /dev/null 2>&1 | tr -d '\r' )
+    | script_shell /tmp/namo_rc_trk0.sh 2>&1 | tr -d '\r' )
   printf '%s' "$zerocap" | grep -q 'hint: git commit' \
     && ok "hints still work with NAMO_OUTPUT=0" \
     || bad "no hint with output recording off"
@@ -1162,7 +1228,7 @@ mkfifo -m 600 "$DT2/fifo" "$DT2/reply"
 : > "$DT2/hist"
 exec {D2}<>"$DT2/fifo"
 rm -f /tmp/namo_req.json
-NAMO_DAEMON=1 NAMO_FIFO="$DT2/fifo" NAMO_REPLY="$DT2/reply" NAMO_HISTFILE="$DT2/hist" \
+NAMO_SHELL=zsh NAMO_DAEMON=1 NAMO_FIFO="$DT2/fifo" NAMO_REPLY="$DT2/reply" NAMO_HISTFILE="$DT2/hist" \
   NAMO_PIDFILE="$DT2/pid" NAMO_TTY="$DT2/tty" NAMO_DEBOUNCE=0.2 NAMO_QUIET=0.05 \
   NAMO_CACHE=0 "$BIN" </dev/null >/dev/null 2>&1
 d2pid=$(cat "$DT2/pid" 2>/dev/null)
@@ -1176,6 +1242,7 @@ if [ -f /tmp/namo_req.json ]; then
 import json, sys
 c = json.load(open('/tmp/namo_req.json'))['messages'][0]['content']
 assert '<cwd>' + sys.argv[1] + '</cwd>' in c, c[:400]
+assert '<shell>zsh</shell>' in c, c[:400]
 PYCWD
 else
   bad "a relay record never reached the API"
@@ -1191,21 +1258,38 @@ head_ "6. packaging"
 # Build the release tarball the same way .github/workflows/release.yml does,
 # then install from it into a temp prefix -- so a packaging break is caught
 # here rather than at tag time.
+
+FAKEBIN=$(mktemp -d)
+printf '#!/usr/bin/env bash\nprintf "unsupported\\n"\n' > "$FAKEBIN/uname"
+chmod +x "$FAKEBIN/uname"
+unsupported=$(PATH="$FAKEBIN:$PATH" sh ./install.sh --version dev 2>&1); rc=$?
+printf '%s\n' "$unsupported" | grep -q 'no prebuilt binary for unsupported/unsupported' && \
+  [ "$rc" = 1 ] && ! printf '%s\n' "$unsupported" | grep -q downloading \
+  && ok "unsupported platforms fail before downloading" \
+  || bad "unsupported platform handling (rc=$rc output=$unsupported)"
+
 PKGTMP=$(mktemp -d)
 PNAME=$(./packaging/package.sh v0.0.0-test "$PKGTMP" 2>/dev/null)
 
 [ -s "$PKGTMP/$PNAME.tar.gz" ] && ok "release tarball builds" || bad "tarball missing"
-( cd "$PKGTMP" && sha256sum -c --status SHA256SUMS ) \
+expected=$(awk -v file="$PNAME.tar.gz" '$2 == file { print $1 }' "$PKGTMP/SHA256SUMS")
+if command -v sha256sum >/dev/null 2>&1; then
+  actual=$(sha256sum "$PKGTMP/$PNAME.tar.gz" | awk '{print $1}')
+else
+  actual=$(shasum -a 256 "$PKGTMP/$PNAME.tar.gz" | awk '{print $1}')
+fi
+[ -n "$expected" ] && [ "$actual" = "$expected" ] \
   && ok "checksum verifies" || bad "checksum failed"
 
 mkdir -p "$PKGTMP/x"
 tar -C "$PKGTMP/x" -xzf "$PKGTMP/$PNAME.tar.gz"
-"$PKGTMP/x/$PNAME/install.sh" --prefix "$PKGTMP/prefix" --no-bashrc >/dev/null 2>&1
+"$PKGTMP/x/$PNAME/install.sh" --prefix "$PKGTMP/prefix" --no-rc >/dev/null 2>&1
 [ -x "$PKGTMP/prefix/bin/namo_complete" ] \
   && ok "installs a runnable binary into the prefix" || bad "binary not installed"
 [ -f "$PKGTMP/prefix/share/namo_complete/namo_complete.bash" ] && \
+[ -f "$PKGTMP/prefix/share/namo_complete/namo_complete.zsh" ] && \
 [ ! -e "$PKGTMP/prefix/share/namo_complete/namo_live.bash" ] \
-  && ok "the shell side is one file" || bad "namo_live.bash is still being installed"
+  && ok "both shell integrations are installed" || bad "shell integrations are incomplete"
 
 out=$(env -u ANTHROPIC_API_KEY NAMO_LINE='gi' NAMO_CWD="$PWD" \
         "$PKGTMP/prefix/bin/namo_complete" </dev/null 2>&1); rc=$?
@@ -1220,12 +1304,12 @@ out=$(env -u ANTHROPIC_API_KEY NAMO_LINE='gi' NAMO_CWD="$PWD" \
 # Captured rather than piped: `grep -q` closes the pipe on its first match, and
 # the installer runs under `set -o pipefail` here.
 instout=$(env BASHRC=/dev/null "$PKGTMP/x/$PNAME/install.sh" \
-            --prefix "$PKGTMP/p4" --no-bashrc 2>/dev/null)
+            --prefix "$PKGTMP/p4" --no-rc 2>/dev/null)
 printf '%s\n' "$instout" | grep -q 'namo_complete .*commit ' \
   && ok "the installer prints the build it just installed" \
   || bad "install output does not say which build landed"
 
-# .bashrc handling: adds once, never duplicates, and honours --no-bashrc.
+# .bashrc handling: adds once, never duplicates, and honours --no-rc.
 : > "$PKGTMP/bashrc"
 BASHRC="$PKGTMP/bashrc" "$PKGTMP/x/$PNAME/install.sh" --prefix "$PKGTMP/p2" >/dev/null 2>&1
 BASHRC="$PKGTMP/bashrc" "$PKGTMP/x/$PNAME/install.sh" --prefix "$PKGTMP/p2" >/dev/null 2>&1
@@ -1234,9 +1318,9 @@ n=$(grep -c 'namo_complete.bash' "$PKGTMP/bashrc" 2>/dev/null || echo 0)
              || bad "expected 1 source line in .bashrc, found $n"
 
 : > "$PKGTMP/bashrc2"
-BASHRC="$PKGTMP/bashrc2" "$PKGTMP/x/$PNAME/install.sh" --prefix "$PKGTMP/p3" --no-bashrc >/dev/null 2>&1
-[ ! -s "$PKGTMP/bashrc2" ] && ok "--no-bashrc leaves .bashrc untouched" \
-                           || bad "--no-bashrc modified .bashrc"
+BASHRC="$PKGTMP/bashrc2" "$PKGTMP/x/$PNAME/install.sh" --prefix "$PKGTMP/p3" --no-rc >/dev/null 2>&1
+[ ! -s "$PKGTMP/bashrc2" ] && ok "--no-rc leaves .bashrc untouched" \
+                           || bad "--no-rc modified .bashrc"
 
 res=$(NAMO_BIN="$PKGTMP/prefix/bin/namo_complete" bash -i -c '
   source '"$PKGTMP"'/prefix/share/namo_complete/namo_complete.bash 2>/dev/null
@@ -1253,9 +1337,9 @@ if [ "$LIVE" = "--live" ]; then
     bad "no real key: put ANTHROPIC_API_KEY in .env for --live"
   else
     export ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY_REAL"
-    start=$(date +%s%N)
+    start=$(ns_now)
     out=$(payload | env NAMO_LINE='git com' NAMO_CWD="$PWD" NAMO_CACHE=0 "$BIN" 2>/tmp/namo_live_err)
-    ms=$(( ($(date +%s%N) - start) / 1000000 ))
+    ms=$(( ($(ns_now) - start) / 1000000 ))
     if [ -s /tmp/namo_live_err ]; then
       bad "live call reported an error: $(head -1 /tmp/namo_live_err)"
     elif printf '%s' "$out" | grep -q '^git '; then

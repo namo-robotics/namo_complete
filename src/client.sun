@@ -1,20 +1,13 @@
-// client.sun - HTTPS via the curl binary.
+// client.sun - HTTP and verified HTTPS without a subprocess.
 //
-// Sun's stdlib has TCP but no TLS, so the request goes out through curl. It is
-// run with sun.process.Command, which execs curl directly: there is no shell,
-// so no command string to quote and nothing user-controlled to escape.
-//
-// The API key is the one argument that must not be visible: argv shows up in
-// `ps`, so the key goes down curl's stdin as a one-line config file (`-K -`)
-// and never touches the disk or the process table. Everything else -- the URL,
-// the fixed headers, the path of the request body -- rides in argv, where the
-// kernel keeps the arguments apart and no quoting rules apply.
+// Production requests use Sun's TLS bundle. Plain HTTP remains supported for
+// NAMO_ENDPOINT so the test suite can run against a loopback mock server.
 
 public module namo {
-  using sun;
-  using sun.io;
-  using sun.process;
+  using std;
+  using tls;
 
+  // Holds parsed suggestions or a user-facing request failure.
   public class Reply {
     public var suggestions: Vec<String>;
     public var failed: bool;
@@ -23,17 +16,28 @@ public module namo {
     // string is the only way a failure can reach the user; see daemon.sun.
     public var error: String;
 
-    public function init(alloc: ref HeapAllocator) {
+    init(alloc: ref HeapAllocator) {
       this.suggestions = Vec<String>(alloc, 4);
       this.failed = false;
       this.error = String(alloc, "");
     }
   }
 
-  // curl's config format is line-based and understands backslash escapes
-  // inside a quoted value, so a key carrying a newline or a quote could add
-  // directives of its own. Keys never contain either; one that does is
-  // rejected rather than escaped.
+  class Endpoint {
+    var secure: bool;
+    var host: String;
+    var port: i32;
+    var path: String;
+
+    init(alloc: ref HeapAllocator) {
+      this.secure = true;
+      this.host = String(alloc, "");
+      this.port = 443;
+      this.path = String(alloc, "/");
+    }
+  }
+
+  // Reject bytes that cannot safely appear inside an HTTP header value.
   function usable_key(key: const ref String) bool {
     if (key.length() == 0) {
       return false;
@@ -47,15 +51,142 @@ public module namo {
     return true;
   }
 
-  // The whole of curl's stdin: the header that must stay out of `ps`.
-  function build_conf(alloc: ref HeapAllocator, cfg: const ref Config) String {
-    var conf = String(alloc, "header = \"x-api-key: ");
-    conf.append(cfg.api_key);
-    conf.append("\"\n");
-    return conf;
+  // Accept DNS names and IPv4 literals without header delimiters.
+  function usable_host_char(c: u8) bool {
+    return (c >= b'a' and c <= b'z') or (c >= b'A' and c <= b'Z') or (c >= b'0' and c <= b'9') or c == b'.' or c == b'-';
   }
 
-  public function call_api(alloc: ref HeapAllocator, cfg: const ref Config, body: ref String) Reply, IError {
+  function parse_endpoint(alloc: ref HeapAllocator, raw: const ref String) Endpoint throws IError {
+    var out = Endpoint(alloc);
+    var start: i64 = 0;
+    if (raw.starts_with("https://")) {
+      start = 8;
+    } else {
+      if (raw.starts_with("http://")) {
+        out.secure = false;
+        out.port = 80;
+        start = 7;
+      } else {
+        throw Error(-1, "NAMO_ENDPOINT must start with http:// or https://");
+      }
+    }
+
+    var slash: i64 = raw.length();
+    for (var i: i64 = start; i < raw.length(); i = i + 1) {
+      if (raw.at(i) == b'/') {
+        slash = i;
+        break;
+      }
+    }
+    var colon: i64 = -1;
+    for (var i: i64 = start; i < slash; i = i + 1) {
+      if (raw.at(i) == b':') {
+        colon = i;
+      }
+    }
+    var host_end: i64 = slash;
+    if (colon >= 0) {
+      host_end = colon;
+      var port_text = raw.substr(alloc, colon + 1, slash - colon - 1);
+      var parsed_port: i64 = match port_text.parse_i64() {
+        Option.Some(value) => value,
+        Option.None => throw Error(-1, "NAMO_ENDPOINT has an invalid port")
+      };
+      if (parsed_port <= 0 or parsed_port > 65535) {
+        throw Error(-1, "NAMO_ENDPOINT has an invalid port");
+      }
+      out.port = _convert<i32>(parsed_port);
+    }
+    if (host_end <= start) {
+      throw Error(-1, "NAMO_ENDPOINT has an invalid host");
+    }
+    out.host = raw.substr(alloc, start, host_end - start);
+    for (var i: i64 = 0; i < out.host.length(); i = i + 1) {
+      var c: u8 = out.host.at(i);
+      if (usable_host_char(c) == false) {
+        throw Error(-1, "NAMO_ENDPOINT has an invalid host");
+      }
+    }
+    if (slash < raw.length()) {
+      out.path = raw.substr(alloc, slash, raw.length() - slash);
+    }
+    if (out.path.contains("#")) {
+      throw Error(-1, "NAMO_ENDPOINT must not contain a fragment");
+    }
+    for (var i: i64 = 0; i < out.path.length(); i = i + 1) {
+      var c: u8 = out.path.at(i);
+      if (c <= 32 or c == 127) {
+        throw Error(-1, "NAMO_ENDPOINT has an invalid path");
+      }
+    }
+    return out;
+  }
+
+  function build_request(alloc: ref HeapAllocator, cfg: const ref Config, endpoint: const ref Endpoint, body: const ref String) String {
+    var req = String(alloc, "POST ");
+    req.append(endpoint.path);
+    req.append(" HTTP/1.1");
+    append_crlf(req);
+    req.append("Host: ");
+    req.append(endpoint.host);
+    if ((endpoint.secure and endpoint.port != 443) or (endpoint.secure == false and endpoint.port != 80)) {
+      req.append(":");
+      req.append(endpoint.port);
+    }
+    append_crlf(req);
+    req.append("anthropic-version: 2023-06-01");
+    append_crlf(req);
+    req.append("x-api-key: ");
+    req.append(cfg.api_key);
+    append_crlf(req);
+    req.append("content-type: application/json");
+    append_crlf(req);
+    req.append("content-length: ");
+    req.append(body.length());
+    append_crlf(req);
+    req.append("connection: close");
+    append_crlf(req);
+    append_crlf(req);
+    req.append(body);
+    return req;
+  }
+
+  function read_tls(alloc: ref HeapAllocator, endpoint: ref Endpoint, request: ref String) String throws IError {
+    var stream = TlsStream();
+    stream.connect(endpoint.host, endpoint.port);
+    stream.send_string(request);
+    var raw = String(alloc, "");
+    var chunk = ContiguousBuffer<u8>(alloc, 8192);
+    var n: i64 = stream.recv(chunk);
+    while (n > 0) {
+      for (var i: i64 = 0; i < n; i = i + 1) {
+        raw.append_char(chunk.get_unchecked(i));
+      }
+      n = stream.recv(chunk);
+    }
+    stream.close();
+    return raw;
+  }
+
+  function read_tcp(alloc: ref HeapAllocator, endpoint: ref Endpoint, request: const ref String) String throws IError {
+    var stream = TcpStream();
+    stream.connect_host(endpoint.host, endpoint.port);
+    stream.send_string(request);
+    var raw = String(alloc, "");
+    var chunk = ContiguousBuffer<u8>(alloc, 8192);
+    var n: i64 = stream.recv(chunk);
+    while (n > 0) {
+      for (var i: i64 = 0; i < n; i = i + 1) {
+        raw.append_char(chunk.get_unchecked(i));
+      }
+      n = stream.recv(chunk);
+    }
+    stream.close();
+    return raw;
+  }
+
+  // Send one request to the configured HTTP or HTTPS endpoint.
+  public function call_api(alloc: ref HeapAllocator, cfg: const ref Config, body: ref String) Reply throws IError {
     var reply = Reply(alloc);
 
     if (usable_key(cfg.api_key) == false) {
@@ -64,64 +195,33 @@ public module namo {
       return reply;
     }
 
-    // One request body per process, so a daemon and an Alt-O run in the
-    // same shell cannot overwrite each other's file.
-    ensure_dir_p(alloc, cfg.runtime_dir);
-    var p_body = cfg.rt_path(alloc, "body.");
-    p_body.append(pid());
-    p_body.append(".json");
-    write_string(p_body, body);
-
-    var data_arg = String(alloc, "@");
-    data_arg.append(p_body);
-
-    var cmd = Command(alloc, "curl");
-    cmd.arg("-sS");
-    cmd.arg("--max-time");
-    cmd.arg("8");
-    cmd.arg("-K");
-    cmd.arg("-");
-    cmd.arg("-H");
-    cmd.arg("anthropic-version: 2023-06-01");
-    cmd.arg("-H");
-    cmd.arg("content-type: application/json");
-    cmd.arg("--data-binary");
-    cmd.arg(data_arg);
-    cmd.arg(cfg.endpoint);
-    cmd.stdin(Stdio.Piped);
-    cmd.stdout(Stdio.Piped);
-    cmd.stderr(Stdio.Piped);
-
-    var child = cmd.start();
-    var conf = build_conf(alloc, cfg);
-    child.write_stdin(conf);
-    child.close_stdin();
-    // Drains both pipes while curl runs, so a large response cannot wedge it.
-    var result = child.collect(alloc);
-
-    remove_path(alloc, p_body);
-
-    if (result.status() != 0) {
-      var m = String(alloc, "[namo] curl exit ");
-      m.append(result.status());
-      m.append(": ");
-      m.append(result.stderr());
-      m.append("\n");
-      eprint(m);
-      reply.failed = true;
-      reply.error = String(alloc, "curl exit ");
-      reply.error.append(result.status());
-      return reply;
+    var endpoint = parse_endpoint(alloc, cfg.endpoint);
+    var request = build_request(alloc, cfg, endpoint, body);
+    var raw = String(alloc, "");
+    if (endpoint.secure) {
+      raw = read_tls(alloc, endpoint, request);
+    } else {
+      raw = read_tcp(alloc, endpoint, request);
     }
-
-    parse_reply(alloc, cfg, result.stdout(), reply);
+    var response = HttpClientResponse(alloc);
+    parse_response(alloc, raw, response);
+    parse_reply(alloc, cfg, response.body, reply);
+    if ((response.status < 200 or response.status >= 300) and (reply.failed == false or reply.error.equals_literal("could not parse api response"))) {
+      var message = String(alloc, "HTTP status ");
+      message.append(response.status);
+      eprint("[namo] request failed with ");
+      eprint(message);
+      eprint("\n");
+      reply.failed = true;
+      reply.error = message;
+    }
     return reply;
   }
 
   // Pull the completion lines out of a Messages API response.
   public function parse_reply(alloc: ref HeapAllocator, cfg: const ref Config, raw: const ref String, reply: ref Reply) void {
     try {
-      var doc = json_parse(alloc, raw);
+      var doc = parse_json(alloc, raw);
 
       if (doc.has("error")) {
         var msg = doc.get("error").get("message").as_string();

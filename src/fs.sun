@@ -1,6 +1,6 @@
-// fs.sun - the few file helpers sun.io does not already provide.
+// fs.sun - the few file helpers std.io does not already provide.
 //
-// sun.io takes a `ref String` path directly, so reading and writing whole
+// std.io takes a `ref String` path directly, so reading and writing whole
 // files is done with read_to_string / write_string at the call site. What is
 // left here is the handful of calls whose failure is not an error to anyone --
 // a directory that already exists, a file that is already gone -- and two
@@ -9,14 +9,14 @@
 // Directories are created 0700 and every file we write lives inside one, so
 // nothing here needs to name a file mode.
 //
-// sun.io borrows its paths as `ref String`, not `const ref`, so a path read
+// std.io borrows its paths as `ref String`, not `const ref`, so a path read
 // out of a `const ref Config` cannot be opened. That is why `cfg` stays `ref`
 // in every function that opens one of its files (and `path` does here), while
 // the rest of the program borrows it const.
 
 public module namo {
-  using sun;
-  using sun.io;
+  using std;
+  using std.io;
 
   public var MODE_0700: i32 = 448;
 
@@ -45,6 +45,7 @@ public module namo {
     }
   }
 
+  // Remove a file while tolerating an already-missing path.
   public function remove_path(alloc: ref HeapAllocator, path: ref String) void {
     try {
       remove_file(path);

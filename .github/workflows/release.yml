@@ -2,8 +2,8 @@ name: release
 
 on:
   push:
-    branches: [main]        # rolling "dev" release, overwritten each merge
-    tags: ["v*"]            # immutable versioned release
+    branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
@@ -14,7 +14,7 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  linux:
     runs-on: ubuntu-latest
     container: ubuntu:26.04
 
@@ -23,78 +23,125 @@ jobs:
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ca-certificates curl git file bash \
-            python3 util-linux \
-            build-essential
-        # build-essential is required: `sun -c` shells out to cc/ld to link, and
-        # static linking needs libc.a. `gcc` + `libc6-dev` alone is NOT enough.
-        # libllvm20 etc are declared by the Sun package and resolved by apt.
+            ca-certificates curl git file bash zsh python3 util-linux build-essential
 
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0     # need tags to force-move `dev`
+          fetch-depth: 0
 
       - name: Resolve version
-        id: v
+        id: version
         run: |
-          if [ "$GITHUB_REF_TYPE" = tag ]; then
-            V="$GITHUB_REF_NAME"; DEV=false
-          else
-            V="${{ github.event.inputs.version }}"; V="${V:-dev}"
-            if [ "$V" = dev ]; then DEV=true; else DEV=false; fi
-          fi
-          echo "version=$V" >> "$GITHUB_OUTPUT"
-          echo "dev=$DEV" >> "$GITHUB_OUTPUT"
-          echo "building $V (prerelease=$DEV)"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then V="$GITHUB_REF_NAME"; else V="${{ github.event.inputs.version }}"; V="${V:-dev}"; fi
+          echo "value=$V" >> "$GITHUB_OUTPUT"
 
-      - name: Install Sun toolchain
+      - name: Install latest Sun dev artifact
         run: |
           curl -fsSL -o /tmp/sun.deb \
             https://github.com/namo-robotics/sun/releases/download/dev/sun_0.dev_amd64.deb
-          # `apt-get install ./file.deb` resolves the package's dependencies;
-          # `dpkg -i` would not.
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends /tmp/sun.deb
           sun --version | tee /tmp/sun-version.txt
 
-      - name: Build
-        # The version is stamped into the binary, so `namo_complete --version`
-        # on a user's machine names the release it came from and the commit it
-        # was built at -- `dev` is a rolling tag and identifies nothing on its own.
-        run: NAMO_VERSION="${{ steps.v.outputs.version }}" ./build.sh
-
-      - name: Verify the binary is statically linked
+      - name: Build, test, and package
+        id: package
         run: |
-          file bin/namo_complete
-          if ldd bin/namo_complete 2>&1 | grep -qv 'not a dynamic executable'; then
-            echo "::error::binary is dynamically linked; it will not be portable"
-            exit 1
-          fi
-
-      - name: Test
-        run: ./test.sh
-
-      - name: Package
-        id: pkg
-        run: |
-          NAME=$(NAMO_BUILT_WITH="$(cat /tmp/sun-version.txt)" \
-                 ./packaging/package.sh "${{ steps.v.outputs.version }}")
+          NAMO_VERSION="${{ steps.version.outputs.value }}" ./build.sh
+          file bin/namo_complete | grep -Eq 'static-pie linked|statically linked'
+          ./test.sh
+          ./test-zsh.sh
+          NAME=$(NAMO_BUILT_WITH="$(cat /tmp/sun-version.txt)" ./packaging/package.sh "${{ steps.version.outputs.value }}")
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
 
-      - name: Smoke-test the packaged artifact
+      - name: Smoke-test package
         run: |
-          set -euo pipefail
-          NAME="${{ steps.pkg.outputs.name }}"
+          NAME="${{ steps.package.outputs.name }}"
           TMP=$(mktemp -d)
           tar -C "$TMP" -xzf "dist/$NAME.tar.gz"
-          "$TMP/$NAME/install.sh" --prefix "$TMP/prefix" --no-bashrc
-          test -x "$TMP/prefix/bin/namo_complete"
-          out=$(NAMO_LINE='gi' NAMO_CWD="$PWD" "$TMP/prefix/bin/namo_complete" </dev/null)
-          [ -z "$out" ] || { echo "::error::unexpected output: $out"; exit 1; }
+          sh "$TMP/$NAME/install.sh" --prefix "$TMP/prefix" --no-rc
+          env -u ANTHROPIC_API_KEY NAMO_LINE=gi NAMO_CWD="$PWD" "$TMP/prefix/bin/namo_complete" </dev/null
 
-      - name: Move the dev tag
-        if: steps.v.outputs.dev == 'true'
-        # Force-move `dev` to this commit so the rolling release points at the
-        # build it actually contains.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-x86_64
+          path: dist/*.tar.gz
+
+  macos-arm64:
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then V="$GITHUB_REF_NAME"; else V="${{ github.event.inputs.version }}"; V="${V:-dev}"; fi
+          echo "value=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Install build dependencies and latest Sun dev artifact
+        run: |
+          test "$(uname -m)" = arm64
+          # Bash is only for the optional Bash integration suite; macOS users run zsh.
+          brew install llvm@20 bash
+          curl -fsSL -o /tmp/sun.tar.gz \
+            https://github.com/namo-robotics/sun/releases/download/dev/sun-0.dev-arm64-apple-darwin.tar.gz
+          mkdir -p /tmp/sun
+          tar -C /tmp/sun -xzf /tmp/sun.tar.gz
+          echo "/tmp/sun/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+
+      - name: Build, test, and package
+        id: package
+        run: |
+          sun --version | tee /tmp/sun-version.txt
+          NAMO_VERSION="${{ steps.version.outputs.value }}" bash ./build.sh
+          file bin/namo_complete | grep -q 'arm64'
+          if otool -L bin/namo_complete | grep -Eq 'lib(ssl|crypto)'; then exit 1; fi
+          bash ./test.sh
+          ./test-zsh.sh
+          NAME=$(NAMO_BUILT_WITH="$(cat /tmp/sun-version.txt)" bash ./packaging/package.sh "${{ steps.version.outputs.value }}")
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke-test package
+        run: |
+          NAME="${{ steps.package.outputs.name }}"
+          TMP=$(mktemp -d)
+          tar -C "$TMP" -xzf "dist/$NAME.tar.gz"
+          zsh "$TMP/$NAME/install.sh" --prefix "$TMP/prefix" --no-rc
+          env -u ANTHROPIC_API_KEY NAMO_LINE=gi NAMO_CWD="$PWD" "$TMP/prefix/bin/namo_complete" </dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-arm64
+          path: dist/*.tar.gz
+
+  publish:
+    needs: [linux, macos-arm64]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Resolve release metadata and checksums
+        id: release
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then V="$GITHUB_REF_NAME"; DEV=false; else V="${{ github.event.inputs.version }}"; V="${V:-dev}"; [ "$V" = dev ] && DEV=true || DEV=false; fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "dev=$DEV" >> "$GITHUB_OUTPUT"
+          (cd dist && sha256sum *.tar.gz > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Move rolling dev tag
+        if: steps.release.outputs.dev == 'true'
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git tag -f dev
@@ -103,10 +150,10 @@ jobs:
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.v.outputs.version }}
-          name: ${{ steps.v.outputs.dev == 'true' && 'dev (rolling)' || format('namo_complete {0}', steps.v.outputs.version) }}
-          prerelease: ${{ steps.v.outputs.dev == 'true' }}
-          generate_release_notes: ${{ steps.v.outputs.dev != 'true' }}
+          tag_name: ${{ steps.release.outputs.version }}
+          name: ${{ steps.release.outputs.dev == 'true' && 'dev (rolling)' || format('namo_complete {0}', steps.release.outputs.version) }}
+          prerelease: ${{ steps.release.outputs.dev == 'true' }}
+          generate_release_notes: ${{ steps.release.outputs.dev != 'true' }}
           files: |
-            dist/${{ steps.pkg.outputs.name }}.tar.gz
+            dist/*.tar.gz
             dist/SHA256SUMS

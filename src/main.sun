@@ -1,14 +1,14 @@
-// namo_complete - LLM-powered bash command completion.
+// namo_complete - LLM-powered shell command completion.
 //
 // Reads the partial command line from the environment and the recent history
 // from stdin, lists the working directory itself, asks Claude for completions,
-// and writes the candidates to stdout one per line. Bash puts the chosen line
-// into the readline buffer; nothing here ever executes a command.
+// and writes the candidates to stdout one per line. The shell integration puts the chosen line
+// into its editor buffer; nothing here ever executes a command.
 //
 // Any failure is silent on stdout so the shell prompt degrades gracefully.
 
-using sun;
-using sun.env;
+using std;
+using std.env;
 using namo;
 
 function emit(alloc: ref HeapAllocator, items: const ref Vec<String>) void {
@@ -36,11 +36,12 @@ function print_version(alloc: ref HeapAllocator) void {
 
 function main(argc: i32, argv: raw_ptr<raw_ptr<i8>>) i32 {
   var alloc = make_heap_allocator();
+  var cfg = Config(alloc);
 
   // The only thing here that reads argv at all -- every setting comes from the
   // environment (see config.sun). Answered before the config, so that a shell
   // with NAMO_DISABLE=1 can still be asked what it has installed.
-  var cli = args(alloc, argc, argv);
+  var cli = cfg.environment.args(argc, argv);
   for (var i: i64 = 1; i < cli.size(); i = i + 1) {
     var arg = cli.get_unchecked(i);
     if (arg.equals_literal("--version") or arg.equals_literal("-V")) {
@@ -48,8 +49,6 @@ function main(argc: i32, argv: raw_ptr<raw_ptr<i8>>) i32 {
       return 0;
     }
   }
-
-  var cfg = Config(alloc);
 
   if (cfg.disabled) {
     return 0;
@@ -138,7 +137,7 @@ function main(argc: i32, argv: raw_ptr<raw_ptr<i8>>) i32 {
 }
 
 manifest {
-    suns: [
+    source_files: [
         "version.sun",
         "util.sun",
         "fs.sun",
@@ -150,5 +149,9 @@ manifest {
         "daemon.sun",
         "cmd_output_relay.sun"
     ]
-    moons: ["stdlib.moon"]
+    libraries: ["stdlib.moon", "tls.moon"]
+    target: {
+        linux: { source_files: ["platform_linux.sun"] }
+        macos: { source_files: ["platform_macos.sun"] }
+    }
 }

@@ -1,23 +1,22 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Install namo_complete from an unpacked release directory.
 #
-#   ./install.sh [--prefix DIR] [--no-bashrc]
+#   ./install.sh [--prefix DIR] [--no-rc]
 #
-# Copies into <prefix> (default ~/.local) and adds the source line to
-# ~/.bashrc unless --no-bashrc is given. Adding the line is idempotent.
-set -euo pipefail
+# Installs the binary and shell integrations, then updates the platform default
+# shell configuration. Adding the source line is idempotent.
+set -eu
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PREFIX="${PREFIX:-$HOME/.local}"
-BASHRC="${BASHRC:-$HOME/.bashrc}"
-EDIT_BASHRC=1
+EDIT_RC=1
 MARKER="# namo_complete"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --prefix) PREFIX="$2"; shift 2 ;;
     --prefix=*) PREFIX="${1#*=}"; shift ;;
-    --no-bashrc) EDIT_BASHRC=0; shift ;;
+    --no-rc|--no-bashrc) EDIT_RC=0; shift ;;
     -h|--help) sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -28,51 +27,64 @@ done
   exit 1
 }
 
+case "${NAMO_INSTALL_OS:-$(uname -s)}" in
+  Darwin|macos)
+    SHELL_KIND=zsh
+    SHELL_FILE=namo_complete.zsh
+    RC_FILE="${ZSHRC:-${ZDOTDIR:-$HOME}/.zshrc}"
+    ;;
+  *)
+    SHELL_KIND=bash
+    SHELL_FILE=namo_complete.bash
+    RC_FILE="${BASHRC:-$HOME/.bashrc}"
+    ;;
+esac
+
 BIN_DIR="$PREFIX/bin"
 SHARE_DIR="$PREFIX/share/namo_complete"
 mkdir -p "$BIN_DIR" "$SHARE_DIR"
 
-install -m 0755 "$HERE/bin/namo_complete"                      "$BIN_DIR/namo_complete"
+install -m 0755 "$HERE/bin/namo_complete" "$BIN_DIR/namo_complete"
 install -m 0644 "$HERE/share/namo_complete/namo_complete.bash" "$SHARE_DIR/"
-[ -f "$HERE/VERSION" ]    && install -m 0644 "$HERE/VERSION"    "$SHARE_DIR/VERSION"
-[ -f "$HERE/BUILT-WITH" ] && install -m 0644 "$HERE/BUILT-WITH" "$SHARE_DIR/BUILT-WITH"
+install -m 0644 "$HERE/share/namo_complete/namo_complete.zsh" "$SHARE_DIR/"
+[ -f "$HERE/VERSION" ] &&
+  install -m 0644 "$HERE/VERSION" "$SHARE_DIR/VERSION"
+[ -f "$HERE/BUILT-WITH" ] &&
+  install -m 0644 "$HERE/BUILT-WITH" "$SHARE_DIR/BUILT-WITH"
 
-printf 'installed:\n  %s\n  %s/namo_complete.bash\n' "$BIN_DIR/namo_complete" "$SHARE_DIR"
+printf 'installed:\n  %s\n  %s/%s\n' \
+  "$BIN_DIR/namo_complete" "$SHARE_DIR" "$SHELL_FILE"
 
-# Say which build this is, from the binary itself: `dev` is a rolling tag, so
-# the version alone does not identify one. Same string `namo_complete --version`
-# prints later, which is how a shell that is misbehaving gets identified.
 "$BIN_DIR/namo_complete" --version 2>/dev/null | sed 's/^/  /' || true
 
-# An older copy earlier on PATH is the quiet failure this catches: the install
-# succeeds, and the shell goes on running the other one.
 other=$(command -v namo_complete 2>/dev/null || true)
 if [ -n "$other" ] && [ "$other" != "$BIN_DIR/namo_complete" ]; then
   printf '\nwarning: %s comes first on your PATH and will be used instead:\n  %s\n' \
     "namo_complete" "$($other --version 2>/dev/null | head -1 || echo "$other")" >&2
 fi
 
-SOURCE_LINE="[ -f \"$SHARE_DIR/namo_complete.bash\" ] && . \"$SHARE_DIR/namo_complete.bash\""
+SOURCE_LINE="[ -f \"$SHARE_DIR/$SHELL_FILE\" ] && . \"$SHARE_DIR/$SHELL_FILE\""
 
-if [ "$EDIT_BASHRC" = 1 ]; then
-  if [ -f "$BASHRC" ] && grep -qF "$MARKER" "$BASHRC"; then
-    printf '  %s already sourced in %s\n' "namo_complete" "$BASHRC"
+if [ "$EDIT_RC" = 1 ]; then
+  if [ -f "$RC_FILE" ] && grep -qF "$MARKER" "$RC_FILE"; then
+    printf '  %s already sourced in %s\n' "namo_complete" "$RC_FILE"
   else
-    printf '\n%s\n%s\n' "$MARKER" "$SOURCE_LINE" >> "$BASHRC"
-    printf '  added to %s\n' "$BASHRC"
+    printf '\n%s\n%s\n' "$MARKER" "$SOURCE_LINE" >> "$RC_FILE"
+    printf '  added %s integration to %s\n' "$SHELL_KIND" "$RC_FILE"
   fi
 else
-  printf '\nAdd to your ~/.bashrc:\n\n    %s\n' "$SOURCE_LINE"
+  printf '\nAdd to %s:\n\n    %s\n' "$RC_FILE" "$SOURCE_LINE"
 fi
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
-  *) printf '\n%s is not on your PATH:\n    export PATH="%s:$PATH"\n' "$BIN_DIR" "$BIN_DIR" ;;
+  *) printf '\n%s is not on your PATH:\n    export PATH="%s:$PATH"\n' \
+       "$BIN_DIR" "$BIN_DIR" ;;
 esac
 
 cat <<EOF
 
-Set your API key, then open a new shell:
+Set your API key, then open a new $SHELL_KIND shell:
 
     export ANTHROPIC_API_KEY=sk-ant-...
 EOF
