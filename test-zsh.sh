@@ -43,9 +43,10 @@ out=$("$ZSH_BIN" -dfi -c "$setup
   _namo_key_request a 1
   bindkey -M emacs \"^[o\"
   _namo_bind_keys darwin
-  bindkey -M emacs 'ø'
-  bindkey -M emacs 'å'
-  bindkey -M emacs '©'
+  [[ \$(bindkey -M emacs 'ø') == *namo-complete ]] &&
+  [[ \$(bindkey -M emacs 'å') == *namo-alternatives ]] &&
+  [[ \$(bindkey -M emacs '©') == *namo-ask ]] &&
+    print -r -- 'MACOS_OPTION_BINDINGS=1'
   add-zle-hook-widget -L line-pre-redraw
 " 2>&1)
 
@@ -59,9 +60,7 @@ printf '%s\n' "$out" | grep -q 'BUFFER=git status CURSOR=10' &&
 printf '%s\n' "$out" | grep -q '"\^\[o" namo-complete' &&
   ok "Alt-O is bound in the zsh emacs keymap" ||
   bad "Alt-O binding missing: $out"
-printf '%s\n' "$out" | grep -q '"ø" namo-complete' &&
-printf '%s\n' "$out" | grep -q '"å" namo-alternatives' &&
-printf '%s\n' "$out" | grep -q '"©" namo-ask' &&
+printf '%s\n' "$out" | grep -q '^MACOS_OPTION_BINDINGS=1$' &&
   ok "macOS Option characters are bound in the zsh emacs keymap" ||
   bad "macOS Option character binding missing: $out"
 printf '%s\n' "$out" | grep -q '_namo_zle_line_changed' &&
