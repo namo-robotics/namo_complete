@@ -6,3 +6,7 @@
 - Never use git commands except for git status and git diff.
 - Never create PRs or issues unless specifically asked by the user.
 - Commit messages should follow the Linux style. Start with a title line containing a scope prefix, followed by concise bullet points summarizing each key change.
+
+## Commit messages
+- Subject: `<scope>: <description>` (scope = subsystem/package/area; imperative; no `feat`/`fix` types).
+- Body: blank line, then one concise bullet per key change if not already captured in the subject.
