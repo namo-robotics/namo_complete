@@ -314,7 +314,7 @@ _namo_read_question() {
   printf '\n\r\033[2K\033[36mask>\033[0m %s' "$q"
   while read -rsk 1 -u 0 ch; do
     case "$ch" in
-      '') break ;;
+      ''|$'\r'|$'\n') break ;;
       $'\003') printf '\n'; return 1 ;;
       $'\033')
         _namo_read_paste || { printf '\n'; return 1; }
