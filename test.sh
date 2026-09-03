@@ -848,13 +848,13 @@ fi
 # --------------------------------------------------------------------------
 head_ "5. live hints"
 # --------------------------------------------------------------------------
-# cache-only must never make a network call
-stop_mock
+# A dead, dedicated endpoint proves cache-only never makes a network call.
+# Keep the main mock alive: rebinding one port can stall connect() on macOS
+# and turn every later daemon assertion into a cascading failure.
 out=$(env NAMO_CACHE_ONLY=1 NAMO_LINE='git com' NAMO_CWD="$PWD" \
         NAMO_ENDPOINT='http://127.0.0.1:9/v1' "$BIN" </dev/null 2>&1); rc=$?
 [ "$rc" = 0 ] && ok "cache-only exits cleanly with the network down" \
               || bad "cache-only failed with the network down (rc=$rc)"
-python3 /tmp/namo_mock.py & MOCK_PID=$!; sleep 1
 
 # Keep the one-shot cache path cheap without treating process startup jitter as
 # a functional failure on shared CI runners.
@@ -1611,11 +1611,11 @@ kill_mock8() {
 # ---- content[0] is a thinking block, as it is on Opus 5 ----
 cat > /tmp/namo_mock8.py <<PY
 import http.server, json
-MODE = open('/tmp/namo_mock8_mode').read().strip()
 class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         self.rfile.read(int(self.headers.get('content-length', 0)))
-        if MODE == 'error':
+        mode = open('/tmp/namo_mock8_mode').read().strip()
+        if mode == 'error':
             r = {"type":"error","error":{"type":"invalid_request_error",
                  "message":"\`temperature\` is deprecated for this model."}}
         else:
@@ -1647,12 +1647,9 @@ out=$(payload | env NAMO_LINE='git com' NAMO_CWD="$PWD" NAMO_CACHE=0 \
 printf '%s' "$out" | grep -q '^git commit$' \
   && ok "completions found past a leading thinking block" \
   || bad "a thinking block at content[0] hid the completions (got: ${out:-<empty>})"
-kill_mock8
 
 # ---- a refused request reaches the row instead of vanishing ----
 echo error > /tmp/namo_mock8_mode
-python3 /tmp/namo_mock8.py & MOCK8_PID=$!
-sleep 1.2
 
 err=$(payload | env NAMO_LINE='git com' NAMO_CWD="$PWD" NAMO_CACHE=0 \
       NAMO_ENDPOINT="http://127.0.0.1:$PORT8/v1/messages" "$BIN" 2>&1 >/dev/null)
@@ -1688,10 +1685,7 @@ IFS= read -r -t 5 -u "$ERFD" sync_error
 printf '%s' "$sync_error" | grep -q $'^84\tE\t.*deprecated for this model' \
   && ok "the synchronous reply carries the API error" || bad "the synchronous reply hid the API error"
 # And it must go away again once the API answers.
-kill_mock8
 echo thinking > /tmp/namo_mock8_mode
-python3 /tmp/namo_mock8.py & MOCK8_PID=$!
-sleep 1.2
 error_end=$(wc -c < "$ET/tty")
 printf '%s\t%s\n' "$PWD" "git com" >&$EFD
 hint_after_error=0

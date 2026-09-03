@@ -14,6 +14,7 @@ A file for guiding coding agents.
 ## Commit messages
 - Subject: `<scope>: <description>` (scope = subsystem/package/area; imperative; no `feat`/`fix` types).
 - Body: blank line, then one concise bullet per key change if not already captured in the subject.
+- Do not add AI attribution to commits or PRs (no Co-Authored-By, Generated-with, tool names, or session links).
 
 ## Issues and PR Guidelinese
 

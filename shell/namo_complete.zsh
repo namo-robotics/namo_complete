@@ -282,15 +282,15 @@ _namo_read_paste() {
   emulate -L zsh
   typeset ch="" opener="" pasted="" marker=$'\033[201~'
   integer i=0
-  read -rsk 1 -t 0.05 ch || return 1
+  read -rsk 1 -u 0 -t 0.05 ch || return 1
   [[ "$ch" == '[' ]] || return 1
   for (( i = 0; i < 4; i++ )); do
-    read -rsk 1 ch || return 1
+    read -rsk 1 -u 0 ch || return 1
     opener+="$ch"
     [[ "$ch" == '~' ]] && break
   done
   [[ "$opener" == '200~' ]] || return 1
-  while read -rsk 1 ch; do
+  while read -rsk 1 -u 0 ch; do
     pasted+="$ch"
     (( ${#pasted} <= 16384 )) || return 1
     if (( ${#pasted} >= 6 )) && [[ "${pasted[-6,-1]}" == "$marker" ]]; then
@@ -310,7 +310,7 @@ _namo_read_question() {
   _NAMO_QUESTION=""
   local q="$BUFFER" ch=""
   printf '\n\r\033[2K\033[36mask>\033[0m %s' "$q"
-  while read -rsk 1 ch; do
+  while read -rsk 1 -u 0 ch; do
     case "$ch" in
       '') break ;;
       $'\003') printf '\n'; return 1 ;;
