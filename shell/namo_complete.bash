@@ -53,7 +53,7 @@ fi
 : "${NAMO_KEY:=\eo}"
 : "${NAMO_ALT_KEY:=\ea}"
 : "${NAMO_ASK_KEY:=\eg}"
-: "${NAMO_TIMEOUT:=10}"
+: "${NAMO_TIMEOUT:=30}"
 : "${NAMO_DYM:=1}"
 : "${NAMO_OUTPUT:=10}"
 

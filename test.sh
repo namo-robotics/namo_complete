@@ -439,6 +439,15 @@ out=$(NAMO_MODE=ask NAMO_QUERY='how big are these dirs' say)
 # --------------------------------------------------------------------------
 head_ "3. bash integration"
 # --------------------------------------------------------------------------
+timeout=$(bash -i -c '
+  unset NAMO_TIMEOUT
+  NAMO_BIN=/does/not/exist
+  source shell/namo_complete.bash 2>/dev/null
+  printf "%s" "$NAMO_TIMEOUT"
+' 2>/dev/null)
+[ "$timeout" = 30 ] && ok "Bash request timeout defaults to 30 seconds" \
+                     || bad "Bash request timeout default is $timeout"
+
 # Alt-O goes through the daemon: the shell writes a request into the FIFO and
 # reads the answer back, so a key press starts no process at all. The second
 # call proves it -- by then the path to the binary is a lie, and the answer

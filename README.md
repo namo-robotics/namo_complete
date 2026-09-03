@@ -93,7 +93,7 @@ history at all.
 | `NAMO_HINT_MIN`                              | `3`                    | Minimum characters before hinting                                                    |
 | `NAMO_HINT_PREFIX`                           | `hint: `               | Text in front of the hint row                                                        |
 | `NAMO_ERR_PREFIX`                            | `error: `               | Text in front of the row a failed call draws in place of a hint                      |
-| `NAMO_TIMEOUT`                               | `10`                   | Seconds before giving up                                                             |
+| `NAMO_TIMEOUT`                               | `30`                   | Seconds before giving up                                                             |
 | `NAMO_DYM` / `NAMO_DYM_PREFIX`               | `1` / `did you mean: ` | "did you mean" after *command not found*, and the text in front of it                |
 | `NAMO_OUTPUT`                                | `10`                   | Lines of the last command's output to send; `0` keeps none (hints still work)        |
 | `NAMO_HISTORY_LINES`                         | `50`                   | History commands sent; `0` disables                                                  |

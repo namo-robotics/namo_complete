@@ -26,8 +26,10 @@ fi
 '
 
 out=$("$ZSH_BIN" -dfi -c "$setup
+  unset NAMO_TIMEOUT
   NAMO_BIN=/does/not/exist
   source \"$ROOT/shell/namo_complete.zsh\"
+  print -r -- \"TIMEOUT=\$NAMO_TIMEOUT\"
   _namo_ask_daemon() { _NAMO_REPLY_OUT=\$'-\\tgit status\\tworking tree\\n' }
   BUFFER='git st'
   CURSOR=6
@@ -42,6 +44,10 @@ out=$("$ZSH_BIN" -dfi -c "$setup
   bindkey -M emacs \"^[o\"
   add-zle-hook-widget -L line-pre-redraw
 " 2>&1)
+
+printf '%s\n' "$out" | grep -q '^TIMEOUT=30$' &&
+  ok "zsh request timeout defaults to 30 seconds" ||
+  bad "zsh request timeout default is wrong: $out"
 
 printf '%s\n' "$out" | grep -q 'BUFFER=git status CURSOR=10' &&
   ok "Alt-O replaces the zsh edit buffer" ||

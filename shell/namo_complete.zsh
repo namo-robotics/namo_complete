@@ -17,7 +17,7 @@ autoload -Uz add-zsh-hook add-zle-hook-widget
 [[ -n ${NAMO_KEY+x} ]] || NAMO_KEY='\eo'
 [[ -n ${NAMO_ALT_KEY+x} ]] || NAMO_ALT_KEY='\ea'
 [[ -n ${NAMO_ASK_KEY+x} ]] || NAMO_ASK_KEY='\eg'
-[[ -n ${NAMO_TIMEOUT+x} ]] || NAMO_TIMEOUT=10
+[[ -n ${NAMO_TIMEOUT+x} ]] || NAMO_TIMEOUT=30
 [[ -n ${NAMO_DYM+x} ]] || NAMO_DYM=1
 [[ -n ${NAMO_OUTPUT+x} ]] || NAMO_OUTPUT=10
 
