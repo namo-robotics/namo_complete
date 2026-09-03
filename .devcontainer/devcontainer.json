@@ -4,6 +4,9 @@
 		"context": "..",
 		"dockerfile": "../Dockerfile"
 	},
+	// Bind mounts fail if the host source path is missing, so create the
+	// optional ones on the host before the container starts.
+	"initializeCommand": "mkdir -p \"${localEnv:HOME}${localEnv:USERPROFILE}/.codex\"",
 	"remoteUser": "ubuntu",
 	"updateRemoteUserUID": true,
 	"workspaceFolder": "/workspace",
