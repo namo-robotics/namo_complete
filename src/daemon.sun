@@ -39,6 +39,7 @@ public module namo {
   //
   //   <cwd> TAB STX <id> TAB <mode> TAB <line>      request
   //   <id> TAB <count>                              reply header
+  //   <id> TAB E TAB <message>                      failed request
   //   <id> TAB <candidate>                          ...that many times
   //
   // The id is echoed on every line so that an answer the shell has already
@@ -648,7 +649,7 @@ public module namo {
   // The shell is inside `read -t`, so an answer always goes back -- even an
   // empty one. A request that got no reply at all would leave it there until
   // the timeout, for nothing.
-  function reply_send(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, id: const ref String, items: const ref Vec<String>) void {
+  function reply_send(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, id: const ref String, items: const ref Vec<String>, error: const ref String) void {
     if (cfg.reply.length() == 0) {
       return;
     }
@@ -664,6 +665,21 @@ public module namo {
     var msg = String(alloc, "");
     msg.append(id);
     msg.append_char(CH_TAB);
+    if (error.length() > 0) {
+      msg.append("E");
+      msg.append_char(CH_TAB);
+      for (var e: i64 = 0; e < error.length() and e < ERR_MAX; e = e + 1) {
+        var c = error.at(e);
+        if (c < 32 or c == 127) {
+          msg.append_char(CH_SP);
+        } else {
+          msg.append_char(c);
+        }
+      }
+      msg.append_char(CH_NL);
+      var error_written: i64 = st.reply.write(msg);
+      return;
+    }
     msg.append(items.size());
     msg.append_char(CH_NL);
 
@@ -728,6 +744,7 @@ public module namo {
     }
 
     var out = Vec<String>(alloc, 4);
+    var error = String(alloc, "");
     var trimmed = subject.clone(alloc);
     trimmed.trim();
     // The same floor the one-shot run applies: two characters is not enough
@@ -750,6 +767,9 @@ public module namo {
       out = cache_lookup(alloc, cfg, key);
       if (out.size() == 0) {
         out = daemon_call(alloc, cfg, st, key);
+        if (out.size() == 0 and st.err.length() > 0) {
+          error = st.err.clone(alloc);
+        }
       }
 
       cfg.min_gap = saved_gap;
@@ -757,7 +777,7 @@ public module namo {
       cfg.line = String(alloc, "");
     }
 
-    reply_send(alloc, cfg, st, id, out);
+    reply_send(alloc, cfg, st, id, out, error);
   }
 
   // ------------------------------------------------------------------------

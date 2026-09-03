@@ -86,7 +86,7 @@ history at all.
 | Variable                                     | Default                | Meaning                                                                              |
 | -------------------------------------------- | ---------------------- | ------------------------------------------------------------------------------------ |
 | `ANTHROPIC_API_KEY`                          | —                      | Required                                                                             |
-| `NAMO_MODEL`                                 | `claude-haiku-4-5`     | Any Claude model                                                                     |
+| `NAMO_MODEL`                                 | `claude-opus-5`        | Any Claude model                                                                     |
 | `NAMO_BIN`                                   | `namo_complete`        | Binary path, if not on `PATH`                                                        |
 | `NAMO_KEY` / `NAMO_ALT_KEY` / `NAMO_ASK_KEY` | `\eo` / `\ea` / `\eg`  | The three shell key sequences                                                     |
 | `NAMO_DEBOUNCE` / `NAMO_QUIET`               | `0.2` / `0.05`         | Seconds of not typing before a request; how long a burst of typing is left to settle |
@@ -113,16 +113,15 @@ it in a shell that is already running means killing the daemon, and the next
 prompt starts a new one:
 
 ```sh
-export NAMO_MODEL=claude-opus-5
+export NAMO_MODEL=claude-haiku-4-5
 kill "$(cat "${XDG_RUNTIME_DIR:-/tmp/namo-$UID}/namo_complete/daemon_pid.$$")"
 ```
 
 Put the `export` in `~/.zshrc` on macOS or `~/.bashrc` on Linux to make it
-stick. A bigger model is slower, and
-the hint row is drawn while you type: `claude-haiku-4-5` is the default because
-it answers in about a second, where `claude-opus-5` takes three or more. The
-current models also think before they answer, which is billed out of the same
-token budget the answer comes from, so they are asked for a larger one. If a call fails -- a model that does not
+stick. `claude-opus-5` is the default for stronger ask-mode answers. The hint
+row is drawn while you type, so choose `claude-haiku-4-5` when lower latency
+matters more. Current models think before they answer, which is billed out of
+the same token budget the answer comes from, so they are asked for a larger one. If a call fails -- a model that does not
 exist, a key that has expired, no network -- the row says so instead of staying
 empty.
 

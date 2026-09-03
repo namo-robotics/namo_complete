@@ -55,9 +55,11 @@ typeset -g _NAMO_OFF=""
 typeset -g _NAMO_TTYFD=""
 typeset -g _NAMO_CAPTURE=""
 typeset -g _NAMO_REPLY_OUT=""
+typeset -g _NAMO_REPLY_ERROR=""
 typeset -g _NAMO_QUESTION=""
 typeset -g _NAMO_BUFFER_SENT=""
 typeset -g _NAMO_LAST_COMMAND=""
+typeset -g _NAMO_PASTE=""
 
 typeset -g _NAMO_BIN_PATH
 _NAMO_BIN_PATH=$(_namo_find_binary) || _NAMO_OFF=1
@@ -155,6 +157,7 @@ _namo_clear_hint_row() {
 
 _namo_ask_daemon() {
   _NAMO_REPLY_OUT=""
+  _NAMO_REPLY_ERROR=""
   [[ -n "$_NAMO_WFD" && -n "$_NAMO_RFD" ]] || return 1
   _namo_daemon_is_running || return 1
 
@@ -169,6 +172,10 @@ _namo_ask_daemon() {
     [[ "${line%%$'\t'*}" == "$id" ]] && break
   done
   n="${line#*$'\t'}"
+  if [[ "$n" == E$'\t'* ]]; then
+    _NAMO_REPLY_ERROR="${n#E$'\t'}"
+    return 2
+  fi
   [[ "$n" == <-> ]] || return 1
   for (( i = 0; i < n; i++ )); do
     IFS= read -r -t "$NAMO_TIMEOUT" -u $_NAMO_RFD line || return 1
@@ -270,6 +277,34 @@ _namo_pick_and_insert() {
   _namo_clear_hint_row
 }
 
+# Read one bracketed paste after its leading Escape byte.
+_namo_read_paste() {
+  emulate -L zsh
+  typeset ch="" opener="" pasted="" marker=$'\033[201~'
+  integer i=0
+  read -rsk 1 -t 0.05 ch || return 1
+  [[ "$ch" == '[' ]] || return 1
+  for (( i = 0; i < 4; i++ )); do
+    read -rsk 1 ch || return 1
+    opener+="$ch"
+    [[ "$ch" == '~' ]] && break
+  done
+  [[ "$opener" == '200~' ]] || return 1
+  while read -rsk 1 ch; do
+    pasted+="$ch"
+    (( ${#pasted} <= 16384 )) || return 1
+    if (( ${#pasted} >= 6 )) && [[ "${pasted[-6,-1]}" == "$marker" ]]; then
+      if (( ${#pasted} == 6 )); then pasted=""; else pasted="${pasted[1,-7]}"; fi
+      pasted="${pasted//$'\r'/ }"
+      pasted="${pasted//$'\n'/ }"
+      typeset -g _NAMO_PASTE="$pasted"
+      return 0
+    fi
+  done
+  return 1
+}
+
+
 _namo_read_question() {
   emulate -L zsh
   _NAMO_QUESTION=""
@@ -278,7 +313,11 @@ _namo_read_question() {
   while read -rsk 1 ch; do
     case "$ch" in
       '') break ;;
-      $'\003'|$'\033') printf '\n'; return 1 ;;
+      $'\003') printf '\n'; return 1 ;;
+      $'\033')
+        _namo_read_paste || { printf '\n'; return 1; }
+        q+="$_NAMO_PASTE"
+        printf '%s' "$_NAMO_PASTE" ;;
       $'\177'|$'\010')
         [[ -n "$q" ]] && { q="${q[1,-2]}"; printf '\b \b'; } ;;
       $'\025')
@@ -293,6 +332,11 @@ _namo_read_question() {
   _NAMO_QUESTION="$q"
 }
 
+# Show why an ask request left the editable line unchanged.
+_namo_ask_notice() {
+  printf '\r\033[2K\033[33mnamo:\033[0m %s\n' "$1"
+}
+
 _namo_key_request() {
   emulate -L zsh
   local mode="$1" force="$2"
@@ -302,8 +346,20 @@ _namo_key_request() {
     _namo_read_question || { [[ -n "${WIDGET:-}" ]] && zle reset-prompt; return 0; }
     [[ -z "${_NAMO_QUESTION//[[:space:]]/}" ]] &&
       { [[ -n "${WIDGET:-}" ]] && zle reset-prompt; return 0; }
-    _namo_ask_daemon a "$_NAMO_QUESTION" ||
-      { [[ -n "${WIDGET:-}" ]] && zle reset-prompt; return 0; }
+    if ! _namo_ask_daemon a "$_NAMO_QUESTION"; then
+      if [[ -n "$_NAMO_REPLY_ERROR" ]]; then
+        _namo_ask_notice "request failed: $_NAMO_REPLY_ERROR"
+      else
+        _namo_ask_notice "request timed out or the helper is unavailable"
+      fi
+      [[ -n "${WIDGET:-}" ]] && zle reset-prompt
+      return 0
+    fi
+    if [[ -z "${_NAMO_REPLY_OUT//[[:space:]]/}" ]]; then
+      _namo_ask_notice "no command returned; add missing paths or constraints"
+      [[ -n "${WIDGET:-}" ]] && zle reset-prompt
+      return 0
+    fi
   else
     [[ -z "${BUFFER//[[:space:]]/}" ]] && return 0
     _namo_ask_daemon c "$BUFFER" ||

@@ -95,6 +95,8 @@ _NAMO_REQ_ID=0
 _NAMO_OFF=""   # set if the plumbing could not be built; everything goes quiet
 _NAMO_TTYFD="" # dup of the real terminal, to fall back on if the relay dies
 _NAMO_CAPTURE="" # set while this shell's output really is going through a relay
+_NAMO_REPLY_ERROR=""
+_NAMO_PASTE=""
 
 # Resolved once. Doing it per prompt would be a command substitution, and this
 # is the only value the prompt hook needs from outside the shell.
@@ -232,6 +234,7 @@ _namo_clear_hint_row() {
 #
 #   <cwd> TAB STX <id> TAB <mode> TAB <subject>     out
 #   <id> TAB <count>                                back
+#   <id> TAB E TAB <message>                         failed request
 #   <id> TAB <flag> TAB <command> TAB <description> ...that many times
 #
 # The id is on every line, so an answer this shell has already given up waiting
@@ -239,6 +242,7 @@ _namo_clear_hint_row() {
 # next request. Leaves the candidates in _NAMO_REPLY_OUT.
 _namo_ask_daemon() {  # mode ("c" to complete, "a" to answer), subject
   _NAMO_REPLY_OUT=""
+  _NAMO_REPLY_ERROR=""
   [ -n "$_NAMO_WFD" ] && [ -n "$_NAMO_RFD" ] || return 1
   # Starting one here would fork, which is the thing being avoided; the prompt
   # hook keeps one running, or there is nothing to ask.
@@ -254,6 +258,10 @@ _namo_ask_daemon() {  # mode ("c" to complete, "a" to answer), subject
     [[ "${line%%$'\t'*}" == "$id" ]] && break
   done
   n="${line#*$'\t'}"
+  if [[ "$n" == E$'\t'* ]]; then
+    _NAMO_REPLY_ERROR="${n#E$'\t'}"
+    return 2
+  fi
   [[ "$n" =~ ^[0-9]+$ ]] || return 1
   for (( i = 0; i < n; i++ )); do
     IFS= read -r -t "$NAMO_TIMEOUT" -u "$_NAMO_RFD" line || return 1
@@ -547,6 +555,32 @@ _namo_read_question() {
   fi
 }
 
+# Read one bracketed paste after its leading Escape byte.
+_namo_read_paste() {
+  _NAMO_PASTE=""
+  local ch opener="" marker=$'\033[201~' i
+  IFS= read -rsN1 -t 0.05 ch || return 1
+  [[ "$ch" == '[' ]] || return 1
+  for (( i = 0; i < 4; i++ )); do
+    IFS= read -rsN1 ch || return 1
+    opener+="$ch"
+    [[ "$ch" == '~' ]] && break
+  done
+  [[ "$opener" == '200~' ]] || return 1
+  while IFS= read -rsN1 ch; do
+    _NAMO_PASTE+="$ch"
+    (( ${#_NAMO_PASTE} <= 16384 )) || return 1
+    if (( ${#_NAMO_PASTE} >= 6 )) && [[ "${_NAMO_PASTE: -6}" == "$marker" ]]; then
+      _NAMO_PASTE="${_NAMO_PASTE:0:${#_NAMO_PASTE}-6}"
+      _NAMO_PASTE="${_NAMO_PASTE//$'\r'/ }"
+      _NAMO_PASTE="${_NAMO_PASTE//$'\n'/ }"
+      return 0
+    fi
+  done
+  return 1
+}
+
+
 _namo_read_question_on_tty() {
   _NAMO_REPAINTED=0
   _NAMO_QUESTION=""
@@ -557,7 +591,10 @@ _namo_read_question_on_tty() {
   while IFS= read -rsn1 ch; do
     case "$ch" in
       '')                 break ;;                  # Enter
-      $'\003'|$'\033')    printf '\n'; return 1 ;;   # Ctrl-C, Esc
+      $'\003')             printf '\n'; return 1 ;;   # Ctrl-C
+      $'\033')                                        # Esc or bracketed paste
+        _namo_read_paste || { printf '\n'; return 1; }
+        q+="$_NAMO_PASTE"; printf '%s' "$_NAMO_PASTE" ;;
       $'\177'|$'\010')                               # Backspace
         [[ -n "$q" ]] && { q="${q%?}"; printf '\b \b'; } ;;
       $'\025')                                       # Ctrl-U
@@ -569,6 +606,11 @@ _namo_read_question_on_tty() {
   _NAMO_QUESTION="$q"
 }
 
+# Show why an ask request left the editable line unchanged.
+_namo_ask_notice() {
+  printf '\r\033[2K\033[33mnamo:\033[0m %s\n' "$1"
+}
+
 _namo_key_request() {  # mode ("c" or "a"), show_picker
   local mode=$1 force=$2
   _NAMO_REPAINTED=0
@@ -577,7 +619,20 @@ _namo_key_request() {  # mode ("c" or "a"), show_picker
     _namo_line_repaint
     _namo_read_question || { _namo_line_settle; return 0; }
     [[ -z "${_NAMO_QUESTION//[[:space:]]/}" ]] && { _namo_line_settle; return 0; }
-    _namo_ask_daemon a "$_NAMO_QUESTION" || { _namo_line_settle; return 0; }
+    if ! _namo_ask_daemon a "$_NAMO_QUESTION"; then
+      if [[ -n "$_NAMO_REPLY_ERROR" ]]; then
+        _namo_ask_notice "request failed: $_NAMO_REPLY_ERROR"
+      else
+        _namo_ask_notice "request timed out or the helper is unavailable"
+      fi
+      _namo_line_settle
+      return 0
+    fi
+    if [[ -z "${_NAMO_REPLY_OUT//[[:space:]]/}" ]]; then
+      _namo_ask_notice "no command returned; add missing paths or constraints"
+      _namo_line_settle
+      return 0
+    fi
   else
     [[ -z "${READLINE_LINE//[[:space:]]/}" ]] && return 0
     _namo_line_repaint

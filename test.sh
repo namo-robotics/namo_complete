@@ -24,6 +24,7 @@ TEST_OS=$(uname -s)
 LIVE="${1:-}"
 MOCK_PID=""
 pass=0; fail=0
+DIAGNOSED_PIDS=""
 
 ok()   { printf '  \033[32mPASS\033[0m  %s\n' "$1"; pass=$((pass+1)); }
 bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; fail=$((fail+1)); }
@@ -77,6 +78,56 @@ wait_for_exit() {
     sleep 0.1
   done
   return 1
+}
+diag_text() {
+  printf '        diagnostic %s: ' "$1"
+  printf '%q\n' "$2"
+}
+diag_file() {
+  local label=$1 path=$2 size
+  if [ ! -e "$path" ]; then
+    printf '        diagnostic %s: <missing>\n' "$label"
+    return
+  fi
+  if [ -p "$path" ]; then
+    printf '        diagnostic %s: present, named pipe\n' "$label"
+    return
+  fi
+  size=$(wc -c < "$path" | tr -d '[:space:]')
+  printf '        diagnostic %s: present, %s bytes\n' "$label" "$size"
+}
+diag_process() {
+  local pid=$1
+  printf '        diagnostic process %s:\n' "${pid:-<missing>}"
+  [ -n "$pid" ] || return
+  case " $DIAGNOSED_PIDS " in
+    *" $pid "*)
+      printf '          already reported\n'
+      return
+      ;;
+  esac
+  DIAGNOSED_PIDS="$DIAGNOSED_PIDS$pid "
+  ps -o pid=,ppid=,pgid=,stat=,etime=,command= -p "$pid" 2>&1 | sed 's/^/          /'
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -p "$pid" 2>/dev/null | grep -E 'FIFO|namo|tty' | sed 's/^/          /'
+  fi
+  if [ "$TEST_OS" = Darwin ] && command -v sample >/dev/null 2>&1 && alive "$pid"; then
+    sample "$pid" 1 1 2>&1 | sed -n '1,100p' | sed 's/^/          /'
+  fi
+}
+diag_requests() {
+  local path=$1 size records typed glob ignored
+  if [ ! -s "$path" ]; then
+    printf '        diagnostic requests: <missing or empty>\n'
+    return
+  fi
+  size=$(wc -c < "$path" | tr -d '[:space:]')
+  records=$(wc -l < "$path" | tr -d '[:space:]')
+  typed=$(grep -c '<typed>' "$path" 2>/dev/null || true)
+  glob=$(grep -cF '<typed>grpe -r TODO *.md</typed>' "$path" 2>/dev/null || true)
+  ignored=$(grep -cF '<typed>grpe -r TODO src</typed>' "$path" 2>/dev/null || true)
+  printf '        diagnostic requests: bytes=%s records=%s typed=%s expected_glob=%s expected_ignorespace=%s\n' \
+    "$size" "$records" "$typed" "$glob" "$ignored"
 }
 stop_mock() {
   if [ -n "${MOCK_PID:-}" ]; then
@@ -258,30 +309,28 @@ printf '%s' "$err" | grep -q 'HTTP status 503' && [ "$rc" = 1 ] \
 grep -rl 'sk-ant-TESTKEY' "$XDG_RUNTIME_DIR" >/dev/null 2>&1 \
   && bad "api key left behind on disk" || ok "no key left on disk after the call"
 
-# effort/thinking must be absent: both are errors on Haiku 4.5.
-python3 - <<'PY' && ok "request shape valid for Haiku 4.5" || bad "bad request shape"
+# Opus is the default, and its current API rejects temperature.
+python3 - <<'PY' && ok "request shape valid for default Opus 5" || bad "bad default request shape"
 import json,sys
 d=json.load(open('/tmp/namo_req.json'))
-assert d['model']=='claude-haiku-4-5', d['model']
-assert d['max_tokens']==150 and d['temperature']==0
+assert d['model']=='claude-opus-5', d['model']
+assert d['max_tokens'] > 150
+assert 'temperature' not in d
 assert 'output_config' not in d and 'thinking' not in d
 assert all(x.strip() for x in d['stop_sequences']), 'whitespace-only stop sequence'
 PY
 
-# `temperature` is a 400 from the 4.6 generation on -- "`temperature` is
-# deprecated for this model" -- which silently took out every hint for anyone
-# who pointed NAMO_MODEL at a current model. Omitting it is valid everywhere.
+# The older low-latency model remains an opt-in and keeps its smaller budget
+# and deterministic temperature setting.
 rm -f /tmp/namo_req.json
 payload | env NAMO_LINE='git com' NAMO_CWD="$PWD" NAMO_CACHE=0 \
-  NAMO_MODEL=claude-opus-5 "$BIN" >/dev/null 2>&1
-python3 - <<'PY' && ok "temperature omitted for a model that rejects it" || bad "temperature sent to a model that rejects it"
+  NAMO_MODEL=claude-haiku-4-5 "$BIN" >/dev/null 2>&1
+python3 - <<'PY' && ok "request shape valid for explicit Haiku 4.5" || bad "bad Haiku request shape"
 import json
 d=json.load(open('/tmp/namo_req.json'))
-assert d['model']=='claude-opus-5', d['model']
-assert 'temperature' not in d, 'temperature must not be sent to Opus 5'
-# Thinking is billed out of max_tokens on this family and is on by default.
-# At 150 the answer comes back truncated, or as nothing but a thinking block.
-assert d['max_tokens'] > 150, 'a thinking model needs more than the 150 Haiku uses'
+assert d['model']=='claude-haiku-4-5', d['model']
+assert d['temperature']==0
+assert d['max_tokens']==150
 PY
 
 # An unknown name is far more likely to be newer than this list than older.
@@ -445,6 +494,57 @@ res=$(bash -i -c '
   && ok "the question reader handles typing and backspace" \
   || bad "question reader wrong (got $res)"
 
+res=$(bash -i -c '
+  source shell/namo_complete.bash 2>/dev/null
+  READLINE_LINE=""
+  typed=$(printf "\033[200~change CLAUDE.md\ninto a symbolic link\033[201~")
+  _namo_read_question <<< "$typed"
+  echo "Q=[$_NAMO_QUESTION]"' 2>/dev/null | grep '^Q=')
+[ "$res" = 'Q=[change CLAUDE.md into a symbolic link]' ] \
+  && ok "bracketed paste stays inside ask mode" \
+  || bad "bracketed paste escaped into the shell (got $res)"
+
+res=$(bash -i -c '
+  NAMO_BIN=/does/not/exist
+  source shell/namo_complete.bash 2>/dev/null
+  _namo_read_question() { _NAMO_QUESTION="missing details"; }
+  _namo_ask_daemon() { _NAMO_REPLY_OUT=""; return 0; }
+  _namo_line_repaint() { :; }
+  _namo_line_settle() { :; }
+  READLINE_LINE=""
+  _namo_key_request a 1' 2>/dev/null)
+printf '%s' "$res" | grep -q 'no command returned' \
+  && ok "ask mode explains an empty model answer" \
+  || bad "ask mode silently discarded an empty answer"
+
+res=$(bash -i -c '
+  NAMO_BIN=/does/not/exist
+  source shell/namo_complete.bash 2>/dev/null
+  _namo_read_question() { _NAMO_QUESTION="valid request"; }
+  _namo_ask_daemon() { _NAMO_REPLY_ERROR="model rejected request"; return 2; }
+  _namo_line_repaint() { :; }
+  _namo_line_settle() { :; }
+  READLINE_LINE=""
+  _namo_key_request a 1' 2>/dev/null)
+printf '%s' "$res" | grep -q 'request failed: model rejected request' \
+  && ok "ask mode prints the daemon error" \
+  || bad "ask mode hid the daemon error"
+
+res=$(bash -i -c '
+  NAMO_BIN=/does/not/exist
+  source shell/namo_complete.bash 2>/dev/null
+  _namo_daemon_is_running() { return 0; }
+  exec {_NAMO_WFD}>/dev/null
+  exec {_NAMO_RFD}<<<$'"'"'84\tE\tmodel rejected request'"'"'
+  _NAMO_REQ_ID=83
+  _namo_ask_daemon a "valid request"
+  rc=$?
+  printf "rc=%s error=%s\n" "$rc" "$_NAMO_REPLY_ERROR"
+' 2>/dev/null)
+[ "$res" = 'rc=2 error=model rejected request' ] \
+  && ok "Bash parses the daemon error frame" \
+  || bad "Bash failed to parse the daemon error frame ($res)"
+
 
 # keybindings must survive hosts that steal Ctrl-G (VS Code = "Go to Line")
 binds=$(bash -i -c 'source shell/namo_complete.bash 2>/dev/null; bind -X 2>/dev/null' 2>/dev/null)
@@ -535,7 +635,7 @@ import json
 d=json.load(open('/tmp/namo_req.json'))
 assert 'plain-English' in d['system'], d['system'][:80]
 assert 'COMMAND<TAB>DESCRIPTION' in d['system'], "ask prompt does not request descriptions"
-assert d['max_tokens'] == 300, d['max_tokens']
+assert d['max_tokens'] == 1200, d['max_tokens']
 PYX
 
 # ask-mode cache must not collide with completion cache
@@ -568,7 +668,7 @@ import json
 d=json.load(open('/tmp/namo_req.json'))
 assert 'correct shell command lines' in d['system'], d['system'][:80]
 assert 'output nothing at all' in d['system'], "the model is not allowed to stay silent"
-assert d['max_tokens'] == 150, d['max_tokens']
+assert d['max_tokens'] == 600, d['max_tokens']
 PYX
 
 # Three modes, three cache namespaces.
@@ -711,17 +811,25 @@ RCEOF
   # The words bash hands the handler have been globbed; the history list has
   # what was actually typed.
   rm -f /tmp/namo_reqs.log
-  printf 'grpe -r TODO *.md\nsleep 1.4\nexit\n' | runpty >/dev/null
-  grep -q '<typed>grpe -r TODO \*.md</typed>' /tmp/namo_reqs.log 2>/dev/null \
-    && ok "globs are sent unexpanded, as typed" \
-    || bad "the glob was expanded before it reached the model"
+  globcap=$(printf 'grpe -r TODO *.md\nsleep 1.4\nexit\n' | runpty)
+  if grep -q '<typed>grpe -r TODO \*.md</typed>' /tmp/namo_reqs.log 2>/dev/null; then
+    ok "globs are sent unexpanded, as typed"
+  else
+    bad "the glob was expanded before it reached the model"
+    diag_text "glob shell transcript bytes" "${#globcap}"
+    diag_requests /tmp/namo_reqs.log
+  fi
 
   # A line the history list never recorded still has to reach the model.
   rm -f /tmp/namo_reqs.log
-  printf 'HISTCONTROL=ignorespace\n grpe -r TODO src\nsleep 1.4\nexit\n' | runpty >/dev/null
-  grep -q '<typed>grpe -r TODO src</typed>' /tmp/namo_reqs.log 2>/dev/null \
-    && ok "unrecorded line (HISTCONTROL=ignorespace) still corrected" \
-    || bad "wrong line sent when it was kept out of the history list"
+  ignorecap=$(printf 'HISTCONTROL=ignorespace\n grpe -r TODO src\nsleep 1.4\nexit\n' | runpty)
+  if grep -q '<typed>grpe -r TODO src</typed>' /tmp/namo_reqs.log 2>/dev/null; then
+    ok "unrecorded line (HISTCONTROL=ignorespace) still corrected"
+  else
+    bad "wrong line sent when it was kept out of the history list"
+    diag_text "ignorespace shell transcript bytes" "${#ignorecap}"
+    diag_requests /tmp/namo_reqs.log
+  fi
 
   rm -f /tmp/namo_reqs.log
   printf 'NAMO_DYM=0\nnosuchcmd_zz\nsleep 1.4\nexit\n' | runpty >/dev/null
@@ -806,9 +914,10 @@ source "$PWD/shell/namo_complete.bash"
 PS1='T\$ '
 RCEOF
   daemons_before=$(running_helpers)
-  jobnoise=$(printf 'git com\nsleep 1\nexit\n' \
+  jobcap=$(printf 'git com\nsleep 1\nexit\n' \
     | script_shell /tmp/namo_rc_test.sh 2>&1 \
-    | tr -d '\r' | grep -acE '^\[[0-9]+\][[:space:]]+[0-9]+')
+    | tr -d '\r')
+  jobnoise=$(printf '%s' "$jobcap" | grep -acE '^\[[0-9]+\][[:space:]]+[0-9]+')
   [ "$jobnoise" = 0 ] && ok "no job-control noise while typing" \
                       || bad "$jobnoise job notifications leaked to the terminal"
 
@@ -816,9 +925,19 @@ RCEOF
   # write end goes away it must see end-of-file and stop, not linger.
   wait_for_helpers "$daemons_before"
   daemons_after=$(running_helpers)
-  [ "$daemons_before" = "$daemons_after" ] \
-    && ok "no daemon left behind by an exited shell" \
-    || bad "the daemon outlived its shell"
+  if [ "$daemons_before" = "$daemons_after" ]; then
+    ok "no daemon left behind by an exited shell"
+  else
+    bad "the daemon outlived its shell"
+    diag_text "helpers before shell" "$daemons_before"
+    diag_text "helpers after shell" "$daemons_after"
+    diag_text "shell transcript bytes" "${#jobcap}"
+    for helper in $daemons_after; do
+      case " $daemons_before " in
+        *" $helper "*) ;; *) diag_process "$helper" ;;
+      esac
+    done
+  fi
 
   # Output with no trailing newline must not swallow the next prompt: the hook
   # pads to the end of the row so the wrap happens before the prompt is drawn.
@@ -852,7 +971,7 @@ rm -f /tmp/namo_req.json
 
 NAMO_DAEMON=1 NAMO_FIFO="$DT/fifo" NAMO_REPLY="$DT/reply" NAMO_HISTFILE="$DT/hist" \
   NAMO_PIDFILE="$DT/pid" NAMO_TTY="$DT/tty" NAMO_DEBOUNCE=0.2 NAMO_QUIET=0.05 \
-  "$BIN" </dev/null >/dev/null 2>&1
+  "$BIN" </dev/null >"$DT/stdout" 2>"$DT/stderr"
 dpid=$(cat "$DT/pid" 2>/dev/null)
 { [ -n "$dpid" ] && alive "$dpid"; } \
   && ok "daemon detaches and records its pid before returning" \
@@ -860,7 +979,15 @@ dpid=$(cat "$DT/pid" 2>/dev/null)
 
 printf '%s\t%s\n' "$PWD" "daemon probe" >&"$DFD"
 sleep 1.2
-grep -q 'hint: ' "$DT/tty" && ok "hint painted after the debounce" || bad "no hint painted"
+if grep -q 'hint: ' "$DT/tty"; then
+  ok "hint painted after the debounce"
+else
+  bad "no hint painted"
+  diag_file "daemon tty" "$DT/tty"
+  diag_file "daemon stderr" "$DT/stderr"
+  diag_requests /tmp/namo_reqs.log
+  diag_process "$dpid"
+fi
 # One row below the cursor, never on it: the row the prompt hook reserves.
 # Absolute positioning would put it at the bottom of the screen, which is the
 # line being typed as soon as the prompt gets there.
@@ -879,9 +1006,15 @@ exec {RFD}<>"$DT/reply"
 printf '%s\t\002%s\t%s\t%s\n' "$PWD" 42 c "zzprobe com" >&"$DFD"
 hdr=""; IFS= read -r -t 5 -u "$RFD" hdr
 n=${hdr#*$'\t'}
-[ "${hdr%%$'\t'*}" = 42 ] && [ "$n" -ge 1 ] 2>/dev/null \
-  && ok "reply header names the request and the number of answers ($n)" \
-  || bad "bad reply header: $(printf '%s' "$hdr" | cat -v)"
+if [ "${hdr%%$'\t'*}" = 42 ] && [ "$n" -ge 1 ] 2>/dev/null; then
+  ok "reply header names the request and the number of answers ($n)"
+else
+  bad "bad reply header: $(printf '%s' "$hdr" | cat -v)"
+  diag_file "reply fifo" "$DT/reply"
+  diag_file "daemon stderr" "$DT/stderr"
+  diag_requests /tmp/namo_reqs.log
+  diag_process "$dpid"
+fi
 first=""; IFS= read -r -t 5 -u "$RFD" first
 [ "$first" = "$(printf '42\t-\tgit commit -m "msg"\t')" ] \
   && ok "candidates come back split, with the verdict in front" \
@@ -925,9 +1058,18 @@ sleep 1.2
 
 exec {DFD}>&-
 wait_for_exit "$dpid"
-alive "$dpid" && bad "daemon outlived the shell that owned the FIFO" \
-                            || ok "daemon stops when the FIFO reaches end-of-file"
-[ -f "$DT/pid" ] && bad "pid file left behind" || ok "pid file removed on exit"
+if alive "$dpid"; then
+  bad "daemon outlived the shell that owned the FIFO"
+  diag_process "$dpid"
+else
+  ok "daemon stops when the FIFO reaches end-of-file"
+fi
+if [ -f "$DT/pid" ]; then
+  bad "pid file left behind"
+  diag_file "daemon pid file" "$DT/pid"
+else
+  ok "pid file removed on exit"
+fi
 rm -rf "$DT"
 
 # --------------------------------------------------------------------------
@@ -1106,9 +1248,19 @@ RCEOF
     || bad "captured output never reached a request"
   wait_for_helpers "$daemons_before"
   daemons_after=$(running_helpers)
-  [ "$daemons_before" = "$daemons_after" ] \
-    && ok "no relay or daemon left behind by an exited shell" \
-    || bad "a helper outlived its shell"
+  if [ "$daemons_before" = "$daemons_after" ]; then
+    ok "no relay or daemon left behind by an exited shell"
+  else
+    bad "a helper outlived its shell"
+    diag_text "helpers before shell" "$daemons_before"
+    diag_text "helpers after shell" "$daemons_after"
+    diag_text "shell transcript bytes" "${#cap}"
+    for helper in $daemons_after; do
+      case " $daemons_before " in
+        *" $helper "*) ;; *) diag_process "$helper" ;;
+      esac
+    done
+  fi
   rm -f /tmp/namo_rc_out.sh
 fi
 
@@ -1382,18 +1534,15 @@ if [ "$LIVE" = "--live" ]; then
     elif printf '%s' "$out" | grep -q '^git '; then
       ok "live call returned real completions in ${ms}ms"
       printf '%s\n' "$out" | sed 's/^/        /'
-      # The 1.5s target is the hint row's comfort budget on the default
-      # claude-haiku-4-5. A bigger model is slower by nature (measured:
-      # ~3.4s on Opus 5 vs ~1.0s on Haiku for the same line), so a run with
-      # NAMO_MODEL pointed at one gets a wider target instead of a red
-      # herring -- the row is still worth having, it just arrives later.
-      target=1500
-      case "${NAMO_MODEL:-claude-haiku-4-5}" in
-        *haiku*) ;;
-        *) target=5000 ;;
+      # The default Opus model gets the wider target its stronger answers
+      # require. Haiku remains the lower-latency opt-in.
+      target=5000
+      case "${NAMO_MODEL:-claude-opus-5}" in
+        *haiku*) target=1500 ;;
+        *) ;;
       esac
-      [ "$ms" -lt "$target" ] && ok "latency under the ${target}ms target for ${NAMO_MODEL:-claude-haiku-4-5}" \
-                              || bad "latency ${ms}ms exceeds the ${target}ms target for ${NAMO_MODEL:-claude-haiku-4-5}"
+      [ "$ms" -lt "$target" ] && ok "latency under the ${target}ms target for ${NAMO_MODEL:-claude-opus-5}" \
+                              || bad "latency ${ms}ms exceeds the ${target}ms target for ${NAMO_MODEL:-claude-opus-5}"
     else
       bad "live call returned no usable completion (got: ${out:-<empty>})"
     fi
@@ -1514,10 +1663,11 @@ printf '%s' "$err" | grep -q 'deprecated for this model' \
 # The daemon has no stderr: it is started with 2>/dev/null by the shell
 # integration, so the hint row is the only channel it has.
 ET=$(mktemp -d)
-mkfifo -m 600 "$ET/fifo"
+mkfifo -m 600 "$ET/fifo" "$ET/reply"
 printf 'git status\n' > "$ET/hist"
 exec {EFD}<>"$ET/fifo"
-NAMO_DAEMON=1 NAMO_FIFO="$ET/fifo" NAMO_HISTFILE="$ET/hist" NAMO_PIDFILE="$ET/pid" \
+exec {ERFD}<>"$ET/reply"
+NAMO_DAEMON=1 NAMO_FIFO="$ET/fifo" NAMO_REPLY="$ET/reply" NAMO_HISTFILE="$ET/hist" NAMO_PIDFILE="$ET/pid" \
   NAMO_TTY="$ET/tty" NAMO_DEBOUNCE=0.2 NAMO_QUIET=0.05 NAMO_CACHE=0 NAMO_MIN_GAP=0 \
   NAMO_ENDPOINT="http://127.0.0.1:$PORT8/v1/messages" "$BIN" </dev/null >/dev/null 2>&1
 sleep 0.3
@@ -1530,6 +1680,13 @@ grep -q 'hint: ' "$ET/tty" \
   && bad "a hint was drawn for a call that failed" \
   || ok "no hint row is drawn alongside the error"
 
+# A synchronous ask failure must travel back to the shell instead of looking
+# like a successful response with zero candidates.
+printf '%s\t\002%s\t%s\t%s\n' "$PWD" 84 a "show files" >&$EFD
+sync_error=""
+IFS= read -r -t 5 -u "$ERFD" sync_error
+printf '%s' "$sync_error" | grep -q $'^84\tE\t.*deprecated for this model' \
+  && ok "the synchronous reply carries the API error" || bad "the synchronous reply hid the API error"
 # And it must go away again once the API answers.
 kill_mock8
 echo thinking > /tmp/namo_mock8_mode
@@ -1548,12 +1705,19 @@ for _ in {1..50}; do
 done
 # Only bytes written after the error assertion count, so the old paint still
 # present in the append-only tty log cannot satisfy this check.
-[ "$hint_after_error" = 1 ] \
-  && ok "the error row clears once a call works again" \
-  || bad "the error row survived a call that succeeded"
+if [ "$hint_after_error" = 1 ]; then
+  ok "the error row clears once a call works again"
+else
+  bad "the error row survived a call that succeeded"
+  diag_file "error daemon tty" "$ET/tty"
+  diag_file "latest request" /tmp/namo_req.json
+  diag_requests /tmp/namo_req.json
+  diag_process "$(cat "$ET/pid" 2>/dev/null)"
+fi
 
 [ -s "$ET/pid" ] && kill "$(cat "$ET/pid")" 2>/dev/null
 exec {EFD}>&-
+exec {ERFD}>&-
 rm -rf "$ET"
 kill_mock8
 

@@ -33,6 +33,12 @@ out=$("$ZSH_BIN" -dfi -c "$setup
   CURSOR=6
   _namo_key_request c 0
   print -r -- \"BUFFER=\$BUFFER CURSOR=\$CURSOR\"
+  _namo_read_question() { _NAMO_QUESTION='missing details' }
+  _namo_ask_daemon() { _NAMO_REPLY_OUT='' }
+  BUFFER=''
+  _namo_key_request a 1
+  _namo_ask_daemon() { _NAMO_REPLY_ERROR='model rejected request'; return 2 }
+  _namo_key_request a 1
   bindkey -M emacs \"^[o\"
   add-zle-hook-widget -L line-pre-redraw
 " 2>&1)
@@ -46,6 +52,26 @@ printf '%s\n' "$out" | grep -q '"\^\[o" namo-complete' &&
 printf '%s\n' "$out" | grep -q '_namo_zle_line_changed' &&
   ok "ZLE redraw hook is registered" ||
   bad "ZLE redraw hook missing: $out"
+
+printf '%s\n' "$out" | grep -q 'no command returned' &&
+  ok "zsh ask mode explains an empty model answer" ||
+  bad "zsh ask mode silently discarded an empty answer: $out"
+
+printf '%s\n' "$out" | grep -q 'request failed: model rejected request' &&
+  ok "zsh ask mode prints the daemon error" ||
+  bad "zsh ask mode hid the daemon error: $out"
+
+paste_out=$(printf '\033[200~change CLAUDE.md\ninto a symbolic link\033[201~\n' |
+  "$ZSH_BIN" -dfi -c "$setup
+    NAMO_BIN=/does/not/exist
+    source \"$ROOT/shell/namo_complete.zsh\"
+    BUFFER=''
+    _namo_read_question
+    print -r -- \"Q=[\$_NAMO_QUESTION]\"
+  " 2>/dev/null)
+printf '%s\n' "$paste_out" | grep -qF 'Q=[change CLAUDE.md into a symbolic link]' &&
+  ok "bracketed paste stays inside zsh ask mode" ||
+  bad "bracketed paste escaped zsh ask mode: $paste_out"
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT

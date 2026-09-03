@@ -63,7 +63,7 @@ public module namo {
       this.mode = env_or(alloc, this.environment, "NAMO_MODE", "complete");
       this.shell_name = env_or(alloc, this.environment, "NAMO_SHELL", "shell");
       this.cwd = env_or(alloc, this.environment, "NAMO_CWD", ".");
-      this.model = env_or(alloc, this.environment, "NAMO_MODEL", "claude-haiku-4-5");
+      this.model = env_or(alloc, this.environment, "NAMO_MODEL", "claude-opus-5");
       this.api_key = env_str(alloc, this.environment, "ANTHROPIC_API_KEY");
       this.endpoint = env_or(
         alloc,
