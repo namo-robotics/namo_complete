@@ -811,9 +811,15 @@ RCEOF
   # The words bash hands the handler have been globbed; the history list has
   # what was actually typed.
   rm -f /tmp/namo_reqs.log
-  globcap=$(printf 'grpe -r TODO *.md\nsleep 1.4\nexit\n' | runpty)
+  globcap=$({
+    printf 'grpe -r TODO *.md\n'
+    sleep 1.6
+    printf 'exit\n'
+  } | runpty)
   if grep -q '<typed>grpe -r TODO \*.md</typed>' /tmp/namo_reqs.log 2>/dev/null; then
     ok "globs are sent unexpanded, as typed"
+  elif [ ! -s /tmp/namo_reqs.log ]; then
+    bad "the glob correction request was never sent"
   else
     bad "the glob was expanded before it reached the model"
     diag_text "glob shell transcript bytes" "${#globcap}"
@@ -822,9 +828,17 @@ RCEOF
 
   # A line the history list never recorded still has to reach the model.
   rm -f /tmp/namo_reqs.log
-  ignorecap=$(printf 'HISTCONTROL=ignorespace\n grpe -r TODO src\nsleep 1.4\nexit\n' | runpty)
+  ignorecap=$({
+    printf 'HISTCONTROL=ignorespace\n'
+    sleep 0.2
+    printf ' grpe -r TODO src\n'
+    sleep 1.6
+    printf 'exit\n'
+  } | runpty)
   if grep -q '<typed>grpe -r TODO src</typed>' /tmp/namo_reqs.log 2>/dev/null; then
     ok "unrecorded line (HISTCONTROL=ignorespace) still corrected"
+  elif [ ! -s /tmp/namo_reqs.log ]; then
+    bad "the unrecorded correction request was never sent"
   else
     bad "wrong line sent when it was kept out of the history list"
     diag_text "ignorespace shell transcript bytes" "${#ignorecap}"
