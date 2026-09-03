@@ -31,6 +31,8 @@ public module namo {
   // of a buffer (Ctrl-A is a binding, not a character), so no line the user
   // can type is mistaken for one. See namo_complete.bash.
   var DYM_MARK: u8 = 1;
+  // ETX is sent by the shell exit hook, avoiding platform-specific FIFO EOF.
+  var STOP_MARK: u8 = 3;
 
   // And STX marks a request the shell is *waiting* for -- Alt-O, Alt-A,
   // Alt-G. Same FIFO, same reason: a key press must not fork either, so the
@@ -339,6 +341,10 @@ public module namo {
     return rec_mark(alloc, rec, SYNC_MARK);
   }
 
+  function rec_is_stop(alloc: ref HeapAllocator, rec: const ref String) bool {
+    return rec_mark(alloc, rec, STOP_MARK);
+  }
+
   function rec_is_dym(alloc: ref HeapAllocator, rec: const ref String) bool {
     var line = rec_line(alloc, rec);
     if (line.length() == 0) {
@@ -633,7 +639,9 @@ public module namo {
     var r: i32 = next_record(alloc, st, timeout_ms, out);
     var more: bool = true;
     while (r == REC_OK and more) {
-      if (rec_is_dym(alloc, out)) {
+      if (rec_is_stop(alloc, out)) {
+        return REC_EOF;
+      } else if (rec_is_dym(alloc, out)) {
         serve_dym(alloc, cfg, st, out);
         r = next_record(alloc, st, timeout_ms, out);
       } else if (rec_is_sync(alloc, out)) {

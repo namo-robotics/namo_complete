@@ -1056,13 +1056,16 @@ sleep 1.2
 [ -f /tmp/namo_req.json ] && bad "the daemon re-called the API for a cached line" \
                           || ok "repeat line served from cache, no call"
 
+# The owner sends an explicit shutdown because macOS poll does not reliably
+# surface the writer hangup for a FIFO.
+printf '\t\003\n' >&"$DFD"
 exec {DFD}>&-
 wait_for_exit "$dpid"
 if alive "$dpid"; then
-  bad "daemon outlived the shell that owned the FIFO"
+  bad "daemon ignored the owner's shutdown record"
   diag_process "$dpid"
 else
-  ok "daemon stops when the FIFO reaches end-of-file"
+  ok "daemon stops when its owner exits"
 fi
 if [ -f "$DT/pid" ]; then
   bad "pid file left behind"

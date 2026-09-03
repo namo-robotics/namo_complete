@@ -114,6 +114,8 @@ namo-version() {
 }
 
 _namo_on_exit() {
+  # ETX explicitly stops the daemon on platforms that do not report FIFO EOF.
+  [ -n "$_NAMO_WFD" ] && printf '\t\003\n' >&"$_NAMO_WFD" 2>/dev/null
   rm -f "$_NAMO_FIFO" "$_NAMO_REPLYFIFO" "$_NAMO_HISTFILE" "$_NAMO_PIDFILE" \
         "$_NAMO_DYMFILE" "$_NAMO_PTSFILE" "$_NAMO_OUTFILE" \
         "$_NAMO_RELAY_PIDFILE" 2>/dev/null
