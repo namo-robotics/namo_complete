@@ -391,12 +391,27 @@ zle -N namo-ask _namo_on_ask_key
 typeset -g _NAMO_KEY_SEQ=$(printf '%b' "$NAMO_KEY")
 typeset -g _NAMO_ALT_KEY_SEQ=$(printf '%b' "$NAMO_ALT_KEY")
 typeset -g _NAMO_ASK_KEY_SEQ=$(printf '%b' "$NAMO_ASK_KEY")
-for _namo_keymap in emacs viins; do
-  bindkey -M "$_namo_keymap" "$_NAMO_KEY_SEQ" namo-complete 2>/dev/null
-  bindkey -M "$_namo_keymap" "$_NAMO_ALT_KEY_SEQ" namo-alternatives 2>/dev/null
-  bindkey -M "$_namo_keymap" "$_NAMO_ASK_KEY_SEQ" namo-ask 2>/dev/null
-done
-unset _namo_keymap
+
+# Bind Meta sequences and the characters produced by macOS Option on a U.S. keyboard.
+_namo_bind_keys() {
+  local platform="$1" keymap
+  for keymap in emacs viins; do
+    bindkey -M "$keymap" "$_NAMO_KEY_SEQ" namo-complete 2>/dev/null
+    bindkey -M "$keymap" "$_NAMO_ALT_KEY_SEQ" namo-alternatives 2>/dev/null
+    bindkey -M "$keymap" "$_NAMO_ASK_KEY_SEQ" namo-ask 2>/dev/null
+
+    if [[ "$platform" == darwin* ]]; then
+      [[ "$NAMO_KEY" == '\eo' ]] &&
+        bindkey -M "$keymap" 'ø' namo-complete 2>/dev/null
+      [[ "$NAMO_ALT_KEY" == '\ea' ]] &&
+        bindkey -M "$keymap" 'å' namo-alternatives 2>/dev/null
+      [[ "$NAMO_ASK_KEY" == '\eg' ]] &&
+        bindkey -M "$keymap" '©' namo-ask 2>/dev/null
+    fi
+  done
+}
+
+_namo_bind_keys "$OSTYPE"
 
 _namo_should_correct() {
   [[ "$NAMO_DYM" == 1 ]] || return 1

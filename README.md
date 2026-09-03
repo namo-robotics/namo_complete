@@ -24,6 +24,10 @@ Press **Alt-G** to enter **ask>** mode where you can describe the command that y
 | **Alt-A** | List the other candidates, pick one by number                        |
 | **Alt-G** | Describe what you want in plain English, pick from described options |
 
+On macOS, the default U.S. keyboard's Option-O, Option-A, and Option-G
+characters work as aliases for these shortcuts. Terminals configured to use
+Option as Meta continue to use the standard Alt bindings.
+
 
 ## Install
 

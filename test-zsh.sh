@@ -42,6 +42,10 @@ out=$("$ZSH_BIN" -dfi -c "$setup
   _namo_ask_daemon() { _NAMO_REPLY_ERROR='model rejected request'; return 2 }
   _namo_key_request a 1
   bindkey -M emacs \"^[o\"
+  _namo_bind_keys darwin
+  bindkey -M emacs 'ø'
+  bindkey -M emacs 'å'
+  bindkey -M emacs '©'
   add-zle-hook-widget -L line-pre-redraw
 " 2>&1)
 
@@ -55,6 +59,11 @@ printf '%s\n' "$out" | grep -q 'BUFFER=git status CURSOR=10' &&
 printf '%s\n' "$out" | grep -q '"\^\[o" namo-complete' &&
   ok "Alt-O is bound in the zsh emacs keymap" ||
   bad "Alt-O binding missing: $out"
+printf '%s\n' "$out" | grep -q '"ø" namo-complete' &&
+printf '%s\n' "$out" | grep -q '"å" namo-alternatives' &&
+printf '%s\n' "$out" | grep -q '"©" namo-ask' &&
+  ok "macOS Option characters are bound in the zsh emacs keymap" ||
+  bad "macOS Option character binding missing: $out"
 printf '%s\n' "$out" | grep -q '_namo_zle_line_changed' &&
   ok "ZLE redraw hook is registered" ||
   bad "ZLE redraw hook missing: $out"
