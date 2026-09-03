@@ -3,7 +3,7 @@
 This document is the historical record of the Sun compiler and standard-library
 gaps found while building `namo_complete`. The original issue drafts were
 written against `sun 0.dev (b70da5b9a992)` on 2026-08-22. The project now
-targets the rolling dev release built from `70888282d872` on 2026-09-02.
+targets the rolling dev release built from `8fae619738f4` on 2026-09-03.
 
 ## What the current release resolved
 

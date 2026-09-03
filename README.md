@@ -101,10 +101,10 @@ history at all.
 | `NAMO_MAX_SUGGESTIONS`                       | `3`                    | Candidates requested                                                                 |
 | `NAMO_CACHE` / `NAMO_CACHE_TTL`              | `1` / `900`            | Local cache                                                                          |
 | `NAMO_DISABLE`                               | `0`                    | `1` turns everything off                                                             |
-| `NAMO_ENDPOINT`                              | Messages API           | Override, for testing                                                                |
+| `NAMO_ENDPOINT`                              | Messages API           | HTTPS override; plaintext is limited to loopback tests                                |
 
 Answers are cached in `~/.cache/namo_complete`, looked up by what you had typed,
-which directory you were in, and which model answered. Deleting that directory
+which directory and shell you were in, and which model answered. Deleting that directory
 is safe at any time.
 
 `NAMO_MODEL` takes any Claude model id. The daemon reads it once, at the first
@@ -226,7 +226,7 @@ itself separately.
 ## Notes on Sun
 
 [SUN_FEEDBACK.md](SUN_FEEDBACK.md) records the compiler gaps that shaped the
-project, what Sun `70888282d872` resolved, and the small platform FFI/borrow
+project, what Sun `8fae619738f4` resolved, and the small platform FFI/borrow
 workarounds that remain.
 
 ## License

@@ -18,6 +18,7 @@ fi
 
 BIN=./bin/namo_complete
 PORT=${NAMO_TEST_PORT:-8731}
+TEST_OS=$(uname -s)
 # Taken now, because `set -- $wsz` in section 5 rewrites the positional args
 # -- gating on "$1" further down silently skipped the live section.
 LIVE="${1:-}"
@@ -100,7 +101,7 @@ out=$(env ANTHROPIC_API_KEY=x NAMO_MIN_GAP=0 NAMO_CACHE=0 NAMO_ENDPOINT='https:/
 [ -z "$out" ] && [ "$rc" = 1 ] \
   && ok "TLS connection failure: stdout stays clean" || bad "TLS connection failure"
 
-for endpoint in 'ftp://example.com/v1' 'https:///v1' 'https://example.com:bad/v1' \
+for endpoint in 'ftp://example.com/v1' 'http://example.com/v1' 'https:///v1' 'https://example.com:bad/v1' \
                 'https://user@example.com/v1' 'https://example.com:443:2/v1' \
                 'https://example.com:4294967739/v1' 'https://example.com/a b' \
                 'https://example.com/v1#fragment'; do
@@ -1309,18 +1310,25 @@ printf '%s\n' "$instout" | grep -q 'namo_complete .*commit ' \
   && ok "the installer prints the build it just installed" \
   || bad "install output does not say which build landed"
 
-# .bashrc handling: adds once, never duplicates, and honours --no-rc.
-: > "$PKGTMP/bashrc"
-BASHRC="$PKGTMP/bashrc" "$PKGTMP/x/$PNAME/install.sh" --prefix "$PKGTMP/p2" >/dev/null 2>&1
-BASHRC="$PKGTMP/bashrc" "$PKGTMP/x/$PNAME/install.sh" --prefix "$PKGTMP/p2" >/dev/null 2>&1
-n=$(grep -c 'namo_complete.bash' "$PKGTMP/bashrc" 2>/dev/null || echo 0)
-[ "$n" = 1 ] && ok "adds the source line to .bashrc exactly once" \
-             || bad "expected 1 source line in .bashrc, found $n"
+# Startup-file handling follows the platform default, stays idempotent, and
+# honours --no-rc.
+if [ "$TEST_OS" = Darwin ]; then
+  RC_FILE="$PKGTMP/zshrc"; RC_PATTERN=namo_complete.zsh; RC_LABEL=.zshrc
+else
+  RC_FILE="$PKGTMP/bashrc"; RC_PATTERN=namo_complete.bash; RC_LABEL=.bashrc
+fi
+: > "$RC_FILE"
+env BASHRC="$RC_FILE" ZSHRC="$RC_FILE" "$PKGTMP/x/$PNAME/install.sh" --prefix "$PKGTMP/p2" >/dev/null 2>&1
+env BASHRC="$RC_FILE" ZSHRC="$RC_FILE" "$PKGTMP/x/$PNAME/install.sh" --prefix "$PKGTMP/p2" >/dev/null 2>&1
+n=$(grep -c "$RC_PATTERN" "$RC_FILE" 2>/dev/null || echo 0)
+[ "$n" = 1 ] && ok "adds the source line to $RC_LABEL exactly once" \
+             || bad "expected 1 source line in $RC_LABEL, found $n"
 
-: > "$PKGTMP/bashrc2"
-BASHRC="$PKGTMP/bashrc2" "$PKGTMP/x/$PNAME/install.sh" --prefix "$PKGTMP/p3" --no-rc >/dev/null 2>&1
-[ ! -s "$PKGTMP/bashrc2" ] && ok "--no-rc leaves .bashrc untouched" \
-                           || bad "--no-rc modified .bashrc"
+RC_FILE="${RC_FILE}2"
+: > "$RC_FILE"
+env BASHRC="$RC_FILE" ZSHRC="$RC_FILE" "$PKGTMP/x/$PNAME/install.sh" --prefix "$PKGTMP/p3" --no-rc >/dev/null 2>&1
+[ ! -s "$RC_FILE" ] && ok "--no-rc leaves $RC_LABEL untouched" \
+                       || bad "--no-rc modified $RC_LABEL"
 
 res=$(NAMO_BIN="$PKGTMP/prefix/bin/namo_complete" bash -i -c '
   source '"$PKGTMP"'/prefix/share/namo_complete/namo_complete.bash 2>/dev/null

@@ -107,6 +107,9 @@ public module namo {
         throw Error(-1, "NAMO_ENDPOINT has an invalid host");
       }
     }
+    if (out.secure == false and out.host.equals_literal("127.0.0.1") == false and out.host.equals_literal("localhost") == false) {
+      throw Error(-1, "plaintext NAMO_ENDPOINT must use loopback");
+    }
     if (slash < raw.length()) {
       out.path = raw.substr(alloc, slash, raw.length() - slash);
     }
@@ -170,7 +173,11 @@ public module namo {
 
   function read_tcp(alloc: ref HeapAllocator, endpoint: ref Endpoint, request: const ref String) String throws IError {
     var stream = TcpStream();
-    stream.connect_host(endpoint.host, endpoint.port);
+    if (endpoint.host.equals_literal("127.0.0.1")) {
+      stream.connect_local(endpoint.port);
+    } else {
+      stream.connect_host(endpoint.host, endpoint.port);
+    }
     stream.send_string(request);
     var raw = String(alloc, "");
     var chunk = ContiguousBuffer<u8>(alloc, 8192);

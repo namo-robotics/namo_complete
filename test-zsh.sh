@@ -115,6 +115,20 @@ tar -C "$work/unpacked" -xzf "$pkg/$name.tar.gz"
 ZSHRC="$work/zshrc" NAMO_INSTALL_OS=Darwin \
   "$ZSH_BIN" "$work/unpacked/$name/install.sh" --prefix "$work/prefix" >/dev/null
 
+ZSHRC="$work/zshrc" NAMO_INSTALL_OS=Darwin \
+  "$ZSH_BIN" "$work/unpacked/$name/install.sh" --prefix "$work/prefix" >/dev/null
+n=$(grep -c 'namo_complete.zsh' "$work/zshrc" 2>/dev/null || echo 0)
+[[ "$n" == 1 ]] &&
+  ok "macOS installer updates .zshrc once" ||
+  bad "macOS installer duplicated its .zshrc entry"
+
+: > "$work/zshrc-no-edit"
+ZSHRC="$work/zshrc-no-edit" NAMO_INSTALL_OS=Darwin \
+  "$ZSH_BIN" "$work/unpacked/$name/install.sh" --prefix "$work/prefix-no-edit" --no-rc >/dev/null
+[[ ! -s "$work/zshrc-no-edit" ]] &&
+  ok "macOS installer honours --no-rc" ||
+  bad "macOS installer edited .zshrc with --no-rc"
+
 [ -f "$work/prefix/share/namo_complete/namo_complete.zsh" ] &&
 [ -f "$work/prefix/share/namo_complete/namo_complete.bash" ] &&
   ok "macOS package ships zsh and optional Bash integrations" ||

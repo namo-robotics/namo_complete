@@ -4,8 +4,6 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-SUN_MIN_BUILD=70888282d872
-
 if ! command -v sun >/dev/null 2>&1; then
   echo "error: the Sun compiler is not on PATH." >&2
   echo "       install the latest dev artifact from https://github.com/namo-robotics/sun/releases/tag/dev" >&2
@@ -36,7 +34,6 @@ if [ -z "$BUNDLE_DIR" ]; then
   exit 1
 fi
 
-
 case "$(uname -s):$(uname -m)" in
   Linux:x86_64|Linux:amd64) NAMO_PLATFORM=linux-x86_64 ;;
   Darwin:arm64) NAMO_PLATFORM=macos-arm64 ;;
@@ -45,8 +42,8 @@ esac
 
 BUILT_WITH=${NAMO_BUILT_WITH:-$(sun --version 2>/dev/null | head -1)}
 case "$BUILT_WITH" in
-  *"$SUN_MIN_BUILD"*|*dirty*) ;;
-  *) echo "warning: expected Sun $SUN_MIN_BUILD or newer; building with: $BUILT_WITH" >&2 ;;
+  "sun 0.dev ("*|"sun dev ("*|*dirty*) ;;
+  *) echo "warning: expected a Sun dev release; building with: $BUILT_WITH" >&2 ;;
 esac
 
 mkdir -p bin
