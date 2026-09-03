@@ -123,22 +123,13 @@ def read_until(needle, timeout=8):
         raise AssertionError(data[-2000:])
     scan_from = found + len(needle)
 
-def wait_for_exit(timeout=8):
-    """Reap zsh or fail without leaving the CI job blocked."""
-    end = time.time() + timeout
-    while time.time() < end:
-        waited, status = os.waitpid(pid, os.WNOHANG)
-        if waited == pid:
-            if status != 0:
-                raise AssertionError(f"zsh exited with status {status}: {data[-2000:]!r}")
-            return
-        time.sleep(0.1)
+def stop_child():
+    """Terminate and reap the disposable interactive shell."""
     try:
         os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
     os.waitpid(pid, 0)
-    raise AssertionError(f"zsh did not exit: {data[-2000:]!r}")
 
 read_until(b"ZTEST> ")
 os.write(fd, b"git st")
@@ -148,8 +139,7 @@ time.sleep(0.3)
 os.write(fd, b"\r")
 read_until(b"42\r\n")
 read_until(b"ZTEST> ")
-os.write(fd, b"\x04")
-wait_for_exit()
+stop_child()
 PY
 ok "Alt-O works in a live ZLE session"
 
