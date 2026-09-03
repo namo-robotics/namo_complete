@@ -92,6 +92,7 @@ ZRC
 python3 - "$work" "$ZSH_BIN" <<'PY'
 import os
 import pty
+import signal
 import select
 import sys
 import time
@@ -104,19 +105,40 @@ if pid == 0:
     os.execve(zsh, [zsh, "-d", "-i"], env)
 
 data = b""
+scan_from = 0
 
 def read_until(needle, timeout=8):
-    global data
+    """Read through the next occurrence of a PTY byte sequence."""
+    global data, scan_from
     end = time.time() + timeout
-    while needle not in data and time.time() < end:
+    while data.find(needle, scan_from) < 0 and time.time() < end:
         ready, _, _ = select.select([fd], [], [], 0.2)
         if ready:
             try:
                 data += os.read(fd, 65536)
             except OSError:
                 break
-    if needle not in data:
+    found = data.find(needle, scan_from)
+    if found < 0:
         raise AssertionError(data[-2000:])
+    scan_from = found + len(needle)
+
+def wait_for_exit(timeout=8):
+    """Reap zsh or fail without leaving the CI job blocked."""
+    end = time.time() + timeout
+    while time.time() < end:
+        waited, status = os.waitpid(pid, os.WNOHANG)
+        if waited == pid:
+            if status != 0:
+                raise AssertionError(f"zsh exited with status {status}: {data[-2000:]!r}")
+            return
+        time.sleep(0.1)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    os.waitpid(pid, 0)
+    raise AssertionError(f"zsh did not exit: {data[-2000:]!r}")
 
 read_until(b"ZTEST> ")
 os.write(fd, b"git st")
@@ -125,8 +147,9 @@ os.write(fd, b"\x1bo")
 time.sleep(0.3)
 os.write(fd, b"\r")
 read_until(b"42\r\n")
+read_until(b"ZTEST> ")
 os.write(fd, b"exit\r")
-os.waitpid(pid, 0)
+wait_for_exit()
 PY
 ok "Alt-O works in a live ZLE session"
 
