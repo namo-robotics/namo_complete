@@ -62,6 +62,22 @@ running_helpers() {
   done
   printf '%s' "$out"
 }
+wait_for_helpers() {
+  local expected=$1
+  for _ in {1..50}; do
+    [ "$(running_helpers)" = "$expected" ] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+wait_for_exit() {
+  local pid=$1
+  for _ in {1..50}; do
+    alive "$pid" || return 0
+    sleep 0.1
+  done
+  return 1
+}
 stop_mock() {
   if [ -n "${MOCK_PID:-}" ]; then
     kill "$MOCK_PID" 2>/dev/null
@@ -182,7 +198,7 @@ class H(http.server.BaseHTTPRequestHandler):
         else:
             self.send_header('content-length', str(len(o))); self.end_headers(); self.wfile.write(o)
     def log_message(self, *a): pass
-class S(http.server.HTTPServer):
+class S(http.server.ThreadingHTTPServer):
     allow_reuse_address = True
 S(('127.0.0.1', $PORT), H).serve_forever()
 PY
@@ -676,9 +692,11 @@ RCEOF
   # The mock holds a correction for a full second. A session that types one and
   # leaves must not have waited for it: nothing in the shell is watching.
   rm -f /tmp/namo_reqs.log
-  t0=$(ms_now); printf 'NAMO_DYM=0\nnosuchcmd_zz\nexit\n' | runpty >/dev/null
+  t0=$(ms_now); { printf 'NAMO_DYM=0\nnosuchcmd_zz\n'; sleep 0.2; printf 'exit\n'; } \
+    | runpty >/dev/null
   base=$(( $(ms_now) - t0 ))
-  t0=$(ms_now); res=$(printf 'gti diff\nexit\n' | runpty); dym=$(( $(ms_now) - t0 ))
+  t0=$(ms_now); res=$( { printf 'gti diff\n'; sleep 0.2; printf 'exit\n'; } | runpty)
+  dym=$(( $(ms_now) - t0 ))
   [ $(( dym - base )) -lt 500 ] \
     && ok "prompt returns immediately: ${dym}ms vs ${base}ms baseline, 1000ms call" \
     || bad "the shell waited for the correction (${dym}ms vs ${base}ms baseline)"
@@ -796,7 +814,7 @@ RCEOF
 
   # The daemon holds the read end of the FIFO; when the shell that owns the
   # write end goes away it must see end-of-file and stop, not linger.
-  sleep 0.8
+  wait_for_helpers "$daemons_before"
   daemons_after=$(running_helpers)
   [ "$daemons_before" = "$daemons_after" ] \
     && ok "no daemon left behind by an exited shell" \
@@ -804,7 +822,7 @@ RCEOF
 
   # Output with no trailing newline must not swallow the next prompt: the hook
   # pads to the end of the row so the wrap happens before the prompt is drawn.
-  eolcap=$(printf 'printf hi\nexit\n' \
+  eolcap=$( { printf 'printf hi\n'; sleep 0.2; printf 'exit\n'; } \
     | script_shell /tmp/namo_rc_test.sh 2>&1)
   printf '%s' "$eolcap" | grep -q "hi  *$(printf '\r')" \
     && ok "prompt starts on a fresh line after unterminated output" \
@@ -850,7 +868,7 @@ grep -q "$(printf '\033')\[1B" "$DT/tty" \
   && ok "hint row placed one row below the cursor" || bad "hint row not positioned"
 grep -q "$(printf '\033')\[999;1H" "$DT/tty" \
   && bad "hint row still addressed absolutely" || ok "no absolute jump to the last row"
-[ "$(tr -dc '\n' < "$DT/tty" | wc -c)" = 0 ] \
+[ "$(tr -dc '\n' < "$DT/tty" | wc -c | tr -d '[:space:]')" = 0 ] \
   && ok "no newline emitted while drawing" \
   || bad "the hint row emitted a newline, which scrolls the screen"
 
@@ -906,7 +924,7 @@ sleep 1.2
                           || ok "repeat line served from cache, no call"
 
 exec {DFD}>&-
-sleep 0.8
+wait_for_exit "$dpid"
 alive "$dpid" && bad "daemon outlived the shell that owned the FIFO" \
                             || ok "daemon stops when the FIFO reaches end-of-file"
 [ -f "$DT/pid" ] && bad "pid file left behind" || ok "pid file removed on exit"
@@ -1074,7 +1092,8 @@ PS1='T\$ '
 RCEOF
   rm -f /tmp/namo_reqs.log
   daemons_before=$(running_helpers)
-  cap=$(printf '[ -t 1 ] && echo ISATTY_OK\nprintf "zzprobe output\\n"\nzzq com\nexit\n' \
+  cap=$( { printf '[ -t 1 ] && echo ISATTY_OK\nprintf "zzprobe output\\n"\nzzq com\n'; \
+      sleep 1; printf 'exit\n'; } \
     | script_shell /tmp/namo_rc_out.sh 2>&1 | tr -d '\r')
   printf '%s' "$cap" | grep -q 'ISATTY_OK' \
     && ok "commands still see a terminal on stdout" \
@@ -1085,7 +1104,7 @@ RCEOF
   grep -q 'zzprobe output' /tmp/namo_reqs.log 2>/dev/null \
     && ok "and is sent to the model with the next line" \
     || bad "captured output never reached a request"
-  sleep 1
+  wait_for_helpers "$daemons_before"
   daemons_after=$(running_helpers)
   [ "$daemons_before" = "$daemons_after" ] \
     && ok "no relay or daemon left behind by an exited shell" \
