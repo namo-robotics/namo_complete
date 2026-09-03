@@ -148,7 +148,7 @@ time.sleep(0.3)
 os.write(fd, b"\r")
 read_until(b"42\r\n")
 read_until(b"ZTEST> ")
-os.write(fd, b"exit\r")
+os.write(fd, b"\x04")
 wait_for_exit()
 PY
 ok "Alt-O works in a live ZLE session"
