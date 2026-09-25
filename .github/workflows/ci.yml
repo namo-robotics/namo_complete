@@ -49,7 +49,10 @@ jobs:
           shellcheck -S warning shell/*.bash install.sh build.sh run.sh test.sh test-zsh.sh packaging/*.sh || true
 
   macos-arm64:
-    runs-on: macos-15
+    # Sun's bundled OpenSSL archives need the newer Apple archive reader.
+    runs-on: macos-26
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "15.0"
 
     steps:
       - uses: actions/checkout@v4
@@ -61,6 +64,8 @@ jobs:
       - name: Install latest Sun dev artifact
         run: |
           test "$(uname -m)" = arm64
+          xcodebuild -version
+          xcrun ld -version_details
           curl -fsSL -o /tmp/sun.tar.gz \
             https://github.com/namo-robotics/sun/releases/download/dev/sun-0.dev-arm64-apple-darwin.tar.gz
           mkdir -p /tmp/sun

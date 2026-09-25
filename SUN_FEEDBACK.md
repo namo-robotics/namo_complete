@@ -88,3 +88,21 @@ keys indefinitely when the paste terminator was missing. Both integrations now
 bound each continuation read and cancel immediately on Ctrl-C. Ordinary ask-mode
 typing still has no idle timeout. `test-terminal.py` covers these cases with
 input kept open, so EOF cannot conceal a blocking read.
+
+
+## macOS archive linker compatibility
+
+The macOS `fda0b191180f` TLS bundle contains an OpenSSL crypto archive whose
+members use two-byte alignment. The Apple linker on the `macos-15` runner
+(default Xcode 16.4) assumes four-byte alignment and fails with
+`archive member invalid control bits`. Walking the downloaded archive with
+that older alignment rule reproduces the failure after
+`libcommon-lib-der_digests_gen.o`; its headers and symbol offsets are otherwise
+valid. Apple's newer archive reader uses two-byte alignment.
+
+CI and release builds therefore use `macos-26`, matching the newer toolchain
+used to publish Sun's macOS artifact. `MACOSX_DEPLOYMENT_TARGET=15.0` keeps the
+binary's deployment floor at the previous runner's OS version. Both workflows
+print their Xcode and linker versions for future diagnosis. Local macOS builds
+with this bundle also need a newer Apple linker; installing LLVM for the Sun
+compiler does not replace the Apple linker selected by `cc`.

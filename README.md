@@ -227,8 +227,11 @@ cp .env.example .env && chmod 600 .env
 [`.devcontainer/`](.devcontainer/) uses the repository's Ubuntu 26.04
 image. The validated compiler is Sun `fda0b191180f`. Builds require a complete
 Sun dev artifact with matching `stdlib.moon` and `tls.moon` bundles.
-`upgrade-sun.sh` installs these into `.sun/`, which `build.sh` uses automatically. Nothing ever fails loudly into your prompt: a missing key, a
-timeout or a network error leaves your line exactly as it was and explains
+`upgrade-sun.sh` installs these into `.sun/`, which `build.sh` uses automatically.
+The current macOS TLS bundle requires a recent Apple linker; CI uses the
+macOS 26 toolchain with a macOS 15 deployment target (see `SUN_FEEDBACK.md`).
+
+Nothing ever fails loudly into your prompt: a missing key, a timeout or a network error leaves your line exactly as it was and explains
 itself separately.
 
 ## Notes on Sun
