@@ -20,3 +20,6 @@ spike/
 *.tmp
 *.swp
 .DS_Store
+
+# Compiler and matching bundles installed by upgrade-sun.sh
+.sun/

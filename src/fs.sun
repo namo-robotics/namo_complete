@@ -24,7 +24,7 @@ public module namo {
   public function ensure_dir(alloc: ref HeapAllocator, path: ref String) void {
     try {
       make_dir(path, MODE_0700);
-    } catch (e: IError) {
+    } catch (e: const ref IError) {
       // Already there, or the parent is missing; the caller finds out when
       // the write fails.
     }
@@ -34,7 +34,7 @@ public module namo {
   public function ensure_dir_p(alloc: ref HeapAllocator, path: const ref String) void {
     var acc = String(alloc, "");
     for (var i: i64 = 0; i < path.length(); i = i + 1) {
-      var c: u8 = path.at(i);
+      var c: u8 = string_byte(path, i);
       acc.append_char(c);
       if (c == 47 and acc.length() > 1) {
         ensure_dir(alloc, acc);
@@ -49,7 +49,7 @@ public module namo {
   public function remove_path(alloc: ref HeapAllocator, path: ref String) void {
     try {
       remove_file(path);
-    } catch (e: IError) {
+    } catch (e: const ref IError) {
       // Not there is the state we wanted anyway.
     }
   }
@@ -62,7 +62,7 @@ public module namo {
     var out = String(alloc, "");
     try {
       out = f.read_all(alloc);
-    } catch (e: IError) {
+    } catch (e: const ref IError) {
       out = String(alloc, "");
     }
     return out;

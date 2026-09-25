@@ -201,16 +201,20 @@ Release binaries need no curl or OpenSSL runtime dependency. The only native
 code outside Sun's bundled libraries is isolated in
 [`platform_linux.sun`](src/platform_linux.sun) and
 [`platform_macos.sun`](src/platform_macos.sun): PTY allocation, window-size
-ioctls, and the read-write nonblocking FIFO open that the current stdlib cannot
-express. The shared relay contains no FFI or `unsafe` block.
+updates, nonblocking descriptor flags, and the read-write nonblocking FIFO open
+that the current stdlib cannot express. Terminal size queries use
+`std.terminal`; the shared relay contains no FFI or `unsafe` blocks.
+Container reads and writes use checked access throughout.
 
 ## Development
 
 ```sh
 ./run.sh            # try it here, without installing anything
-./build.sh          # -> bin/namo_complete (needs the Sun compiler)
+./upgrade-sun.sh    # install the latest matching Sun compiler and libraries locally
+./build.sh          # -> bin/namo_complete
 ./test.sh           # no API key needed: it answers itself with a local stub
-./test-zsh.sh     # zsh/ZLE and macOS installer regressions
+./test-zsh.sh       # zsh/ZLE and macOS installer regressions
+python3 test-terminal.py # full-pipe and interrupted-paste regressions
 ./test.sh --live   # adds one real call, and times it
 ```
 
@@ -221,15 +225,16 @@ cp .env.example .env && chmod 600 .env
 ```
 
 [`.devcontainer/`](.devcontainer/) uses the repository's Ubuntu 26.04
-image. Builds require the latest Sun dev artifact with matching `stdlib.moon`
-and `tls.moon` bundles. Nothing ever fails loudly into your prompt: a missing key, a
+image. The validated compiler is Sun `fda0b191180f`. Builds require a complete
+Sun dev artifact with matching `stdlib.moon` and `tls.moon` bundles.
+`upgrade-sun.sh` installs these into `.sun/`, which `build.sh` uses automatically. Nothing ever fails loudly into your prompt: a missing key, a
 timeout or a network error leaves your line exactly as it was and explains
 itself separately.
 
 ## Notes on Sun
 
 [SUN_FEEDBACK.md](SUN_FEEDBACK.md) records the compiler gaps that shaped the
-project, what Sun `8fae619738f4` resolved, and the small platform FFI/borrow
+project, what Sun `fda0b191180f` resolved, and the small platform FFI/borrow
 workarounds that remain.
 
 ## License

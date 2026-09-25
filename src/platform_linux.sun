@@ -8,12 +8,18 @@ public module namo {
   extern "C" function unlockpt(fd: i32) i32;
   extern "C" function ptsname(fd: i32) raw_ptr<u8>;
   extern "C" function ioctl(fd: i32, req: u64, arg: raw_ptr<u8>) i32;
+  extern "C" function fcntl(fd: i32, command: i32, flags: i32) i32;
   extern "C" function open(path: raw_ptr<u8>, flags: i32, mode: i32) i32;
 
   var PLATFORM_PTY_FLAGS: i32 = 258;  // O_RDWR | O_NOCTTY
   var PLATFORM_FIFO_FLAGS: i32 = 2050;  // O_RDWR | O_NONBLOCK
-  var PLATFORM_TIOCGWINSZ: u64 = 21523;
   var PLATFORM_TIOCSWINSZ: u64 = 21524;
+
+  /** Make an inherited descriptor nonblocking, including the shell's shared copy. */
+  public function platform_nonblocking(fd: i32) bool {
+    var flags: i32 = unsafe { fcntl(fd, 3, 0); };
+    return flags >= 0 and unsafe { fcntl(fd, 4, flags | 2048); } == 0;
+  }
 
   // Allocate a new pseudo-terminal master.
   function platform_pty_open() i32 {
@@ -34,8 +40,13 @@ public module namo {
 
   // Copy a terminal window size to a pseudo-terminal.
   function platform_copy_winsize(ws: ref ContiguousBuffer<u16>, tty_fd: i32, master: i32) void {
-    if (unsafe { ioctl(tty_fd, PLATFORM_TIOCGWINSZ, ws.raw_data()); } == 0) {
+    try {
+      var size = std.terminal.get_size(tty_fd);
+      ws.set(0, _convert<u16>(size.rows));
+      ws.set(1, _convert<u16>(size.cols));
       unsafe { ioctl(master, PLATFORM_TIOCSWINSZ, ws.raw_data()); };
+    } catch (e: const ref IError) {
+      // Keep the previous size if the real terminal has gone away.
     }
   }
 

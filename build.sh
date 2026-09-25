@@ -4,6 +4,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# Prefer the complete local toolchain installed by upgrade-sun.sh.
+if [ -x "$PWD/.sun/bin/sun" ]; then
+  export PATH="$PWD/.sun/bin:$PATH"
+  export SUN_PATH="$PWD/.sun/lib/sun"
+fi
+
 if ! command -v sun >/dev/null 2>&1; then
   echo "error: the Sun compiler is not on PATH." >&2
   echo "       install the latest dev artifact from https://github.com/namo-robotics/sun/releases/tag/dev" >&2

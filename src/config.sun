@@ -198,7 +198,7 @@ public module namo {
     var seen_dot: bool = false;
     var seen_digit: bool = false;
     for (var i: i64 = 0; i < raw.length(); i = i + 1) {
-      var c: u8 = raw.at(i);
+      var c: u8 = string_byte(raw, i);
       if (c == 46) {
         if (seen_dot) {
           return fallback;

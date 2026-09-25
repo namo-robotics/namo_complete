@@ -11,9 +11,9 @@ using std;
 using std.env;
 using namo;
 
-function emit(alloc: ref HeapAllocator, items: const ref Vec<String>) void {
+function emit(alloc: ref HeapAllocator, items: const ref Vec<String>) void throws IError {
   for (var i: i64 = 0; i < items.size(); i = i + 1) {
-    println(items.get_unchecked(i));
+    println(items.get(i));
   }
 }
 
@@ -34,7 +34,18 @@ function print_version(alloc: ref HeapAllocator) void {
   println(second);
 }
 
+/** Run a command and report checked-access or request failures without a traceback. */
 function main(argc: i32, argv: raw_ptr<raw_ptr<i8>>) i32 {
+  try {
+    return run(argc, argv);
+  } catch (e: const ref IError) {
+    eprint("[namo] command failed\n");
+    return 1;
+  }
+}
+
+/** Dispatch the command and propagate failures to the process boundary. */
+function run(argc: i32, argv: raw_ptr<raw_ptr<i8>>) i32 throws IError {
   var alloc = make_heap_allocator();
   var cfg = Config(alloc);
 
@@ -43,7 +54,14 @@ function main(argc: i32, argv: raw_ptr<raw_ptr<i8>>) i32 {
   // with NAMO_DISABLE=1 can still be asked what it has installed.
   var cli = cfg.environment.args(argc, argv);
   for (var i: i64 = 1; i < cli.size(); i = i + 1) {
-    var arg = cli.get_unchecked(i);
+    var arg: const ref String = cli.get(i);
+    if (arg.equals_literal("--nonblocking-fifo")) {
+      if (i + 1 >= cli.size()) { return 1; }
+      var fd_text: const ref String = cli.get(i + 1);
+      var fd: i64 = match fd_text.parse_i64() { Option.Some(value) => value, Option.None => -1 };
+      if (fd < 3 or fd > 2147483647) { return 1; }
+      return platform_nonblocking(_convert<i32>(fd)) ? 0 : 1;
+    }
     if (arg.equals_literal("--version") or arg.equals_literal("-V")) {
       print_version(alloc);
       return 0;
@@ -114,12 +132,12 @@ function main(argc: i32, argv: raw_ptr<raw_ptr<i8>>) i32 {
   }
 
   var context = build_context(alloc, cfg, history, listing);
-  var body = build_body(alloc, cfg, context);
 
   var reply = Reply(alloc);
   try {
+    var body = build_body(alloc, cfg, context);
     reply = call_api(alloc, cfg, body);
-  } catch (e: IError) {
+  } catch (e: const ref IError) {
     eprint("[namo] request failed\n");
     return 1;
   }

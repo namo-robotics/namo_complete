@@ -48,7 +48,7 @@ public module namo {
 
   // Cache format: first line is the unix timestamp, remaining lines are the
   // suggestions. Returns an empty Vec on miss or expiry.
-  public function cache_lookup(alloc: ref HeapAllocator, cfg: const ref Config, key: const ref String) Vec<String> {
+  public function cache_lookup(alloc: ref HeapAllocator, cfg: const ref Config, key: const ref String) Vec<String> throws IError {
     var out = Vec<String>(alloc, 4);
     // NAMO_CACHE=0 means neither read nor written -- checked here rather than
     // at every call site, because the daemon's sites forgot to.
@@ -60,7 +60,7 @@ public module namo {
     var raw = String(alloc, "");
     try {
       raw = read_to_string(alloc, path);
-    } catch (e: IError) {
+    } catch (e: const ref IError) {
       return out;
     }
 
@@ -69,7 +69,7 @@ public module namo {
       return out;
     }
 
-    var stamped = lines.get_unchecked(0).parse_i64();
+    var stamped = lines.get(0).parse_i64();
     var ts: i64 = match stamped {
       Option.Some(v) => v,
       Option.None => 0
@@ -79,13 +79,13 @@ public module namo {
     }
 
     for (var i: i64 = 1; i < lines.size(); i = i + 1) {
-      out.push(lines.get_unchecked(i).clone(alloc));
+      out.push(lines.get(i).clone(alloc));
     }
     return out;
   }
 
   // Store non-empty suggestions under a cache key.
-  public function cache_store(alloc: ref HeapAllocator, cfg: const ref Config, key: const ref String, items: const ref Vec<String>) void {
+  public function cache_store(alloc: ref HeapAllocator, cfg: const ref Config, key: const ref String, items: const ref Vec<String>) void throws IError {
     if (cfg.use_cache == false) {
       return;
     }
@@ -98,14 +98,14 @@ public module namo {
     body.append(read_unix_time());
     body.append("\n");
     for (var i: i64 = 0; i < items.size(); i = i + 1) {
-      body.append(items.get_unchecked(i));
+      body.append(items.get(i));
       body.append("\n");
     }
 
     var path = cache_file(alloc, cfg, key);
     try {
       write_string(path, body);
-    } catch (e: IError) {
+    } catch (e: const ref IError) {
       // A cache write failure is never fatal.
     }
   }
@@ -128,7 +128,7 @@ public module namo {
         Option.Some(v) => v,
         Option.None => 0
       };
-    } catch (e: IError) {
+    } catch (e: const ref IError) {
       last = 0;
     }
 
@@ -140,7 +140,7 @@ public module namo {
     stamp.append(current);
     try {
       write_string(path, stamp);
-    } catch (e: IError) {
+    } catch (e: const ref IError) {
       // Non-fatal.
     }
     return true;

@@ -6,6 +6,24 @@
 public module namo {
   using std;
 
+  /** Read a byte, returning NUL when the position is outside the string. */
+  public function string_byte(value: const ref String, index: i64) u8 {
+    try {
+      return value.at(index);
+    } catch (e: const ref IError) {
+      return 0;
+    }
+  }
+
+  /** Copy a byte range, returning an empty string for an invalid range. */
+  public function string_slice(alloc: const ref HeapAllocator, value: const ref String, start: i64, count: i64) String {
+    try {
+      return value.substr(alloc, start, count);
+    } catch (e: const ref IError) {
+      return String(alloc, "");
+    }
+  }
+
   public var CH_NL: u8 = 10;
   public var CH_SP: u8 = 32;
   public var CH_TAB: u8 = 9;
@@ -13,11 +31,11 @@ public module namo {
 
   // Split on '\n', dropping empty/whitespace-only lines. Trailing CR goes with
   // the surrounding whitespace.
-  public function split_lines(alloc: ref HeapAllocator, s: const ref String) Vec<String> {
+  public function split_lines(alloc: ref HeapAllocator, s: const ref String) Vec<String> throws IError {
     var out = Vec<String>(alloc, 8);
     var parts = s.split_nonempty(alloc, CH_NL);
     for (var i: i64 = 0; i < parts.size(); i = i + 1) {
-      var line = parts.get_unchecked(i).clone(alloc);
+      var line = parts.get(i).clone(alloc);
       line.trim();
       if (line.length() > 0) {
         out.push(line);
@@ -37,7 +55,7 @@ public module namo {
   public function hash_str(s: const ref String, seed: i64) i64 {
     var h: i64 = seed;
     for (var i: i64 = 0; i < s.length(); i = i + 1) {
-      h = (h * 131 + s.at(i)) % 1000000007;
+      h = (h * 131 + string_byte(s, i)) % 1000000007;
     }
     return h;
   }
@@ -53,7 +71,7 @@ public module namo {
   // English sentence: - / = $ | * ~ ; > <
   function has_shell_punct(s: const ref String) bool {
     for (var i: i64 = 0; i < s.length(); i = i + 1) {
-      var c: u8 = s.at(i);
+      var c: u8 = string_byte(s, i);
       if (c == 45 or c == 47 or c == 61 or c == 36 or c == 124) {
         return true;
       }
@@ -119,14 +137,14 @@ public module namo {
   // sentence instead ("I cannot produce a useful completion ..."). A sentence
   // in the hint row is worse than an empty row, so it is dropped here -- once,
   // before caching, so every caller sees the same filtered set.
-  public function looks_like_command(alloc: ref HeapAllocator, cmd: const ref String) bool {
+  public function looks_like_command(alloc: ref HeapAllocator, cmd: const ref String) bool throws IError {
     if (cmd.length() == 0) {
       return false;
     }
 
     // Markdown fences and bullets, comments, list markers, quoted prose: a
     // command line never starts this way.
-    var first: u8 = cmd.at(0);
+    var first: u8 = string_byte(cmd, 0);
     if (first == 35 or first == 96 or first == 42 or first == 45) {
       return false;
     }
@@ -138,7 +156,7 @@ public module namo {
     }
     // Numbered list: "1) ls -la", "2. cd src".
     if (first >= 48 and first <= 57 and cmd.length() > 1) {
-      var second: u8 = cmd.at(1);
+      var second: u8 = string_byte(cmd, 1);
       if (second == 41 or second == 46) {
         return false;
       }
@@ -146,12 +164,12 @@ public module namo {
 
     // Sentence-ending punctuation. `git add .` and `cd ..` end in a dot too,
     // hence the letter test rather than a bare '.'.
-    var last: u8 = cmd.at(cmd.length() - 1);
+    var last: u8 = string_byte(cmd, cmd.length() - 1);
     if (last == 63 or last == 33 or last == 58) {
       return false;
     }
     if (last == 46 and cmd.length() > 1) {
-      if (is_alpha(cmd.at(cmd.length() - 2))) {
+      if (is_alpha(string_byte(cmd, cmd.length() - 2))) {
         return false;
       }
     }
@@ -168,7 +186,7 @@ public module namo {
       var words = low.split_whitespace(alloc);
       var stops: i64 = 0;
       for (var i: i64 = 0; i < words.size(); i = i + 1) {
-        var w = words.get_unchecked(i);
+        var w = words.get(i);
         if (is_stopword(w)) {
           stops = stops + 1;
         }
@@ -223,19 +241,19 @@ public module namo {
   // line was never recorded at all -- HISTCONTROL=ignorespace, HISTIGNORE and
   // `set +o history` all leave entry 1 belonging to some earlier command, and
   // the first word is what gives that away.
-  public function history_line(alloc: ref HeapAllocator, raw: const ref String, word: const ref String, fallback: const ref String) String {
+  public function history_line(alloc: ref HeapAllocator, raw: const ref String, word: const ref String, fallback: const ref String) String throws IError {
     var line = raw.clone(alloc);
     line.trim();
 
     var i: i64 = 0;
-    while (i < line.length() and line.at(i) >= 48 and line.at(i) <= 57) {
+    while (i < line.length() and string_byte(line, i) >= 48 and string_byte(line, i) <= 57) {
       i = i + 1;
     }
-    var typed = line.substr(alloc, i, line.length() - i);
+    var typed = string_slice(alloc, line, i, line.length() - i);
     typed.trim();
 
     var words = typed.split_whitespace(alloc);
-    if (words.size() == 0 or words.get_unchecked(0).equals(word) == false) {
+    if (words.size() == 0 or words.get(0).equals(word) == false) {
       return fallback.clone(alloc);
     }
     return typed;

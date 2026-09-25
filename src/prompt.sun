@@ -24,7 +24,7 @@ public module namo {
 
   // Assemble the tagged context block shown to the model. The cursor position
   // is marked explicitly so the model knows where the user is typing.
-  public function build_context(alloc: ref HeapAllocator, cfg: ref Config, history: const ref Vec<String>, listing: const ref String) String {
+  public function build_context(alloc: ref HeapAllocator, cfg: ref Config, history: const ref Vec<String>, listing: const ref String) String throws IError {
     var ctx = String(alloc, "<shell>");
     ctx.append(cfg.shell_name);
     ctx.append("</shell>\n<cwd>");
@@ -43,7 +43,7 @@ public module namo {
       var recorded = String(alloc, "");
       try {
         recorded = read_to_string(alloc, cfg.outfile);
-      } catch (e: IError) {
+      } catch (e: const ref IError) {
         recorded = String(alloc, "");
       }
       recorded.trim();
@@ -57,7 +57,7 @@ public module namo {
     if (history.size() > 0) {
       ctx.append("<history>\n");
       for (var i: i64 = 0; i < history.size(); i = i + 1) {
-        ctx.append(history.get_unchecked(i));
+        ctx.append(history.get(i));
         ctx.append("\n");
       }
       ctx.append("</history>\n");
@@ -127,7 +127,7 @@ public module namo {
   // Haiku 4.5) and no `cache_control` (Haiku's minimum cacheable prefix is
   // 4096 tokens, far above our ~150-token system prompt, so it would silently
   // no-op). Local caching does that job instead.
-  public function build_body(alloc: ref HeapAllocator, cfg: const ref Config, context: const ref String) String {
+  public function build_body(alloc: ref HeapAllocator, cfg: const ref Config, context: const ref String) String throws IError {
     var req = create_json_object(alloc);
     req.set(String(alloc, "model"), create_json_string(alloc, cfg.model));
     // Determinism for the models that allow it: the same line in the same

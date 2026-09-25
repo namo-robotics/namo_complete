@@ -146,6 +146,14 @@ _namo_daemon_ensure() {
     { exec {_NAMO_WFD}<>"$_NAMO_FIFO"; } 2>/dev/null || { _NAMO_WFD=""; return 1; }
   fi
 
+  # File status flags are shared across exec: configure our FIFO once before
+  # any editor hook can write into it. Failure disables the integration.
+  if ! "$_NAMO_BIN_PATH" --nonblocking-fifo 3 3>&"$_NAMO_WFD" >/dev/null 2>&1; then
+    { exec {_NAMO_WFD}>&-; } 2>/dev/null
+    _NAMO_WFD=""
+    return 1
+  fi
+
   # The way back. Read-write again, so that a daemon that died does not deliver
   # an end-of-file to a `read` that is waiting for an answer.
   if [ -z "$_NAMO_RFD" ]; then
@@ -219,9 +227,18 @@ _namo_capture_ensure() {
 
 # Hand the current line to the daemon and return. One write() into a pipe
 # buffer: this is the keystroke path, and it must do nothing else.
+# Keep each record within the portable atomic FIFO write limit. Nonblocking
+# writes then either enqueue a whole record or fail without corrupting it.
+_namo_write_record() {
+  local LC_ALL=C
+  local record="$1"$'\n'
+  (( ${#record} <= 512 )) || return 1
+  { printf '%s' "$record" >&"$_NAMO_WFD"; } 2>/dev/null
+}
+
 _namo_send_line() {
   [ -n "$_NAMO_WFD" ] || return 0
-  printf '%s\t%s\n' "$PWD" "$1" >&"$_NAMO_WFD" 2>/dev/null
+  _namo_write_record "$PWD"$'\t'"$1"
   return 0
 }
 
@@ -252,7 +269,7 @@ _namo_ask_daemon() {  # mode ("c" to complete, "a" to answer), subject
 
   _NAMO_REQ_ID=$(( _NAMO_REQ_ID + 1 ))
   local id=$_NAMO_REQ_ID
-  printf '%s\t\002%s\t%s\t%s\n' "$PWD" "$id" "$1" "$2" >&"$_NAMO_WFD" 2>/dev/null || return 1
+  _namo_write_record "$PWD"$'\t\002'"$id"$'\t'"$1"$'\t'"$2" || return 1
 
   local line n i out=""
   while :; do
@@ -564,12 +581,13 @@ _namo_read_paste() {
   IFS= read -rsN1 -t 0.05 ch || return 1
   [[ "$ch" == '[' ]] || return 1
   for (( i = 0; i < 4; i++ )); do
-    IFS= read -rsN1 ch || return 1
+    IFS= read -rsN1 -t 1 ch || return 1
     opener+="$ch"
     [[ "$ch" == '~' ]] && break
   done
   [[ "$opener" == '200~' ]] || return 1
-  while IFS= read -rsN1 ch; do
+  while IFS= read -rsN1 -t 1 ch; do
+    [[ "$ch" == $'\003' ]] && return 1
     _NAMO_PASTE+="$ch"
     (( ${#_NAMO_PASTE} <= 16384 )) || return 1
     if (( ${#_NAMO_PASTE} >= 6 )) && [[ "${_NAMO_PASTE: -6}" == "$marker" ]]; then

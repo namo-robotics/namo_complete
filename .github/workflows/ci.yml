@@ -40,6 +40,7 @@ jobs:
         run: |
           ./test.sh
           ./test-zsh.sh
+          python3 test-terminal.py
 
       - name: Shellcheck
         continue-on-error: true
@@ -83,3 +84,4 @@ jobs:
         run: |
           bash ./test.sh
           ./test-zsh.sh
+          python3 test-terminal.py

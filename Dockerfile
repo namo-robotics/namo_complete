@@ -29,9 +29,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV LANG=en_US.UTF-8 \
     LC_ALL=en_US.UTF-8
 
+# Refresh the rolling artifact when the validated compiler changes.
+ARG SUN_REV=fda0b191180fe15f8a498b5f001b91d6721bbad8
+
 # Install the rolling Sun compiler together with its matching stdlib and TLS
 # bundles. apt resolves the LLVM runtime declared by the package.
-RUN curl -fsSL -o /tmp/sun.deb \
+RUN test -n "$SUN_REV" && curl -fsSL -o /tmp/sun.deb \
       https://github.com/namo-robotics/sun/releases/download/dev/sun_0.dev_amd64.deb \
  && apt-get update \
  && apt-get install -y --no-install-recommends /tmp/sun.deb \

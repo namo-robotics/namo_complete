@@ -100,6 +100,14 @@ _namo_daemon_ensure() {
       { _NAMO_WFD=""; return 1; }
   fi
 
+  # File status flags are shared across exec: configure our FIFO once before
+  # any editor hook can write into it. Failure disables the integration.
+  if ! "$_NAMO_BIN_PATH" --nonblocking-fifo 3 3>&"$_NAMO_WFD" >/dev/null 2>&1; then
+    { exec {_NAMO_WFD}>&-; } 2>/dev/null
+    _NAMO_WFD=""
+    return 1
+  fi
+
   if [[ -z "$_NAMO_RFD" ]]; then
     [[ -p "$_NAMO_REPLYFIFO" ]] ||
       mkfifo -m 600 "$_NAMO_REPLYFIFO" 2>/dev/null || return 1
@@ -147,9 +155,18 @@ _namo_capture_ensure() {
   _NAMO_CAPTURE=1
 }
 
+# Keep each record within the portable atomic FIFO write limit. Nonblocking
+# writes then either enqueue a whole record or fail without corrupting it.
+_namo_write_record() {
+  local LC_ALL=C
+  local record="$1"$'\n'
+  (( ${#record} <= 512 )) || return 1
+  { printf '%s' "$record" >&"$_NAMO_WFD"; } 2>/dev/null
+}
+
 _namo_send_line() {
   [[ -n "$_NAMO_WFD" ]] || return 0
-  printf '%s\t%s\n' "$PWD" "$1" >&$_NAMO_WFD 2>/dev/null
+  _namo_write_record "$PWD"$'\t'"$1"
   return 0
 }
 
@@ -165,8 +182,7 @@ _namo_ask_daemon() {
 
   (( _NAMO_REQ_ID++ ))
   local id=$_NAMO_REQ_ID
-  printf '%s\t\002%s\t%s\t%s\n' "$PWD" "$id" "$1" "$2" \
-    >&$_NAMO_WFD 2>/dev/null || return 1
+  _namo_write_record "$PWD"$'\t\002'"$id"$'\t'"$1"$'\t'"$2" || return 1
 
   local line="" n="" i=0 out=""
   while true; do
@@ -287,12 +303,13 @@ _namo_read_paste() {
   read -rsk 1 -u 0 -t 0.05 ch || return 1
   [[ "$ch" == '[' ]] || return 1
   for (( i = 0; i < 4; i++ )); do
-    read -rsk 1 -u 0 ch || return 1
+    read -rsk 1 -u 0 -t 1 ch || return 1
     opener+="$ch"
     [[ "$ch" == '~' ]] && break
   done
   [[ "$opener" == '200~' ]] || return 1
-  while read -rsk 1 -u 0 ch; do
+  while read -rsk 1 -u 0 -t 1 ch; do
+    [[ "$ch" == $'\003' ]] && return 1
     pasted+="$ch"
     (( ${#pasted} <= 16384 )) || return 1
     if (( ${#pasted} >= 6 )) && [[ "${pasted[-6,-1]}" == "$marker" ]]; then

@@ -43,7 +43,7 @@ public module namo {
       return false;
     }
     for (var i: i64 = 0; i < key.length(); i = i + 1) {
-      var c: u8 = key.at(i);
+      var c: u8 = string_byte(key, i);
       if (c < 32 or c == 34 or c == 92 or c == 127) {
         return false;
       }
@@ -73,21 +73,21 @@ public module namo {
 
     var slash: i64 = raw.length();
     for (var i: i64 = start; i < raw.length(); i = i + 1) {
-      if (raw.at(i) == b'/') {
+      if (string_byte(raw, i) == b'/') {
         slash = i;
         break;
       }
     }
     var colon: i64 = -1;
     for (var i: i64 = start; i < slash; i = i + 1) {
-      if (raw.at(i) == b':') {
+      if (string_byte(raw, i) == b':') {
         colon = i;
       }
     }
     var host_end: i64 = slash;
     if (colon >= 0) {
       host_end = colon;
-      var port_text = raw.substr(alloc, colon + 1, slash - colon - 1);
+      var port_text = string_slice(alloc, raw, colon + 1, slash - colon - 1);
       var parsed_port: i64 = match port_text.parse_i64() {
         Option.Some(value) => value,
         Option.None => throw Error(-1, "NAMO_ENDPOINT has an invalid port")
@@ -100,9 +100,9 @@ public module namo {
     if (host_end <= start) {
       throw Error(-1, "NAMO_ENDPOINT has an invalid host");
     }
-    out.host = raw.substr(alloc, start, host_end - start);
+    out.host = string_slice(alloc, raw, start, host_end - start);
     for (var i: i64 = 0; i < out.host.length(); i = i + 1) {
-      var c: u8 = out.host.at(i);
+      var c: u8 = string_byte(out.host, i);
       if (usable_host_char(c) == false) {
         throw Error(-1, "NAMO_ENDPOINT has an invalid host");
       }
@@ -111,13 +111,13 @@ public module namo {
       throw Error(-1, "plaintext NAMO_ENDPOINT must use loopback");
     }
     if (slash < raw.length()) {
-      out.path = raw.substr(alloc, slash, raw.length() - slash);
+      out.path = string_slice(alloc, raw, slash, raw.length() - slash);
     }
     if (out.path.contains("#")) {
       throw Error(-1, "NAMO_ENDPOINT must not contain a fragment");
     }
     for (var i: i64 = 0; i < out.path.length(); i = i + 1) {
-      var c: u8 = out.path.at(i);
+      var c: u8 = string_byte(out.path, i);
       if (c <= 32 or c == 127) {
         throw Error(-1, "NAMO_ENDPOINT has an invalid path");
       }
@@ -163,7 +163,7 @@ public module namo {
     var n: i64 = stream.recv(chunk);
     while (n > 0) {
       for (var i: i64 = 0; i < n; i = i + 1) {
-        raw.append_char(chunk.get_unchecked(i));
+        raw.append_char(chunk.get(i));
       }
       n = stream.recv(chunk);
     }
@@ -184,7 +184,7 @@ public module namo {
     var n: i64 = stream.recv(chunk);
     while (n > 0) {
       for (var i: i64 = 0; i < n; i = i + 1) {
-        raw.append_char(chunk.get_unchecked(i));
+        raw.append_char(chunk.get(i));
       }
       n = stream.recv(chunk);
     }
@@ -276,20 +276,20 @@ public module namo {
         if (reply.suggestions.size() >= cfg.max_suggestions) {
           return;
         }
-        var cand = lines.get_unchecked(i).clone(alloc);
+        var cand = lines.get(i).clone(alloc);
         if (cand.length() > 0) {
           // Ask mode answers "COMMAND<TAB>DESCRIPTION", so only the command
           // half is judged. A line that does not read like a command is
           // dropped rather than shown; see looks_like_command.
           var parts = cand.split(alloc, CH_TAB);
-          var head = parts.get_unchecked(0).clone(alloc);
+          var head = parts.get(0).clone(alloc);
           head.trim();
           if (looks_like_command(alloc, head)) {
             reply.suggestions.push(cand);
           }
         }
       }
-    } catch (e: IError) {
+    } catch (e: const ref IError) {
       eprint("[namo] could not parse api response\n");
       reply.failed = true;
       reply.error = String(alloc, "could not parse api response");
