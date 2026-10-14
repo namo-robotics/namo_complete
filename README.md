@@ -249,6 +249,12 @@ cp .env.example .env && chmod 600 .env
 [`.devcontainer/`](.devcontainer/) uses the repository's Ubuntu 26.04
 image. The validated compiler is Sun `cc7686189ee2`. Builds require a complete
 Sun dev artifact with matching `stdlib.moon` and `tls.moon` bundles.
+Linux static linking also requires `x86_64-linux-musl-gcc` and musl-built C++
+runtime archives; CI uses the same musl.cc toolchain as the development container.
+On macOS, install the compiler dependencies with `brew install llvm@20 libarchive bash`.
+These are build dependencies: the Linux executable is fully static, and the macOS
+executable may depend only on Apple system libraries. CI enforces this with
+`bash tools/check-linkage.sh`; OpenSSL stays linked into both executables.
 `upgrade-sun.sh` installs these into `.sun/`, which `build.sh` uses automatically.
 The current macOS TLS bundle requires a recent Apple linker; CI uses the
 macOS 26 toolchain with a macOS 15 deployment target (see `SUN_FEEDBACK.md`).

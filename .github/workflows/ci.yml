@@ -20,6 +20,15 @@ jobs:
 
       - uses: actions/checkout@v4
 
+      - name: Install static Linux link toolchain
+        # Sun needs musl-built C++ runtime archives as well as the C compiler.
+        run: |
+          curl -fL --retry 3 -o /tmp/musl-cross.tgz https://musl.cc/x86_64-linux-musl-cross.tgz
+          mkdir -p /opt/cross
+          tar -xzf /tmp/musl-cross.tgz -C /opt/cross
+          /opt/cross/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc --version
+          echo "/opt/cross/x86_64-linux-musl-cross/bin" >> "$GITHUB_PATH"
+
       - name: Install latest Sun dev artifact
         run: |
           curl -fsSL -o /tmp/sun.deb \
@@ -30,11 +39,7 @@ jobs:
       - name: Build and verify Linux binary
         run: |
           ./build.sh
-          file bin/namo_complete
-          if ! file bin/namo_complete | grep -Eq 'static-pie linked|statically linked'; then
-            echo "::error::binary is not statically linked"
-            exit 1
-          fi
+          bash tools/check-linkage.sh
 
       - name: Test
         run: |
@@ -60,7 +65,7 @@ jobs:
 
       - name: Install build and test dependencies
         # Bash only exercises the optional Bash integration; macOS users run zsh.
-        run: brew install llvm@20 bash
+        run: brew install llvm@20 libarchive bash
 
       - name: Install latest Sun dev artifact
         run: |
@@ -80,11 +85,7 @@ jobs:
           bash ./build.sh
           file bin/namo_complete
           file bin/namo_complete | grep -q 'arm64'
-          otool -L bin/namo_complete
-          if otool -L bin/namo_complete | grep -Eq 'lib(ssl|crypto)'; then
-            echo "::error::binary unexpectedly depends on shared OpenSSL"
-            exit 1
-          fi
+          bash tools/check-linkage.sh
 
       - name: Test
         run: |
