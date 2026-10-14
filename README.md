@@ -10,6 +10,10 @@ Supports **x86_64 Linux** and **Apple Silicon macOS**
 
 </div>
 
+![Terminal and agent workspace: ask about output, accept a command, and change the split layout](assets/demo.gif)
+
+*Recorded from the real application with deterministic replies from a local API fixture.*
+
 ## Terminal and agent workspace
 
 The built-in workspace puts your shell on the left and an agent conversation on
@@ -221,6 +225,10 @@ for rc in ~/.zshrc ~/.bashrc; do
 done
 ```
 ## Development
+
+To refresh the README animation, build the binary, install `Pillow` and `pyte` in a
+Python environment, then run `python3 tools/record-demo.py --font /path/to/monospace.ttf`.
+The recording uses a temporary shell session and local API fixture; no API key is needed.
 
 ```sh
 ./run.sh            # try it here, without installing anything
