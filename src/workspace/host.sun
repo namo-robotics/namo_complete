@@ -421,8 +421,7 @@ public module namo {
     }
     w.pty.adopt(master);
     var slave = platform_pty_name(alloc, master);
-    platform_workspace_size(master, w.terminal.rows, w.terminal.cols);
-    w.child = platform_workspace_spawn(cmd, slave, master);
+    w.child = platform_workspace_spawn(cmd, slave, master, w.terminal.rows, w.terminal.cols);
     if (w.child <= 0) {
       w.child = 0;
       workspace_cleanup(alloc, w);

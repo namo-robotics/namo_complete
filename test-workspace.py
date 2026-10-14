@@ -172,6 +172,12 @@ def wait_file(session, path, seconds=4):
     raise AssertionError(f'Command did not create {path}; {session.read(0)[-2000:]}')
 
 
+def assert_terminal_size(path, expected):
+    """Report the shell's actual dimensions when a pane size check fails."""
+    actual = path.read_text().strip()
+    assert actual == expected, f'Terminal size: expected {expected!r}, got {actual!r}'
+
+
 def check_shell(shell, endpoint):
     """Check normal terminal behavior and the explicit command approval boundary."""
     global PROPOSAL
@@ -207,7 +213,7 @@ def check_shell(shell, endpoint):
             session.command("printf 'TERMINAL_CONTEXT_123\\n'")
             session.wait_text('TERMINAL_CONTEXT_123')
             session.command('stty size > dimensions')
-            assert (home / 'dimensions').read_text().strip() == '22 71'
+            assert_terminal_size(home / 'dimensions', '22 71')
             session.output = b''
             session.send('\x1b[<0;100;3M\x1b[<0;100;3m')
             session.wait_text('agent |')
@@ -218,7 +224,7 @@ def check_shell(shell, endpoint):
             session.send('\x1b]s')
             session.read(.2)
             session.command('stty size > dimensions')
-            assert (home / 'dimensions').read_text().strip() == '12 120'
+            assert_terminal_size(home / 'dimensions', '12 120')
             session.output = b''
             session.send('\x1b[<0;4;16M\x1b[<0;4;16m')
             session.wait_text('agent |')
@@ -229,17 +235,17 @@ def check_shell(shell, endpoint):
             session.send('\x1b]\x1b[B')
             session.read(.2)
             session.command('stty size > dimensions')
-            assert (home / 'dimensions').read_text().strip() == '13 120'
+            assert_terminal_size(home / 'dimensions', '13 120')
             session.send('\x1b]\x1b[A')
             session.resize(8, 60)
             session.read(.2)
             session.command('stty size > dimensions')
-            assert (home / 'dimensions').read_text().strip() == '6 60'
+            assert_terminal_size(home / 'dimensions', '6 60')
             session.resize(24, 120)
             session.send('\x1b]a')
             session.read(.2)
             session.command('stty size > dimensions')
-            assert (home / 'dimensions').read_text().strip() == '22 120'
+            assert_terminal_size(home / 'dimensions', '22 120')
             session.send('\x1b]a\x1b]s')
             session.read(.2)
             mouse_program = home / 'mouse-program.py'
@@ -278,23 +284,23 @@ finally:
             session.send('\x1b]a')
             session.read(.2)
             session.command('stty size > dimensions')
-            assert (home / 'dimensions').read_text().strip() == '22 120'
+            assert_terminal_size(home / 'dimensions', '22 120')
             session.resize(26, 130)
             session.read(.2)
             session.command('stty size > dimensions')
-            assert (home / 'dimensions').read_text().strip() == '24 130'
+            assert_terminal_size(home / 'dimensions', '24 130')
             session.send('\x1b]a')
             session.read(.2)
             session.command('stty size > dimensions')
-            assert (home / 'dimensions').read_text().strip() == '24 77'
+            assert_terminal_size(home / 'dimensions', '24 77')
             session.resize(30, 140)
             session.read(.2)
             session.command('stty size > dimensions')
-            assert (home / 'dimensions').read_text().strip() == '28 83'
+            assert_terminal_size(home / 'dimensions', '28 83')
             session.resize(12, 60)
             session.read(.2)
             session.command('stty size > dimensions')
-            assert (home / 'dimensions').read_text().strip() == '10 60'
+            assert_terminal_size(home / 'dimensions', '10 60')
             session.resize(24, 120)
             session.read(.2)
             session.focus_chat()
@@ -585,7 +591,7 @@ def check_recovery(shell, endpoint):
             try:
                 if failure == 'crash':
                     session.command('stty size > initial-size')
-                    assert (home / 'initial-size').read_text().strip() == '12 120'
+                    assert_terminal_size(home / 'initial-size', '12 120')
                     session.command('printf "%s" "$PPID" > host-pid')
                     host = int((home / 'host-pid').read_text())
                     assert host != session.pid
@@ -647,7 +653,7 @@ def check_hidden_agent(shell, endpoint):
                           NAMO_HINT_MIN='3', NAMO_CONTEXT_BYTES='4096', NAMO_LAYOUT='horizontal')
         try:
             session.command('stty size > dimensions')
-            assert (home / 'dimensions').read_text().strip() == '22 120'
+            assert_terminal_size(home / 'dimensions', '22 120')
             session.command('false')
             session.command("printf 'context line %s\\n' {1..400}")
             session.send('printf hidden')
@@ -662,7 +668,7 @@ def check_hidden_agent(shell, endpoint):
             session.send('\x1b]a')
             session.read(1.2)
             session.command('stty size > dimensions')
-            assert (home / 'dimensions').read_text().strip() == '22 120'
+            assert_terminal_size(home / 'dimensions', '22 120')
             before = len(REQUESTS)
             session.read(2.5)
             assert len(REQUESTS) == before, 'requests resumed while hidden'
@@ -673,7 +679,7 @@ def check_hidden_agent(shell, endpoint):
             session.send('/hide\r')
             session.read(.2)
             session.command('stty size > dimensions')
-            assert (home / 'dimensions').read_text().strip() == '22 120'
+            assert_terminal_size(home / 'dimensions', '22 120')
         finally:
             session.close()
         print('PASS agent visibility: hidden startup, full-width shell, paused requests, cancellation, reopening')
