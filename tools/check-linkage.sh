@@ -4,8 +4,9 @@ set -euo pipefail
 binary=${1:-bin/namo_complete}
 case "$(uname -s)" in
   Linux)
-    file -L "$binary"
-    if ! file -L "$binary" | grep -Eq 'static-pie linked|statically linked'; then
+    description=$(file -L "$binary")
+    printf '%s\n' "$description"
+    if [[ $description != *'static-pie linked'* && $description != *'statically linked'* ]]; then
       echo 'error: Linux release binary must be statically linked' >&2
       exit 1
     fi
@@ -23,7 +24,7 @@ case "$(uname -s)" in
   Darwin)
     dependencies=$(otool -L "$binary")
     printf '%s\n' "$dependencies"
-    external=$(printf '%s\n' "$dependencies" | awk 'NR > 1 { print $1 }' | grep -Ev '^(/usr/lib/|/System/Library/)' || true)
+    external=$(printf '%s\n' "$dependencies" | awk 'NR > 1 && $1 !~ /^\/usr\/lib\// && $1 !~ /^\/System\/Library\// { print $1 }')
     if [[ -n $external ]]; then
       printf 'error: macOS release binary requires non-system libraries:\n%s\n' "$external" >&2
       exit 1

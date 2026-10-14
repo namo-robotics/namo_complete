@@ -246,18 +246,18 @@ python3 test-terminal.py # workspace metadata backpressure regressions
 cp .env.example .env && chmod 600 .env
 ```
 
-[`.devcontainer/`](.devcontainer/) uses the repository's Ubuntu 26.04
-image. The validated compiler is Sun `cc7686189ee2`. Builds require a complete
-Sun dev artifact with matching `stdlib.moon` and `tls.moon` bundles.
-Linux static linking also requires `x86_64-linux-musl-gcc` and musl-built C++
-runtime archives; CI uses the same musl.cc toolchain as the development container.
-On macOS, install the compiler dependencies with `brew install llvm@20 libarchive bash`.
-These are build dependencies: the Linux executable is fully static, and the macOS
-executable may depend only on Apple system libraries. CI enforces this with
-`bash tools/check-linkage.sh`; OpenSSL stays linked into both executables.
-`upgrade-sun.sh` installs these into `.sun/`, which `build.sh` uses automatically.
-The current macOS TLS bundle requires a recent Apple linker; CI uses the
-macOS 26 toolchain with a macOS 15 deployment target (see `SUN_FEEDBACK.md`).
+Use the [development container](.devcontainer/) for a ready-to-build Linux environment.
+For a local setup, `upgrade-sun.sh` installs the matching Sun compiler and libraries
+into `.sun/`, which `build.sh` uses automatically. Linker dependencies are:
+
+- **Linux:** `x86_64-linux-musl-gcc` and musl-built C++ runtime archives from musl.cc.
+- **macOS:** `brew install llvm@20 libarchive bash`, plus a recent Apple linker.
+  CI uses macOS 26 with a macOS 15 deployment target.
+
+Both workflows use [`tools/setup-ci.sh`](tools/setup-ci.sh) for toolchain setup.
+[`tools/check-linkage.sh`](tools/check-linkage.sh) requires fully static Linux
+executables and only Apple system libraries on macOS. OpenSSL is linked into
+both executables; compiler dependencies are not application runtime requirements.
 
 ## Notes on Sun
 

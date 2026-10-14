@@ -35,21 +35,8 @@ jobs:
           if [ "$GITHUB_REF_TYPE" = tag ]; then V="$GITHUB_REF_NAME"; else V="${{ github.event.inputs.version }}"; V="${V:-dev}"; fi
           echo "value=$V" >> "$GITHUB_OUTPUT"
 
-      - name: Install static Linux link toolchain
-        # Sun needs musl-built C++ runtime archives as well as the C compiler.
-        run: |
-          curl -fL --retry 3 -o /tmp/musl-cross.tgz https://musl.cc/x86_64-linux-musl-cross.tgz
-          mkdir -p /opt/cross
-          tar -xzf /tmp/musl-cross.tgz -C /opt/cross
-          /opt/cross/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc --version
-          echo "/opt/cross/x86_64-linux-musl-cross/bin" >> "$GITHUB_PATH"
-
-      - name: Install latest Sun dev artifact
-        run: |
-          curl -fsSL -o /tmp/sun.deb \
-            https://github.com/namo-robotics/sun/releases/download/dev/sun_0.dev_amd64.deb
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends /tmp/sun.deb
-          sun --version | tee /tmp/sun-version.txt
+      - name: Install Sun toolchain
+        run: bash tools/setup-ci.sh
 
       - name: Build, test, and package
         id: package
@@ -92,24 +79,12 @@ jobs:
           if [ "$GITHUB_REF_TYPE" = tag ]; then V="$GITHUB_REF_NAME"; else V="${{ github.event.inputs.version }}"; V="${V:-dev}"; fi
           echo "value=$V" >> "$GITHUB_OUTPUT"
 
-      - name: Install build dependencies and latest Sun dev artifact
-        run: |
-          test "$(uname -m)" = arm64
-          xcodebuild -version
-          xcrun ld -version_details
-          # Bash is only for the optional Bash integration suite; macOS users run zsh.
-          brew install llvm@20 libarchive bash
-          curl -fsSL -o /tmp/sun.tar.gz \
-            https://github.com/namo-robotics/sun/releases/download/dev/sun-0.dev-arm64-apple-darwin.tar.gz
-          mkdir -p /tmp/sun
-          tar -C /tmp/sun -xzf /tmp/sun.tar.gz
-          echo "/tmp/sun/bin" >> "$GITHUB_PATH"
-          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+      - name: Install Sun toolchain
+        run: bash tools/setup-ci.sh
 
       - name: Build, test, and package
         id: package
         run: |
-          sun --version | tee /tmp/sun-version.txt
           NAMO_VERSION="${{ steps.version.outputs.value }}" bash ./build.sh
           file bin/namo_complete | grep -q 'arm64'
           bash tools/check-linkage.sh
