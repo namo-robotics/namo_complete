@@ -1,0 +1,141 @@
+/** Exchange trusted shell metadata and submit commands through guarded shell widgets. */
+public module namo {
+  using std;
+  using std.io;
+
+  /** Queue PTY input so partial writes cannot discard paste or command bytes. */
+  public function workspace_send(w: ref Workspace, data: const ref String) void {
+    w.outgoing.append(data);
+  }
+
+  /** Process trusted shell metadata separately from application output. */
+  public function workspace_metadata(alloc: ref HeapAllocator, cfg: ref Config, w: ref Workspace) AppResult<void> {
+    var kind = try clone_item(alloc, w.meta_parts, 0);
+    var shell_pid = try clone_item(alloc, w.meta_parts, 1);
+    var cwd = try clone_item(alloc, w.meta_parts, 2);
+    var payload = try clone_item(alloc, w.meta_parts, 3);
+    var expected = String(alloc, "");
+    expected.append(w.child);
+    if (shell_pid.equals(expected) == false) {
+      return AppResult.Ok;
+    }
+    if (kind.equals_literal("loaded")) {
+      if (w.handshake and w.cwd.equals(cwd) and payload.equals(w.proposal)) {
+        w.agent_running = true;
+        w.agent_finished = false;
+        w.agent_status = String(alloc, "");
+        w.agent_output = String(alloc, "");
+        w.chat.append("\nRunning approved command: ");
+        w.chat.append(w.proposal);
+        w.chat.append("\n");
+        var enter = String(alloc, "\r");
+        workspace_send(w, enter);
+        w.idle = false;
+        w.handshake = false;
+        w.approving = false;
+        w.proposal = String(alloc, "");
+        w.alternatives.clear();
+        w.revision = w.revision + 1;
+      }
+      return AppResult.Ok;
+    }
+    if (kind.equals_literal("rejected")) {
+      w.handshake = false;
+      w.approving = false;
+      w.chat.append("\nShell state changed; command was not run.\n");
+      return AppResult.Ok;
+    }
+    w.cwd = cwd;
+    if (kind.equals_literal("history")) {
+      if (cfg.history_lines > 0) {
+        var record = String(alloc, "Recent shell history:\n");
+        record.append(payload);
+        try workspace_record(alloc, w, record);
+      }
+    } else if (kind.equals_literal("line")) {
+      if (w.line.equals(payload) == false) {
+        w.line = payload;
+        w.revision = w.revision + 1;
+        w.hint = String(alloc, "");
+      }
+    } else if (kind.equals_literal("prompt")) {
+      if (w.agent_running) {
+        w.agent_status = payload.clone(alloc);
+      }
+      w.idle = true;
+      w.line = String(alloc, "");
+      w.revision = w.revision + 1;
+      w.failure_pending = w.agent_visible and payload.equals_literal("0") == false and payload.equals_literal("130") == false and payload.equals_literal("148") == false;
+      var record = String(alloc, "\nCommand completed, exit status ");
+      record.append(payload);
+      record.append("; directory ");
+      record.append(w.cwd);
+      record.append("\n");
+      try workspace_record(alloc, w, record);
+    } else if (kind.equals_literal("start")) {
+      if (w.worker_pid > 0 and (w.worker_kind == 1 or w.worker_kind == 2)) {
+        workspace_cancel(alloc, w);
+      }
+      w.failure_pending = false;
+      w.idle = false;
+      w.revision = w.revision + 1;
+      w.hint = String(alloc, "");
+      if (cfg.history_lines > 0) {
+        var record = String(alloc, "\nCommand: ");
+        record.append(payload);
+        record.append("\n");
+        try workspace_record(alloc, w, record);
+      }
+    }
+    w.dirty = true;
+    return AppResult.Ok;
+  }
+
+  /** Insert a command through the shell's guarded line-editing widget. */
+  public function workspace_insert(alloc: ref HeapAllocator, w: ref Workspace, command: const ref String, execute: bool) AppResult<void> {
+    if (w.idle == false or w.line.length() > 0 and execute) {
+      w.chat.append("\nReturn to an empty shell prompt before running a proposal.\n");
+      return AppResult.Ok;
+    }
+    var path = w.directory.clone(alloc);
+    path.append("/command");
+    var data = w.cwd.clone(alloc);
+    data.append("\n");
+    data.append(command);
+    data.append("\n");
+    try write_string(path, data);
+    w.handshake = execute;
+    var keys = String(alloc, execute ? "\x18\x12" : "\x18\x0f");
+    workspace_send(w, keys);
+    return AppResult.Ok;
+  }
+
+  /** Quote a filesystem path for the shell bootstrap script. */
+  public function workspace_quote(alloc: ref HeapAllocator, value: const ref String) String {
+    var out = String(alloc, "'");
+    for (var i: i64 = 0; i < value.length(); i = i + 1) {
+      var c = string_byte(value, i);
+      if (c == 39) {
+        out.append("'\\''");
+      } else {
+        out.append_char(c);
+      }
+    }
+    out.append("'");
+    return out;
+  }
+
+  /** Find a path's parent without invoking a subprocess. */
+  public function workspace_parent(alloc: ref HeapAllocator, path: const ref String) String {
+    var slash: i64 = -1;
+    for (var i: i64 = 0; i < path.length(); i = i + 1) {
+      if (string_byte(path, i) == 47) {
+        slash = i;
+      }
+    }
+    if (slash < 0) {
+      return String(alloc, ".");
+    }
+    return string_slice(alloc, path, 0, slash);
+  }
+}

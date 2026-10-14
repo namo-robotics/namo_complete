@@ -1,68 +1,30 @@
-// config.sun - runtime configuration, entirely from the environment.
-//
-// Input arrives via environment variables rather than argv: shell `export`
-// handles arbitrary bytes with no quoting concerns, and the values we need
-// (READLINE_LINE, PWD) are already shell variables.
-
+/** Read workspace settings from the environment. */
 public module namo {
   using std;
   using std.env;
   using std.process;
 
-  // Holds all runtime settings captured from the process environment.
+  /** Hold runtime settings captured from the process environment. */
   public class Config {
     public var environment: Env;
-    public var line: String;
-    public var query: String;
-    public var mode: String;
-    // Shell syntax used for model context and cache separation.
+    // Shell syntax used for model context.
     public var shell_name: String;
-    public var cwd: String;
     public var model: String;
     public var api_key: String;
     public var endpoint: String;
-    public var cache_dir: String;
     public var history_lines: i64;
-    public var max_suggestions: i64;
-    public var cache_ttl: i64;
     public var ls_limit: i64;
     public var hint_min: i64;
-    public var min_gap: i64;
-    public var use_cache: bool;
     public var send_ls: bool;
     public var disabled: bool;
-    public var cache_only: bool;
 
-    // The hint daemon (see daemon.sun). Empty paths mean "not launched by the
-    // shell integration", which is the normal state for a one-shot run.
-    public var daemon: bool;
-    public var fifo: String;
-    public var reply: String;
-    public var dymfile: String;
-    // Output capture (cmd_output_relay.sun). NAMO_OUTPUT names the line count; 0 is off.
-    public var relay: bool;
     public var output_lines: i64;
-    public var ptsfile: String;
-    public var outfile: String;
-    public var relay_pidfile: String;
-    public var shell_pid: i32;
-    public var histfile: String;
-    public var pidfile: String;
-    public var tty_path: String;
-    public var hint_prefix: String;
-    public var hint_suffix: String;
-    public var err_prefix: String;
-    public var dym_prefix: String;
     public var debounce_ms: i64;
-    public var quiet_ms: i64;
 
+    /** Read workspace settings from the environment. */
     init(alloc: ref HeapAllocator) {
       this.environment = Env(alloc);
-      this.line = env_str(alloc, this.environment, "NAMO_LINE");
-      this.query = env_str(alloc, this.environment, "NAMO_QUERY");
-      this.mode = env_or(alloc, this.environment, "NAMO_MODE", "complete");
       this.shell_name = env_or(alloc, this.environment, "NAMO_SHELL", "shell");
-      this.cwd = env_or(alloc, this.environment, "NAMO_CWD", ".");
       this.model = env_or(alloc, this.environment, "NAMO_MODEL", "claude-opus-5");
       this.api_key = env_str(alloc, this.environment, "ANTHROPIC_API_KEY");
       this.endpoint = env_or(
@@ -75,92 +37,11 @@ public module namo {
       this.history_lines = env_int(alloc, this.environment, "NAMO_HISTORY_LINES", 50);
       this.ls_limit = env_int(alloc, this.environment, "NAMO_LS_LIMIT", 40);
       this.hint_min = env_int(alloc, this.environment, "NAMO_HINT_MIN", 3);
-      this.max_suggestions = env_int(alloc, this.environment, "NAMO_MAX_SUGGESTIONS", 3);
-      this.cache_ttl = env_int(alloc, this.environment, "NAMO_CACHE_TTL", 900);
-      this.min_gap = env_int(alloc, this.environment, "NAMO_MIN_GAP", 1);
-      this.use_cache = env_int(alloc, this.environment, "NAMO_CACHE", 1) != 0;
       this.send_ls = env_int(alloc, this.environment, "NAMO_NO_LS", 0) == 0;
       this.disabled = env_int(alloc, this.environment, "NAMO_DISABLE", 0) != 0;
-      this.cache_only = env_int(alloc, this.environment, "NAMO_CACHE_ONLY", 0) != 0;
 
-      this.daemon = env_int(alloc, this.environment, "NAMO_DAEMON", 0) != 0;
-      this.fifo = env_str(alloc, this.environment, "NAMO_FIFO");
-      // Where answers to the shell's own requests go back. See daemon.sun.
-      this.reply = env_str(alloc, this.environment, "NAMO_REPLY");
-      // Where the shell command-not-found hook leaves a line for us; see daemon.sun.
-      this.dymfile = env_str(alloc, this.environment, "NAMO_DYMFILE");
-
-      this.relay = env_int(alloc, this.environment, "NAMO_RELAY", 0) != 0;
       this.output_lines = env_int(alloc, this.environment, "NAMO_OUTPUT", 10);
-      this.ptsfile = env_str(alloc, this.environment, "NAMO_PTSFILE");
-      this.outfile = env_str(alloc, this.environment, "NAMO_OUTFILE");
-      this.relay_pidfile = env_str(alloc, this.environment, "NAMO_RELAY_PIDFILE");
-      this.shell_pid = _convert<i32>(env_int(alloc, this.environment, "NAMO_SHELL_PID", 0));
-      this.histfile = env_str(alloc, this.environment, "NAMO_HISTFILE");
-      this.pidfile = env_str(alloc, this.environment, "NAMO_PIDFILE");
-      // Overridable so the test suite can watch what would have been drawn.
-      this.tty_path = env_or(alloc, this.environment, "NAMO_TTY", "/dev/tty");
-      this.hint_prefix = env_or(alloc, this.environment, "NAMO_HINT_PREFIX", "hint: ");
-      this.hint_suffix = env_or(alloc, this.environment, "NAMO_HINT_SUFFIX", "  (Alt-O / Alt-A for more)");
-      // The correction row carries no suffix: Alt-O runs a completion, and
-      // offering it next to a line that is not one would be a lie.
-      this.dym_prefix = env_or(alloc, this.environment, "NAMO_DYM_PREFIX", "did you mean: ");
-      // The row a failed call draws instead of a hint. Without it a broken
-      // NAMO_MODEL, an expired key or an unreachable API all look exactly
-      // like a shell that simply has nothing to suggest.
-      this.err_prefix = env_or(alloc, this.environment, "NAMO_ERR_PREFIX", "error: ");
-      // Documented in seconds, used in milliseconds by poll(2).
       this.debounce_ms = env_ms(alloc, this.environment, "NAMO_DEBOUNCE", 200);
-      this.quiet_ms = env_ms(alloc, this.environment, "NAMO_QUIET", 50);
-
-      var cd = env_str(alloc, this.environment, "XDG_CACHE_HOME");
-      if (cd.length() == 0) {
-        cd = env_or(alloc, this.environment, "HOME", "/tmp");
-        cd.append("/.cache/namo_complete");
-      } else {
-        cd.append("/namo_complete");
-      }
-      this.cache_dir = cd;
-    }
-
-    // Point the config at one line from the daemon's FIFO, so cache_key and
-    // build_context -- both written against a one-shot run -- can be reused
-    // unchanged for every keystroke.
-    public method set_target(alloc: ref HeapAllocator, line: const ref String, cwd: const ref String) void {
-      this.line = line.clone(alloc);
-      this.cwd = cwd.clone(alloc);
-    }
-
-    // The daemon is one long-lived process answering every kind of request,
-    // so anything that is not a keystroke borrows the config and hands it
-    // back: set_query_target before the call, clear_query_target after it, and
-    // the keystrokes that follow are served exactly as before.
-    public method set_query_target(alloc: ref HeapAllocator, mode: static_ptr<u8>, query: const ref String, cwd: const ref String) void {
-      this.mode = String(alloc, mode);
-      this.query = query.clone(alloc);
-      this.cwd = cwd.clone(alloc);
-    }
-
-    // Restore the config after serving a synchronous query.
-    public method clear_query_target(alloc: ref HeapAllocator) void {
-      this.mode = String(alloc, "complete");
-      this.query = String(alloc, "");
-    }
-
-    // Report whether the current request asks for a command from prose.
-    public const method is_ask() bool {
-      return this.mode.equals_literal("ask");
-    }
-
-    // "Did you mean": the shell could not find the command, and the line the user
-    // typed arrives in NAMO_QUERY to be corrected rather than completed.
-    public const method is_dym() bool {
-      return this.mode.equals_literal("dym");
-    }
-
-    // Both of the modes whose subject is NAMO_QUERY rather than NAMO_LINE.
-    public const method from_query() bool {
-      return this.is_ask() or this.is_dym();
     }
   }
 

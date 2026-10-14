@@ -16,7 +16,7 @@ jobs:
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ca-certificates curl git file bash zsh python3 util-linux build-essential
+            ca-certificates curl git file bash zsh python3 util-linux build-essential vim-tiny less procps
 
       - uses: actions/checkout@v4
 
@@ -41,6 +41,7 @@ jobs:
           ./test.sh
           ./test-zsh.sh
           python3 test-terminal.py
+          bash ./test-workspace.sh
 
       - name: Shellcheck
         continue-on-error: true
@@ -90,3 +91,4 @@ jobs:
           bash ./test.sh
           ./test-zsh.sh
           python3 test-terminal.py
+          bash ./test-workspace.sh

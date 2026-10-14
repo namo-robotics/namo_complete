@@ -1,0 +1,459 @@
+/** Start the workspace, coordinate its event loop, and restore terminal resources. */
+public module namo {
+  using std;
+  using std.io;
+  using std.process;
+  using std.time;
+
+  /** Remove only the runtime files created by this workspace. */
+  public function workspace_cleanup(alloc: ref HeapAllocator, w: ref Workspace) void {
+    if (w.directory.length() == 0) {
+      return;
+    }
+    var names = String(alloc, "events\ncommand\n.bashrc\n.zshrc\n.zshenv\n");
+    var parts = names.split_nonempty(alloc, 10);
+    for (var i: i64 = 0; i < parts.size(); i = i + 1) {
+      var path = w.directory.clone(alloc);
+      path.append("/");
+      match parts.get(i) {
+        AccessResult.Ok(name) => path.append(name),
+        _ => {}
+      };
+      remove_path(alloc, path);
+    }
+    match remove_dir(w.directory) {
+      _ => {}
+    };
+  }
+
+  /** Run one responsive event loop for the shell, agent, and metadata channels. */
+  public function workspace_loop(alloc: ref HeapAllocator, cfg: ref Config, w: ref Workspace) AppResult<i32> {
+    var mode = try std.terminal.TerminalMode(0, std.terminal.Mode.Raw, std.terminal.SignalPolicy.AsInput);
+    var signals = try std.signal.SignalSubscription();
+    var clock = now();
+    var poller = Poller(alloc);
+    var input = File();
+    input.adopt(0);
+    var buffer = ContiguousBuffer<u8>(alloc, 8192);
+    var meta_buffer = ContiguousBuffer<u8>(alloc, 4096);
+    print("\x1b[?1049h\x1b[?2004h\x1b[?7l");
+    var exit_code: i32 = 0;
+    var running = true;
+    var exit_grace: i64 = 0;
+    while (running) {
+      var millis = clock.elapsed().as_millis();
+      match workspace_worker_progress(alloc, w) {
+        AppResult.Ok => {},
+        _ => workspace_agent_failure(alloc, w)
+      };
+      var size = try std.terminal.get_size(0);
+      var rows = terminal_clamp(size.rows, 4, 300);
+      var cols = terminal_clamp(size.cols, 20, 500);
+      var layout = WorkspaceLayout(rows, cols, w.ratio, w.agent_visible, w.horizontal);
+      if (rows != w.rows or cols != w.cols or layout.terminal_cols != w.terminal.cols or layout.terminal_rows != w.terminal.rows) {
+        w.rows = rows;
+        w.cols = cols;
+        try terminal_resize(alloc, w.terminal, layout.terminal_rows, layout.terminal_cols);
+        platform_workspace_size(w.pty.get_fd(), layout.terminal_rows, layout.terminal_cols);
+        w.dirty = true;
+      }
+      if (w.dirty) {
+        try workspace_render(alloc, w);
+      }
+      if (w.outgoing.length() > 0) {
+        var sent = w.pty.write(w.outgoing);
+        if (sent > 0) {
+          w.outgoing = string_slice(alloc, w.outgoing, sent, w.outgoing.length() - sent);
+        }
+      }
+      poller.clear();
+      poller.add(0, w.outgoing.length() < 524288 ? 1i16 : 0i16);
+      poller.add_read(w.pty.get_fd());
+      poller.add_read(w.metadata.get_fd());
+      poller.add_read(signals.fd());
+      if (w.worker_pid > 0) {
+        poller.add_read(w.worker_eof ? -1 : w.worker_output.get_fd());
+      }
+      match poller.wait(30) {
+        _ => {}
+      };
+      var pending = try signals.take_pending();
+      if (pending.any()) {
+        exit_code = pending.terminated() ? 143 : 130;
+        break;
+      }
+      // A worker is spawned only while the signal subscription is restored.
+      platform_workspace_signals(true);
+      try signals.restore();
+      if (poller.is_readable(2)) {
+        var n = read_available(w.metadata, meta_buffer);
+        for (var i: i64 = 0; i < n; i = i + 1) {
+          var c: u8 = try meta_buffer.get(i);
+          if (c == 0) {
+            w.meta_parts.push(w.meta_field.clone(alloc));
+            w.meta_field = String(alloc, "");
+            if (w.meta_parts.size() == 4) {
+              match workspace_metadata(alloc, cfg, w) {
+                AppResult.Ok => {},
+                _ => workspace_agent_failure(alloc, w)
+              };
+              w.meta_parts.clear();
+            }
+          } else if (w.meta_field.length() < 4096) {
+            w.meta_field.append_char(c);
+          }
+        }
+      }
+      if (poller.is_readable(1) or poller.is_hup(1) or poller.is_error(1)) {
+        var n = read_available(w.pty, buffer);
+        if (n == -1) {
+          running = false;
+        }
+        var captured = String(alloc, "");
+        for (var i: i64 = 0; i < n; i = i + 1) {
+          var c: u8 = try buffer.get(i);
+          if (c == MARK_START) {
+            w.recording = true;
+          } else if (c == MARK_FLUSH) {
+            if (w.recording) {
+              var tail = try terminal_line(alloc, w.terminal, w.terminal.row);
+              tail.trim();
+              if (tail.length() > 0) {
+                captured.append(tail);
+                captured.append("\n");
+              }
+            }
+            w.recording = false;
+            if (w.agent_running) {
+              w.agent_finished = true;
+            }
+          }
+          trk_feed(alloc, w.tracker, c);
+          try terminal_feed(alloc, w.terminal, c);
+          if (w.recording) {
+            captured.append(w.terminal.completed);
+          }
+          w.terminal.completed = String(alloc, "");
+        }
+        if (cfg.output_lines > 0 and captured.length() > 0) {
+          if (w.agent_running) {
+            w.agent_output.append(captured);
+            if (w.agent_output.length() > 8192) {
+              w.agent_output = string_slice(alloc, w.agent_output, w.agent_output.length() - 8192, 8192);
+            }
+          }
+          match workspace_record(alloc, w, captured) {
+            AppResult.Ok => {},
+            _ => workspace_agent_failure(alloc, w)
+          };
+        }
+        if (n > 0) {
+          w.dirty = true;
+          if (cfg.shell_name.equals_literal("bash") and w.idle and w.tracker.armed and w.line.equals(w.tracker.line) == false) {
+            w.line = w.tracker.line.clone(alloc);
+            w.revision = w.revision + 1;
+          }
+        }
+        if (w.terminal.replies.length() > 0) {
+          workspace_send(w, w.terminal.replies);
+          w.terminal.replies = String(alloc, "");
+        }
+      }
+      if (w.agent_running and w.agent_finished and w.agent_status.length() > 0) {
+        var result = String(alloc, "\nApproved command finished; exit status ");
+        result.append(w.agent_status);
+        result.append("\n");
+        result.append(w.agent_output);
+        var clean = try workspace_redact(alloc, result);
+        w.chat.append(clean);
+        w.conversation.append(clean);
+        w.agent_running = false;
+        w.agent_finished = false;
+        w.dirty = true;
+      }
+      if (poller.is_readable(0)) {
+        var n = read_available(input, buffer);
+        if (n <= 0) {
+          running = false;
+        }
+        for (var i: i64 = 0; i < n and w.close_requested == false; i = i + 1) {
+          var c: u8 = try buffer.get(i);
+          match workspace_input(alloc, cfg, w, c, millis) {
+            AppResult.Ok => {},
+            _ => workspace_agent_failure(alloc, w)
+          };
+        }
+      }
+      if (w.close_requested) {
+        break;
+      }
+      if (w.pending_keys.length() > 0 and millis - w.pending_since > 80) {
+        var key = w.pending_keys.clone(alloc);
+        w.pending_keys = String(alloc, "");
+        match workspace_key(alloc, cfg, w, key, millis) {
+          AppResult.Ok => {},
+          _ => workspace_agent_failure(alloc, w)
+        };
+      }
+      if (w.worker_pid > 0 and poller.count() > 4 and (w.worker_eof or poller.is_readable(4) or poller.is_hup(4))) {
+        var n = w.worker_eof ? -1 : read_available(w.worker_output, buffer);
+        if (n == -1) {
+          w.worker_eof = true;
+          match workspace_receive(alloc, w) {
+            AppResult.Ok => {},
+            _ => {
+              w.chat.append("\nInvalid agent response; no command was approved.\n");
+              w.summary_retry = millis + 60000;
+              w.proposal = String(alloc, "");
+              w.dirty = true;
+            }
+          };
+        } else {
+          for (var i: i64 = 0; i < n; i = i + 1) {
+            w.reply.append_char((try buffer.get(i)));
+          }
+          if (w.reply.length() > 262144) {
+            workspace_cancel(alloc, w);
+            w.chat.append("\nAgent response exceeded the size limit.\n");
+          }
+        }
+      }
+      if (w.worker_pid > 0 and millis - w.worker_started > terminal_clamp(env_int(alloc, cfg.environment, "NAMO_TIMEOUT", 30), 1, 300) * 1000) {
+        workspace_cancel(alloc, w);
+        w.summary_retry = millis + 60000;
+        w.chat.append("\nAgent request timed out.\n");
+      }
+      if (w.agent_visible and w.worker_pid == 0 and w.idle and w.failure_pending) {
+        w.failure_pending = false;
+        var question = String(alloc, "Explain the last failed command briefly and suggest a correction if useful.");
+        match workspace_request(alloc, cfg, w, question, 2, millis) {
+          AppResult.Ok => {},
+          _ => workspace_agent_failure(alloc, w)
+        };
+      }
+      if (w.agent_visible and w.worker_pid == 0 and w.idle and w.focus_chat == false and w.approving == false and (cfg.shell_name.equals_literal("bash") == false or w.tracker.armed) and w.line.length() >= cfg.hint_min and w.last_hint != w.revision and millis - w.last_input >= cfg.debounce_ms) {
+        w.last_hint = w.revision;
+        var question = String(alloc, "Offer a typing hint only if there is a clear, useful completion or correction. If the line is already suitable, intent is unclear, or no help is needed, return empty answer, command, explanation, and alternatives. Do not invent a task or repeat the current command. Editable shell line: ");
+        question.append(w.line);
+        match workspace_request(alloc, cfg, w, question, 1, millis) {
+          AppResult.Ok => {},
+          _ => workspace_agent_failure(alloc, w)
+        };
+      }
+      if (w.agent_visible and w.worker_pid == 0 and w.timeline.length() > w.context_limit and millis - w.last_input > 2000 and millis >= w.summary_retry) {
+        var question = String(alloc, "Summarize the session context for future questions. Do not propose a command.");
+        match workspace_request(alloc, cfg, w, question, 3, millis) {
+          AppResult.Ok => {},
+          _ => workspace_agent_failure(alloc, w)
+        };
+      }
+      if (w.child > 0) {
+        var child_status = platform_workspace_wait(w.child, false);
+        if (child_status >= 0) {
+          exit_code = child_status;
+          w.child = 0;
+          exit_grace = millis + 200;
+        }
+      } else if (millis >= exit_grace) {
+        running = false;
+      }
+      signals = try std.signal.SignalSubscription();
+      platform_workspace_signals(false);
+    }
+    if (w.dirty) {
+      try workspace_render(alloc, w);
+    }
+    platform_workspace_signals(false);
+    workspace_cancel(alloc, w);
+    print("\x1b[0m\x1b[?7h\x1b[?25h\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1049l");
+    try mode.restore();
+    if (w.close_requested) {
+      return AppResult.Ok(0);
+    }
+    if (w.child > 0 and exit_code == 0) {
+      var status = platform_workspace_wait(w.child, false);
+      if (status >= 0) {
+        exit_code = status;
+        w.child = 0;
+      } else {
+        exit_code = 125;
+      }
+    }
+    return AppResult.Ok(exit_code);
+  }
+
+  /** Start a workspace using the current shell and private startup scripts. */
+  public function workspace_run(alloc: ref HeapAllocator, cfg: ref Config, binary: const ref String) AppResult<i32> {
+    if (cfg.disabled) {
+      return AppResult.Ok(125);
+    }
+    if (std.terminal.is_terminal(0) == false or std.terminal.is_terminal(1) == false) {
+      eprint("namo_complete requires an interactive terminal\n");
+      return AppResult.Ok(125);
+    }
+    var resolved = env_str(alloc, cfg.environment, "NAMO_BIN");
+    if (resolved.length() == 0) {
+      resolved = binary.clone(alloc);
+    }
+    if (resolved.contains("/") == false) {
+      var search = env_str(alloc, cfg.environment, "PATH");
+      var paths = search.split_nonempty(alloc, 58);
+      for (var i: i64 = 0; i < paths.size(); i = i + 1) {
+        var candidate = try clone_item(alloc, paths, i);
+        candidate.append("/");
+        candidate.append(resolved);
+        if (exists(candidate)) {
+          resolved = candidate;
+          break;
+        }
+      }
+    }
+    if (resolved.starts_with("/") == false) {
+      var absolute = try cfg.environment.cwd();
+      absolute.append("/");
+      absolute.append(resolved);
+      resolved = absolute;
+    }
+    var size = try std.terminal.get_size(0);
+    var w = Workspace(alloc, terminal_clamp(size.rows, 4, 300), terminal_clamp(size.cols, 20, 500), resolved);
+    w.agent_visible = env_int(alloc, cfg.environment, "NAMO_AGENT_WINDOW", 1) != 0;
+    var orientation = env_str(alloc, cfg.environment, "NAMO_LAYOUT");
+    w.horizontal = orientation.equals_literal("horizontal");
+    var layout = WorkspaceLayout(w.rows, w.cols, w.ratio, w.agent_visible, w.horizontal);
+    try terminal_resize(alloc, w.terminal, layout.terminal_rows, layout.terminal_cols);
+    w.cwd = try cfg.environment.cwd();
+    w.timeline_limit = terminal_clamp(env_int(alloc, cfg.environment, "NAMO_TIMELINE_BYTES", 8388608), 16384, 67108864);
+    w.context_limit = terminal_clamp(env_int(alloc, cfg.environment, "NAMO_CONTEXT_BYTES", 131072), 4096, w.timeline_limit);
+    w.directory = platform_workspace_directory(alloc);
+    if (w.directory.length() == 0) {
+      return AppResult.Ok(125);
+    }
+    var events = w.directory.clone(alloc);
+    events.append("/events");
+    if (platform_workspace_fifo(events) == false) {
+      workspace_cleanup(alloc, w);
+      return AppResult.Ok(125);
+    }
+    w.metadata.adopt(platform_fifo_open(events));
+    var cloexec = platform_workspace_cloexec(w.metadata.get_fd());
+    var shell = env_str(alloc, cfg.environment, "NAMO_WORKSPACE_SHELL");
+    if (shell.length() == 0) {
+      shell = env_or(alloc, cfg.environment, "SHELL", "/bin/bash");
+    }
+    var zsh = shell.ends_with("zsh");
+    if (zsh == false and shell.ends_with("bash") == false) {
+      eprint("workspace supports Bash and zsh; set NAMO_WORKSPACE_SHELL\n");
+      workspace_cleanup(alloc, w);
+      return AppResult.Ok(125);
+    }
+    cfg.shell_name = String(alloc, zsh ? "zsh" : "bash");
+    var hook = env_str(alloc, cfg.environment, "NAMO_WORKSPACE_HOOK");
+    if (hook.length() == 0) {
+      var parent = workspace_parent(alloc, resolved);
+      var root = workspace_parent(alloc, parent);
+      hook = root.clone(alloc);
+      hook.append(zsh ? "/shell/workspace.zsh" : "/shell/workspace.bash");
+      if (exists(hook) == false) {
+        hook = root.clone(alloc);
+        hook.append(zsh ? "/share/namo_complete/workspace.zsh" : "/share/namo_complete/workspace.bash");
+      }
+    }
+    if (exists(hook) == false) {
+      eprint("workspace shell hooks were not found; reinstall namo_complete\n");
+      workspace_cleanup(alloc, w);
+      return AppResult.Ok(125);
+    }
+    try cfg.environment.set("NAMO_WORKSPACE_DIR", w.directory);
+    try cfg.environment.set("NAMO_BIN", w.binary);
+    try cfg.environment.set("NAMO_WORKSPACE_ACTIVE", "1");
+    try cfg.environment.set("TERM", "xterm-256color");
+    var home = env_str(alloc, cfg.environment, "HOME");
+    var rc = w.directory.clone(alloc);
+    rc.append(zsh ? "/.zshrc" : "/.bashrc");
+    var user_rc = home.clone(alloc);
+    if (zsh) {
+      user_rc = env_str(alloc, cfg.environment, "ZDOTDIR");
+      if (user_rc.length() == 0) {
+        user_rc = home.clone(alloc);
+      }
+    }
+    user_rc.append(zsh ? "/.zshrc" : "/.bashrc");
+    var startup = String(alloc, "");
+    if (zsh) {
+      var original_dir = workspace_parent(alloc, user_rc);
+      var quoted_dir = workspace_quote(alloc, original_dir);
+      startup.append("ZDOTDIR=");
+      startup.append(quoted_dir);
+      startup.append("\n");
+    }
+    startup.append("if [ -f ");
+    startup.append(workspace_quote(alloc, user_rc));
+    startup.append(" ]; then . ");
+    startup.append(workspace_quote(alloc, user_rc));
+    startup.append("; fi\n. ");
+    startup.append(workspace_quote(alloc, hook));
+    startup.append("\n");
+    try write_string(rc, startup);
+    var cmd = Command(alloc, shell);
+    if (zsh) {
+      var original_env = workspace_parent(alloc, user_rc);
+      original_env.append("/.zshenv");
+      var env_path = w.directory.clone(alloc);
+      env_path.append("/.zshenv");
+      var env_source = String(alloc, "if [ -f ");
+      env_source.append(workspace_quote(alloc, original_env));
+      env_source.append(" ]; then . ");
+      env_source.append(workspace_quote(alloc, original_env));
+      env_source.append("; fi\nZDOTDIR=");
+      env_source.append(workspace_quote(alloc, w.directory));
+      env_source.append("\n");
+      try write_string(env_path, env_source);
+      try cfg.environment.set("ZDOTDIR", w.directory);
+    } else {
+      cmd.add_arg("--rcfile");
+      cmd.add_arg(rc);
+    }
+    cmd.add_arg("-i");
+    var master = platform_pty_open();
+    if (master < 0 or platform_pty_prepare(master) == false) {
+      workspace_cleanup(alloc, w);
+      return AppResult.Ok(125);
+    }
+    w.pty.adopt(master);
+    var slave = platform_pty_name(alloc, master);
+    platform_workspace_size(master, w.terminal.rows, w.terminal.cols);
+    w.child = platform_workspace_spawn(cmd, slave, master);
+    if (w.child <= 0) {
+      w.child = 0;
+      workspace_cleanup(alloc, w);
+      return AppResult.Ok(125);
+    }
+    platform_workspace_ignore_pipe();
+    if (platform_nonblocking(master) == false or platform_workspace_cloexec(master) == false) {
+      workspace_cleanup(alloc, w);
+      return AppResult.Ok(125);
+    }
+    var result: i32 = 1;
+    match workspace_loop(alloc, cfg, w) {
+      AppResult.Ok(status) => {
+        result = status;
+        if (w.child == 0 or w.close_requested) {
+          var completed_file = env_str(alloc, cfg.environment, "NAMO_WORKSPACE_STARTED_FILE");
+          if (completed_file.length() > 0) {
+            var completed = String(alloc, "exited\n");
+            match write_string(completed_file, completed) {
+              _ => {}
+            };
+          }
+        }
+      },
+      _ => {
+        platform_workspace_signals(false);
+        print("\x1b[0m\x1b[?7h\x1b[?25h\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1049l");
+        eprint("workspace failed; terminal restored\n");
+      }
+    };
+    workspace_cleanup(alloc, w);
+    return AppResult.Ok(result);
+  }
+}

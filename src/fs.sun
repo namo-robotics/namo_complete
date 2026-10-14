@@ -74,8 +74,7 @@ public module namo {
     return out;
   }
 
-  /** Close a descriptor we hold nothing else for. The daemon needs this for
-   * the inherited descriptors it drops on startup. */
+  /** Close an owned descriptor through the standard file wrapper. */
   public function close_fd(fd: i32) void {
     var f = File();
     f.adopt(fd);

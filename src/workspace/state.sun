@@ -1,0 +1,139 @@
+/** Own shared workspace state and resource lifetimes. */
+public module namo {
+  using std;
+  using std.io;
+  using std.process;
+
+  /** Own workspace state and the resources that must be cleaned up together. */
+  public class Workspace {
+    public var terminal: TerminalScreen;
+    public var tracker: Tracker;
+    public var outgoing: String;
+    public var summary_size: i64 = 0;
+    public var summary_retry: i64 = 0;
+    public var pty: File;
+    public var metadata: File;
+    public var worker_output: File;
+    public var worker_input: File;
+    public var worker_pending: String;
+    public var retired_workers: Vec<i32>;
+    public var worker: Child;
+    public var child: i32 = 0;
+    public var worker_pid: i32 = 0;
+    public var worker_eof: bool = false;
+    public var worker_revision: i64 = 0;
+    public var worker_cwd: String;
+    public var agent_running: bool = false;
+    public var agent_finished: bool = false;
+    public var agent_output: String;
+    public var agent_status: String;
+    public var worker_kind: i64 = 0;
+    public var worker_started: i64 = 0;
+    public var reply: String;
+    public var directory: String;
+    public var binary: String;
+    public var cwd: String;
+    public var line: String;
+    public var timeline: String;
+    public var summary: String;
+    public var conversation: String;
+    public var chat: String;
+    public var input: String;
+    public var input_cursor: i64 = 0;
+    public var hint: String;
+    public var proposal: String;
+    public var alternatives: Vec<String>;
+    public var proposal_cwd: String;
+    public var proposal_revision: i64 = -1;
+    public var action_row: i64 = -1;
+    public var action_col: i64 = 0;
+    public var action_revision: i64 = -1;
+    public var action_approval: bool = false;
+    public var action_command: String;
+    public var revision: i64 = 0;
+    public var idle: bool = false;
+    public var recording: bool = false;
+    public var focus_chat: bool = false;
+    public var close_requested: bool = false;
+    public var agent_visible: bool = true;
+    public var prefix: bool = false;
+    public var approving: bool = false;
+    public var handshake: bool = false;
+    public var pending_keys: String;
+    public var pending_since: i64 = 0;
+    public var paste: bool = false;
+    public var meta_field: String;
+    public var meta_parts: Vec<String>;
+    public var rows: i64;
+    public var cols: i64;
+    public var ratio: i64 = 60;
+    public var horizontal: bool = false;
+    public var ignore_mouse_release: bool = false;
+    public var scroll: i64 = 0;
+    public var terminal_scroll: i64 = 0;
+    public var dirty: bool = true;
+    public var last_input: i64 = 0;
+    public var last_hint: i64 = -1;
+    public var failure_pending: bool = false;
+    public var timeline_limit: i64 = 8388608;
+    public var context_limit: i64 = 131072;
+    public var omitted: bool = false;
+    /** Allocate state before acquiring terminal resources. */
+    init(alloc: ref HeapAllocator, rows: i64, cols: i64, binary: const ref String) {
+      this.rows = rows;
+      this.cols = cols;
+      this.tracker = Tracker(alloc);
+      this.outgoing = String(alloc, "");
+      this.terminal = TerminalScreen(alloc, rows - 2, cols < 80 ? cols : (cols - 1) * 60 / 100);
+      this.pty = File();
+      this.metadata = File();
+      this.worker_output = File();
+      this.worker_input = File();
+      this.worker_pending = String(alloc, "");
+      this.retired_workers = Vec<i32>(alloc, 4);
+      this.worker = Child(0, 0, 0, 0);
+      this.binary = binary.clone(alloc);
+      this.worker_cwd = String(alloc, "");
+      this.agent_output = String(alloc, "");
+      this.agent_status = String(alloc, "");
+      this.directory = String(alloc, "");
+      this.cwd = String(alloc, "");
+      this.line = String(alloc, "");
+      this.timeline = String(alloc, "");
+      this.summary = String(alloc, "");
+      this.conversation = String(alloc, "");
+      this.chat = String(alloc, "Agent chat\n");
+      this.input = String(alloc, "");
+      this.hint = String(alloc, "");
+      this.proposal = String(alloc, "");
+      this.action_command = String(alloc, "");
+      this.alternatives = Vec<String>(alloc, 3);
+      this.proposal_cwd = String(alloc, "");
+      this.pending_keys = String(alloc, "");
+      this.meta_field = String(alloc, "");
+      this.meta_parts = Vec<String>(alloc, 4);
+      this.reply = String(alloc, "");
+    }
+
+    /** Stop and reap owned children and close their channels. */
+    deinit() {
+      if (this.worker_pid > 0) {
+        match this.worker.kill(SIGKILL) {
+          _ => {}
+        };
+        match this.worker.try_wait() {
+          _ => {}
+        };
+      }
+      if (this.child > 0) {
+        match kill(-this.child, SIGHUP) {
+          _ => {}
+        };
+        match kill(this.child, SIGKILL) {
+          _ => {}
+        };
+        var status = platform_workspace_wait(this.child, false);
+      }
+    }
+  }
+}

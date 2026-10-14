@@ -1,0 +1,84 @@
+using std;
+using namo;
+
+/** Feed arbitrary terminal bytes into the incremental parser. */
+function feed(alloc: ref HeapAllocator, screen: ref TerminalScreen, text: static_ptr<u8>) AppResult<void> {
+  var input = String(alloc, text);
+  for (var i: i64 = 0; i < input.length(); i = i + 1) {
+    try terminal_feed(alloc, screen, string_byte(input, i));
+  }
+  return AppResult.Ok;
+}
+
+/** Fail a test with a readable description. */
+function check(value: bool, message: static_ptr<u8>) AppResult<void> {
+  if (value == false) {
+    eprint(message);
+    eprint("\n");
+    return AppResult.Error(Error(1, "terminal regression"));
+  }
+  return AppResult.Ok;
+}
+
+/** Exercise terminal state without depending on a physical terminal. */
+function tests() AppResult<void> {
+  var alloc = make_heap_allocator();
+  var vertical = WorkspaceLayout(24, 120, 60, true, false);
+  try check(vertical.split and vertical.terminal_rows == 22 and vertical.terminal_cols == 71 and vertical.chat_col == 72, "vertical layout");
+  var horizontal = WorkspaceLayout(24, 120, 60, true, true);
+  try check(horizontal.split and horizontal.terminal_rows == 12 and horizontal.terminal_cols == 120 and horizontal.chat_row == 13 and horizontal.chat_rows == 9, "horizontal layout");
+  var hidden = WorkspaceLayout(24, 120, 60, false, true);
+  try check(hidden.split == false and hidden.terminal_rows == 22 and hidden.terminal_cols == 120, "hidden layout");
+  var small = WorkspaceLayout(8, 60, 60, true, true);
+  try check(small.split == false and small.terminal_rows == 6 and small.chat_rows == 6, "small layout");
+
+  var t = TerminalScreen(alloc, 4, 12);
+  try feed(alloc, t, "hello\x1b[2;3Hworld");
+  try check((try terminal_line(alloc, t, 0)).starts_with("hello"), "plain output");
+  try check((try terminal_line(alloc, t, 1)).starts_with("  world"), "cursor addressing");
+  try feed(alloc, t, "\x1b[31;44;1mX");
+  try check((try t.cells.get(19)).fg == 1, "foreground color");
+  try check((try t.cells.get(19)).bg == 4, "background color");
+  try feed(alloc, t, "\x1b[38;2;12;34;56mY");
+  try check((try t.cells.get(20)).fg == 16777216 + 12 * 65536 + 34 * 256 + 56, "true color");
+  try feed(alloc, t, "\x1b[?1049hALT\x1b[?1049l");
+  try check((try terminal_line(alloc, t, 0)).starts_with("hello"), "alternate screen restore");
+  try feed(alloc, t, "\x1b[2J\x1b[H\xc3");
+  try feed(alloc, t, "\xa9\xe7\x95");
+  try feed(alloc, t, "\x8ce\xcc\x81");
+  try check(t.col == 4, "UTF-8 and combining cell width");
+  try check((try t.cells.get(1)).width == 2, "wide character");
+  try check((try t.cells.get(2)).width == 0, "wide continuation");
+  try feed(alloc, t, "\x1b[?2004h\x1b[?1h\x1b[?1000h\x1b[?1006h");
+  try check(t.bracketed_paste and t.application_keys and t.mouse == 1000 and t.mouse_sgr, "input modes");
+  try feed(alloc, t, "\x1b[6n");
+  try check(t.replies.equals_literal("\x1b[1;5R"), "cursor query");
+  try feed(alloc, t, "\x1b]52;c;forbidden\x1b\\\x1bPignored\x1b\\");
+  try check(t.col == 4, "OSC and DCS isolation");
+  try feed(alloc, t, "\x1b[0m\x1b[2J\x1b[Hone\r\ntwo\r\nthree\r\nfour\r\nfive");
+  try check((try terminal_line(alloc, t, 0)).starts_with("two"), "scrolling");
+  try check(t.history.size() > 0, "scrollback");
+  try feed(alloc, t, "\x1b[2;3r\x1b[3;1H\n");
+  try check((try terminal_line(alloc, t, 0)).starts_with("two"), "scroll region isolation");
+  try terminal_resize(alloc, t, 6, 20);
+  try check(t.rows == 6 and t.cols == 20 and t.cells.size() == 120, "resize");
+  try feed(alloc, t, "\x1b[?1049h\x1b[Halternate");
+  try terminal_resize(alloc, t, 3, 8);
+  try feed(alloc, t, "\x1b[?1049l");
+  try check(t.cells.size() == 24, "resize with alternate screen active");
+  println("PASS terminal screen, escape isolation, Unicode, modes, scrolling and resizing");
+  return AppResult.Ok;
+}
+
+/** Return a failing status when a terminal regression is found. */
+function main() i32 {
+  return match tests() {
+    AppResult.Ok => 0,
+    _ => 1
+  };
+}
+
+manifest {
+  source_files: ["../../src/util.sun", "../../src/workspace/terminal.sun", "../../src/workspace/layout.sun"]
+  libraries: ["stdlib.moon", "tls.moon"]
+}

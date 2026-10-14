@@ -1,27 +1,9 @@
-// namo_complete - LLM-powered shell command completion.
-//
-// Reads the partial command line from the environment and the recent history
-// from stdin, lists the working directory itself, asks Claude for completions,
-// and writes the candidates to stdout one per line. The shell integration puts the chosen line
-// into its editor buffer; nothing here ever executes a command.
-//
-// Any failure is silent on stdout so the shell prompt degrades gracefully.
-
+/** Launch the terminal workspace or its internal helpers. */
 using std;
 using std.env;
 using namo;
 
-function emit(alloc: ref HeapAllocator, items: const ref Vec<String>) AppResult<void> {
-  for (var i: i64 = 0; i < items.size(); i = i + 1) {
-    println((try items.get(i)));
-  }
-
-  return AppResult.Ok;
-}
-
-// Which build is this? The `dev` release is a rolling tag, so the version alone
-// does not identify a binary; the commit it was built from does. Stamped by
-// build.sh into src/version.sun.
+/** Print the build identity and compiler version. */
 function print_version(alloc: ref HeapAllocator) void {
   var line = String(alloc, "namo_complete ");
   line.append(VERSION);
@@ -52,12 +34,16 @@ function run(argc: i32, argv: raw_ptr<raw_ptr<i8>>) AppResult<i32> {
   var alloc = make_heap_allocator();
   var cfg = Config(alloc);
 
-  // The only thing here that reads argv at all -- every setting comes from the
-  // environment (see config.sun). Answered before the config, so that a shell
-  // with NAMO_DISABLE=1 can still be asked what it has installed.
   var cli = cfg.environment.args(argc, argv);
   for (var i: i64 = 1; i < cli.size(); i = i + 1) {
     var arg = (try clone_item(alloc, cli, i));
+    if (arg.equals_literal("--workspace-worker")) {
+      var directory = String(alloc, "");
+      if (i + 1 < cli.size()) {
+        directory = try clone_item(alloc, cli, i + 1);
+      }
+      return workspace_worker(alloc, cfg, directory);
+    }
     if (arg.equals_literal("--nonblocking-fifo")) {
       if (i + 1 >= cli.size()) {
         return AppResult.Ok(1);
@@ -76,107 +62,36 @@ function run(argc: i32, argv: raw_ptr<raw_ptr<i8>>) AppResult<i32> {
       print_version(alloc);
       return AppResult.Ok(0);
     }
-  }
-
-  if (cfg.disabled) {
-    return AppResult.Ok(0);
-  }
-
-  // Hints as you type: fork off the daemon and give the shell its prompt back.
-  // See
-  // daemon.sun for why none of that work can happen in the shell itself.
-  if (cfg.daemon) {
-    return AppResult.Ok(daemon_run(alloc, cfg));
-  }
-
-  // Output capture: the shell's stdout on the other side of a pty. See
-  // cmd_output_relay.sun for why it is a pty and not a pipe.
-  if (cfg.relay) {
-    return AppResult.Ok((try relay_run(alloc, cfg)));
-  }
-
-  // Too little to go on: not worth a round trip. A borrow, not an assignment:
-  // `var subject = cfg.query` would move the String out of the Config, leaving
-  // the field empty for build_context later.
-  var subject: const ref String = cfg.from_query() ? cfg.query : cfg.line;
-  var prefix = subject.clone(alloc);
-  prefix.trim();
-  if (prefix.length() < 3) {
-    return AppResult.Ok(0);
-  }
-
-  var key = cache_key(alloc, cfg);
-  if (cfg.use_cache) {
-    var hit = (try cache_lookup(alloc, cfg, key));
-    if (hit.size() > 0) {
-      try emit(alloc, hit);
-      return AppResult.Ok(0);
-    }
-  }
-
-  // Cache-only mode is asked for a line at a time and must never block on the
-  // network: serve from cache or return nothing at all.
-  if (cfg.cache_only) {
-    return AppResult.Ok(0);
-  }
-
-  if (cfg.api_key.length() == 0) {
-    eprint("[namo] ANTHROPIC_API_KEY is not set\n");
+    eprint("[namo] unknown option\n");
     return AppResult.Ok(1);
   }
 
-  if (cfg.min_gap > 0 and rate_limit_ok(alloc, cfg, cfg.min_gap) == false) {
-    return AppResult.Ok(0);
-  }
-
-  // History arrives on stdin: `fc` is a shell builtin, so the shell is the
-  // only thing that can read its own history. The directory listing is ours
-  // to take -- same code the daemon uses, so both paths send the same
-  // context for the same directory.
-  var raw_stdin = read_fd(alloc, 0);
-  var history = (try parse_history(alloc, raw_stdin, cfg.history_lines));
-
-  var listing = String(alloc, "");
-  if (cfg.send_ls) {
-    listing = (try list_dir(alloc, cfg.cwd, cfg.ls_limit));
-  }
-
-  var context = (try build_context(alloc, cfg, history, listing));
-
-  var reply = Reply(alloc);
-
-  match request_reply(alloc, cfg, context, reply) {
-    AppResult.Ok => {},
-    (e: const ref IError) => {
-      eprint("[namo] request failed\n");
-      return AppResult.Ok(1);
-    }
-  };
-
-  if (reply.failed) {
-    return AppResult.Ok(1);
-  }
-  if (reply.suggestions.size() == 0) {
-    return AppResult.Ok(0);
-  }
-
-  try cache_store(alloc, cfg, key, reply.suggestions);
-  try emit(alloc, reply.suggestions);
-  return AppResult.Ok(0);
+  var binary = try clone_item(alloc, cli, 0);
+  return workspace_run(alloc, cfg, binary);
 }
 
 manifest {
   source_files: [
     "version.sun",
+    "workspace/terminal.sun",
+    "workspace/layout.sun",
+    "workspace/agent.sun",
+    "workspace/state.sun",
+    "workspace/render.sun",
+    "workspace/chat_style.sun",
+    "workspace/session.sun",
+    "workspace/recovery.sun",
+    "workspace/shell.sun",
+    "workspace/input.sun",
+    "workspace/mouse.sun",
+    "workspace/host.sun",
     "util.sun",
     "fs.sun",
     "config.sun",
-    "prompt.sun",
     "redact.sun",
     "client.sun",
-    "cache.sun",
-    "daemon.sun",
-    "cmd_output_relay.sun"
+    "directory.sun",
+    "workspace/tracker.sun"
   ]
   libraries: ["stdlib.moon", "tls.moon"]
   target: {

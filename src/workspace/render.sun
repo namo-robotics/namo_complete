@@ -1,0 +1,269 @@
+/** Render the terminal and chat panes and manage their visibility. */
+public module namo {
+  using std;
+  using std.io;
+
+  /** Render a color value using only generated escape sequences. */
+  public function workspace_color(out: ref String, color: i64, foreground: bool) void {
+    if (color < 0) {
+      return;
+    }
+    out.append(foreground ? "\x1b[38;" : "\x1b[48;");
+    if (color < 256) {
+      out.append("5;");
+      out.append(color);
+    } else {
+      var rgb = color - 16777216;
+      out.append("2;");
+      out.append(rgb / 65536);
+      out.append(";");
+      out.append((rgb / 256) % 256);
+      out.append(";");
+      out.append(rgb % 256);
+    }
+    out.append("m");
+  }
+
+  /** Position the physical cursor within the workspace. */
+  public function workspace_cursor(out: ref String, row: i64, col: i64) void {
+    out.append("\x1b[");
+    out.append(row + 1);
+    out.append(";");
+    out.append(col + 1);
+    out.append("H");
+  }
+
+  /** Render the chat draft within its pane, keeping the editing cursor visible. */
+  public function workspace_render_editor(alloc: ref HeapAllocator, w: ref Workspace, out: ref String, width: i64) AppResult<i64> {
+    var start = terminal_clamp(w.input_cursor - (width - 8), 0, w.input.length());
+    while (start < w.input.length() and (string_byte(w.input, start) & 192) == 128) {
+      start = start + 1;
+    }
+    var text = String(alloc, "chat> ");
+    text.append(string_slice(alloc, w.input, start, w.input.length() - start));
+    var cursor_byte = 6 + w.input_cursor - start;
+    var editor = TerminalScreen(alloc, 1, width);
+    var cursor_col: i64 = 6;
+    for (var i: i64 = 0; i <= text.length(); i = i + 1) {
+      if (i == cursor_byte) {
+        cursor_col = editor.col;
+      }
+      if (i == text.length() or editor.col >= width - 1) {
+        break;
+      }
+      var c = string_byte(text, i);
+      if (c == 10) {
+        c = 32;
+      }
+      if (c >= 32 and c != 127) {
+        try terminal_feed(alloc, editor, c);
+      }
+    }
+    out.append((try terminal_line(alloc, editor, 0)));
+    return AppResult.Ok(terminal_clamp(cursor_col, 0, width - 1));
+  }
+
+  /** Draw both panes through bounded screen models. */
+  public function workspace_render(alloc: ref HeapAllocator, w: ref Workspace) AppResult<void> {
+    if (w.chat.length() > 131072) {
+      w.chat = string_slice(alloc, w.chat, w.chat.length() - 65536, 65536);
+    }
+    var out = String(alloc, "\x1b[?25l\x1b[0m\x1b[H");
+    var layout = WorkspaceLayout(w.rows, w.cols, w.ratio, w.agent_visible, w.horizontal);
+    var left = w.terminal.cols;
+    var show_terminal = w.agent_visible == false or layout.split or w.focus_chat == false;
+    var body_row = layout.chat_row + 1;
+    var chat_screen = TerminalScreen(alloc, layout.chat_rows - 1, layout.chat_cols);
+    var display = w.chat.clone(alloc);
+    if (w.hint.length() > 0) {
+      display.append("\n--- Command suggestion ---\nSuggestion: ");
+      display.append(w.hint);
+      display.append("\nAlt-O inserts; Alt-A reviews.\n");
+    }
+    if (w.worker_pid > 0 and w.worker_kind != 3) {
+      display.append("\nThinking...\n");
+    }
+    if (w.approving) {
+      display.append("\n--- Command review ---\nRun this exact command in ");
+      display.append(w.proposal_cwd);
+      display.append("?\n");
+      display.append(w.proposal);
+      display.append("\nType /approve to run, Escape to cancel.\n");
+    }
+    var actions = w.proposal.length() > 0 and w.handshake == false and layout.chat_cols >= 22;
+    if (actions) {
+      display.append(w.approving ? "[ Run    ]  [ Cancel ]\n" : "[ Accept ]  [ Cancel ]\n");
+    }
+    for (var i: i64 = 0; i < display.length(); i = i + 1) {
+      var c = string_byte(display, i);
+      if (c == 10) {
+        try terminal_feed(alloc, chat_screen, 13);
+      }
+      if (c == 10 or c >= 32 and c != 127 and c != 27) {
+        try terminal_feed(alloc, chat_screen, c);
+      }
+    }
+    if (chat_screen.col > 0 or chat_screen.pending_wrap) {
+      try terminal_feed(alloc, chat_screen, 13);
+      try terminal_feed(alloc, chat_screen, 10);
+    }
+    w.scroll = terminal_clamp(w.scroll, 0, chat_screen.history.size());
+    var input_row = body_row + chat_screen.row + w.scroll;
+    var input_visible = input_row < layout.chat_row + layout.chat_rows;
+    w.action_row = -1;
+    if (actions and w.agent_visible and (layout.split or w.focus_chat) and w.scroll == 0 and input_row > body_row) {
+      w.action_row = input_row - 1;
+      w.action_col = layout.chat_col;
+      w.action_revision = w.revision;
+      w.action_approval = w.approving;
+      w.action_command = w.proposal.clone(alloc);
+    }
+    var chat_colors = Vec<i64>(alloc, chat_screen.history.size() + chat_screen.rows);
+    var chat_color: i64 = -1;
+    for (var index: i64 = 0; index < chat_screen.history.size() + chat_screen.rows; index = index + 1) {
+      var line = String(alloc, "");
+      if (index < chat_screen.history.size()) {
+        line = try clone_item(alloc, chat_screen.history, index);
+      } else {
+        line = try terminal_line(alloc, chat_screen, index - chat_screen.history.size());
+      }
+      chat_color = workspace_chat_color(line, chat_color);
+      chat_colors.push(chat_color);
+    }
+    for (var r: i64 = 0; r < w.rows - 2; r = r + 1) {
+      workspace_cursor(out, r, 0);
+      out.append("\x1b[0m\x1b[2K");
+      if (show_terminal and r < w.terminal.rows) {
+        if (w.terminal_scroll > 0) {
+          var index = w.terminal.history.size() - w.terminal_scroll + r;
+          if (index >= 0 and index < w.terminal.history.size()) {
+            var line = try clone_item(alloc, w.terminal.history, index);
+            var temp = TerminalScreen(alloc, 1, left);
+            for (var j: i64 = 0; j < line.length(); j = j + 1) {
+              try terminal_feed(alloc, temp, string_byte(line, j));
+            }
+            out.append((try terminal_line(alloc, temp, 0)));
+          }
+        } else {
+          var last_fg: i64 = -999;
+          var last_bg: i64 = -999;
+          var last_attr: i64 = -999;
+          for (var c: i64 = 0; c < left; c = c + 1) {
+            var cell = try w.terminal.cells.get(r * left + c);
+            if (cell.width != 0) {
+              if (cell.fg != last_fg or cell.bg != last_bg or cell.attr != last_attr) {
+                out.append("\x1b[0m");
+                workspace_color(out, cell.fg, true);
+                workspace_color(out, cell.bg, false);
+                if ((cell.attr & 1) != 0) {
+                  out.append("\x1b[1m");
+                }
+                if ((cell.attr & 2) != 0) {
+                  out.append("\x1b[4m");
+                }
+                if ((cell.attr & 4) != 0) {
+                  out.append("\x1b[7m");
+                }
+                last_fg = cell.fg;
+                last_bg = cell.bg;
+                last_attr = cell.attr;
+              }
+              out.append(cell.text);
+            }
+          }
+        }
+      }
+      if (layout.split and w.horizontal == false) {
+        workspace_cursor(out, r, left);
+        out.append("\x1b[0;36m|\x1b[0m");
+      }
+      if (layout.split and w.horizontal and r == w.terminal.rows) {
+        out.append("\x1b[0;36m");
+        for (var c: i64 = 0; c < w.cols; c = c + 1) {
+          out.append("-");
+        }
+        out.append("\x1b[0m");
+      }
+      if (w.agent_visible and (layout.split or w.focus_chat) and r >= body_row and r < layout.chat_row + layout.chat_rows) {
+        workspace_cursor(out, r, layout.chat_col);
+        out.append("\x1b[0m");
+        var index = chat_screen.history.size() - w.scroll + r - body_row;
+        if (index >= 0 and index < chat_colors.size()) {
+          workspace_color(out, (try chat_colors.get(index)), true);
+        }
+        if (index >= 0 and index < chat_screen.history.size()) {
+          out.append((try chat_screen.history.get(index)));
+        } else if (index >= chat_screen.history.size() and index - chat_screen.history.size() < chat_screen.rows) {
+          out.append((try terminal_line(alloc, chat_screen, index - chat_screen.history.size())));
+        }
+      }
+    }
+    var chat_cursor: i64 = 0;
+    if (input_visible and w.agent_visible and (layout.split or w.focus_chat)) {
+      workspace_cursor(out, input_row, layout.chat_col);
+      out.append("\x1b[0m");
+      chat_cursor = try workspace_render_editor(alloc, w, out, layout.chat_cols);
+    }
+    if (w.action_row >= 0) {
+      workspace_cursor(out, w.action_row, w.action_col);
+      out.append("\x1b[0;1;30;42m");
+      out.append(w.approving ? "[ Run    ]" : "[ Accept ]");
+      out.append("\x1b[0m  \x1b[1;37;41m[ Cancel ]\x1b[0m");
+    }
+    if (w.agent_visible and (layout.split or w.focus_chat)) {
+      workspace_cursor(out, layout.chat_row, layout.chat_col);
+      out.append("\x1b[0;36mAgent\x1b[0m");
+      workspace_cursor(out, layout.chat_row, layout.chat_col + layout.chat_cols - 3);
+      out.append("\x1b[0;1;37;41m[×]\x1b[0m");
+    }
+    workspace_cursor(out, w.rows - 2, 0);
+    out.append("\x1b[0m\x1b[2K");
+    var status = TerminalScreen(alloc, 1, w.cols);
+    var label = String(alloc, w.focus_chat ? "agent | " : "terminal | ");
+    label.append(w.agent_visible ? "Ctrl-] switch panes | Alt-] commands" : "Agent off | Alt-] then a show agent");
+    for (var i: i64 = 0; i < label.length() and status.col < w.cols - 1; i = i + 1) {
+      try terminal_feed(alloc, status, string_byte(label, i));
+    }
+    out.append((try terminal_line(alloc, status, 0)));
+    workspace_cursor(out, w.rows - 1, 0);
+    out.append("\x1b[0m\x1b[2K");
+    if (w.prefix) {
+      out.append("Next key: Tab/t focus | s layout | a hide/show | arrows resize | Esc cancel");
+    } else if (w.omitted or w.summary.length() > 0) {
+      out.append("Context: older output summarized or omitted");
+    } else if (w.focus_chat) {
+      out.append("Ctrl-] returns to terminal | Alt-] then a hides agent");
+    }
+    if (w.focus_chat and input_visible) {
+      workspace_cursor(out, input_row, layout.chat_col + chat_cursor);
+      out.append("\x1b[?25h");
+    } else if (w.focus_chat == false and w.terminal.cursor and w.terminal_scroll == 0) {
+      workspace_cursor(out, w.terminal.row, w.terminal.col);
+      out.append("\x1b[?25h");
+    }
+    out.append("\x1b[?1000l\x1b[?1002l\x1b[?1003l");
+    if (w.agent_visible or w.terminal.mouse > 0) {
+      out.append("\x1b[?1006h\x1b[?");
+      out.append(w.focus_chat == false and w.terminal.mouse > 0 ? w.terminal.mouse : 1000);
+      out.append("h");
+    }
+    print(out);
+    w.dirty = false;
+    return AppResult.Ok;
+  }
+
+  /** Hide or reopen the agent pane while preserving the shell and conversation. */
+  public function workspace_set_agent_visible(alloc: ref HeapAllocator, w: ref Workspace, visible: bool) void {
+    w.agent_visible = visible;
+    if (visible == false) {
+      workspace_cancel(alloc, w);
+      w.focus_chat = false;
+      w.failure_pending = false;
+      w.hint = String(alloc, "");
+      w.proposal = String(alloc, "");
+      w.alternatives = Vec<String>(alloc, 3);
+      w.proposal_revision = -1;
+    }
+    w.dirty = true;
+  }
+}

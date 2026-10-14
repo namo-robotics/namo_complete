@@ -47,6 +47,7 @@ mkdir -p "$BIN_DIR" "$SHARE_DIR"
 install -m 0755 "$HERE/bin/namo_complete" "$BIN_DIR/namo_complete"
 install -m 0644 "$HERE/share/namo_complete/namo_complete.bash" "$SHARE_DIR/"
 install -m 0644 "$HERE/share/namo_complete/namo_complete.zsh" "$SHARE_DIR/"
+install -m 0644 "$HERE/share/namo_complete/workspace.bash" "$HERE/share/namo_complete/workspace.zsh" "$SHARE_DIR/"
 [ -f "$HERE/VERSION" ] &&
   install -m 0644 "$HERE/VERSION" "$SHARE_DIR/VERSION"
 [ -f "$HERE/BUILT-WITH" ] &&
@@ -84,7 +85,8 @@ esac
 
 cat <<EOF
 
-Set your API key, then open a new $SHELL_KIND shell:
+Set your API key in $RC_FILE before the namo_complete source line,
+then open a new $SHELL_KIND shell:
 
     export ANTHROPIC_API_KEY=sk-ant-...
 EOF

@@ -1,0 +1,86 @@
+/** Route mouse events between pane focus and terminal applications. */
+public module namo {
+  using std;
+
+  /** Focus clicked panes and forward application clicks within the terminal rectangle. */
+  public function workspace_mouse(alloc: ref HeapAllocator, cfg: ref Config, w: ref Workspace, key: const ref String, millis: i64) AppResult<void> {
+    var raw = string_slice(alloc, key, 3, key.length() - 4);
+    var parts = raw.split_nonempty(alloc, 59);
+    if (parts.size() == 3) {
+      var xtext = try clone_item(alloc, parts, 1);
+      var ytext = try clone_item(alloc, parts, 2);
+      var x: i64 = match xtext.parse_i64() {
+        Option.Some(v) => v,
+        _ => 0
+      };
+      var y: i64 = match ytext.parse_i64() {
+        Option.Some(v) => v,
+        _ => 0
+      };
+      var button_text = try clone_item(alloc, parts, 0);
+      var pressed: i64 = match button_text.parse_i64() {
+        Option.Some(v) => v,
+        _ => -1
+      };
+      if (string_byte(key, key.length() - 1) == b'm' and w.ignore_mouse_release) {
+        w.ignore_mouse_release = false;
+        return AppResult.Ok;
+      }
+      var layout = WorkspaceLayout(w.rows, w.cols, w.ratio, w.agent_visible, w.horizontal);
+      var on_terminal = x > 0 and x <= w.terminal.cols and y > 0 and y <= w.terminal.rows;
+      var on_chat = x > layout.chat_col and x <= layout.chat_col + layout.chat_cols and y > layout.chat_row and y <= layout.chat_row + layout.chat_rows;
+      if (on_chat and w.agent_visible and (layout.split or w.focus_chat) and pressed == 0 and string_byte(key, key.length() - 1) == b'M') {
+        if (y == layout.chat_row + 1 and x > layout.chat_col + layout.chat_cols - 3) {
+          w.close_requested = true;
+          w.ignore_mouse_release = true;
+          return AppResult.Ok;
+        }
+        if (y - 1 == w.action_row and w.action_row >= 0) {
+          var column = x - 1 - w.action_col;
+          if (column >= 0 and column < 10 or column >= 12 and column < 22) {
+            w.focus_chat = true;
+            w.prefix = false;
+            w.ignore_mouse_release = true;
+            try workspace_suggestion_action(alloc, cfg, w, column >= 12, millis);
+            return AppResult.Ok;
+          }
+        }
+      }
+      if (layout.split and pressed >= 0 and pressed < 32 and (pressed & 3) == 0 and string_byte(key, key.length() - 1) == b'M') {
+        if (on_chat or on_terminal) {
+          w.prefix = false;
+          w.dirty = true;
+        }
+        if (on_chat or on_terminal and w.focus_chat) {
+          w.focus_chat = on_chat;
+          if (on_chat) {
+            w.scroll = 0;
+          }
+          w.ignore_mouse_release = true;
+          w.dirty = true;
+          return AppResult.Ok;
+        }
+      }
+      if (on_terminal and w.focus_chat == false and w.terminal.mouse > 0) {
+        if (w.terminal.mouse_sgr) {
+          workspace_send(w, key);
+        } else if (x < 224 and y < 224) {
+          var btext = try clone_item(alloc, parts, 0);
+          var button: i64 = match btext.parse_i64() {
+            Option.Some(v) => v,
+            _ => 0
+          };
+          if (string_byte(key, key.length() - 1) == b'm') {
+            button = 3;
+          }
+          var legacy = String(alloc, "\x1b[M");
+          legacy.append_char(_convert<u8>(button + 32));
+          legacy.append_char(_convert<u8>(x + 32));
+          legacy.append_char(_convert<u8>(y + 32));
+          workspace_send(w, legacy);
+        }
+      }
+    }
+    return AppResult.Ok;
+  }
+}

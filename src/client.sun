@@ -3,26 +3,10 @@
 // Production requests use Sun's TLS bundle. Plain HTTP remains supported for
 // NAMO_ENDPOINT so the test suite can run against a loopback mock server.
 
-/** Build HTTP requests and parse completion responses. */
+/** Send HTTP requests over verified TLS or the local test endpoint. */
 public module namo {
   using std;
   using tls;
-
-  /** Holds parsed suggestions or a user-facing request failure. */
-  public class Reply {
-    public var suggestions: Vec<String>;
-    public var failed: bool;
-    // Why it failed, short enough for the hint row. The daemon's stderr goes
-    // to /dev/null -- the shell integration starts it that way -- so this
-    // string is the only way a failure can reach the user; see daemon.sun.
-    public var error: String;
-
-    init(alloc: ref HeapAllocator) {
-      this.suggestions = Vec<String>(alloc, 4);
-      this.failed = false;
-      this.error = String(alloc, "");
-    }
-  }
 
   class Endpoint {
     var secure: bool;
@@ -193,126 +177,5 @@ public module namo {
     }
     stream.close();
     return AppResult.Ok(raw);
-  }
-
-  /** Send one request to the configured HTTP or HTTPS endpoint. */
-  public function call_api(alloc: ref HeapAllocator, cfg: const ref Config, body: ref String) AppResult<Reply> {
-    var reply = Reply(alloc);
-
-    if (usable_key(cfg.api_key) == false) {
-      eprint("[namo] ANTHROPIC_API_KEY is not a usable header value\n");
-      reply.failed = true;
-      return AppResult.Ok(reply);
-    }
-
-    var endpoint = (try parse_endpoint(alloc, cfg.endpoint));
-    var request = build_request(alloc, cfg, endpoint, body);
-    var raw = String(alloc, "");
-    if (endpoint.secure) {
-      raw = (try read_tls(alloc, endpoint, request));
-    } else {
-      raw = (try read_tcp(alloc, endpoint, request));
-    }
-    var response = HttpClientResponse(alloc);
-    try parse_response(alloc, raw, response);
-    parse_reply(alloc, cfg, response.body, reply);
-    if ((response.status < 200 or response.status >= 300) and (reply.failed == false or reply.error.equals_literal("could not parse api response"))) {
-      var message = String(alloc, "HTTP status ");
-      message.append(response.status);
-      eprint("[namo] request failed with ");
-      eprint(message);
-      eprint("\n");
-      reply.failed = true;
-      reply.error = message;
-    }
-    return AppResult.Ok(reply);
-  }
-
-  /** Pull the completion lines out of a Messages API response. */
-  public function parse_reply(alloc: ref HeapAllocator, cfg: const ref Config, raw: const ref String, reply: ref Reply) void {
-    match parse_reply_checked(alloc, cfg, raw, reply) {
-      AppResult.Ok => {},
-      (e: const ref IError) => {
-        eprint("[namo] could not parse api response\n");
-        reply.failed = true;
-        reply.error = String(alloc, "could not parse api response");
-      }
-    };
-  }
-
-  /** Parse a response and propagate malformed JSON or checked-access failures. */
-  function parse_reply_checked(alloc: ref HeapAllocator, cfg: const ref Config, raw: const ref String, reply: ref Reply) AppResult<void> {
-    var doc = (try parse_json(alloc, raw));
-
-    if (doc.has("error")) {
-      var msg = (try (try (try doc.get("error")).get("message")).as_string());
-      var m = String(alloc, "[namo] api error: ");
-      m.append(msg);
-      m.append("\n");
-      eprint(m);
-      reply.failed = true;
-      reply.error = msg.clone(alloc);
-      return AppResult.Ok;
-    }
-
-    // Not content[0]: a model with thinking on -- which is the default from
-    // Claude Opus 5 on -- puts a `thinking` block first, and the block the
-    // completions are in is somewhere after it. Blocks with no "text"
-    // member are skipped rather than assumed away.
-    var truncated: bool = false;
-    if (doc.has("stop_reason")) {
-      truncated = (try (try doc.get("stop_reason")).as_string()).equals_literal("max_tokens");
-    }
-    var ti: i64 = -1;
-    var content = try doc.get("content");
-    for (var i: i64 = 0; i < content.len(); i = i + 1) {
-      if ((try content.at(i)).has("text")) {
-        ti = i;
-        break;
-      }
-    }
-    if (ti < 0) {
-      eprint("[namo] api response carried no text block\n");
-      reply.failed = true;
-      reply.error = String(alloc, "response had no text block");
-      return AppResult.Ok;
-    }
-
-    var text = (try (try (try content.at(ti)).get("text")).as_string());
-    var lines = (try split_lines(alloc, text));
-
-    // A truncated response leaves a partial final line; drop it.
-    var usable: i64 = lines.size();
-    if (truncated and usable > 1) {
-      usable = usable - 1;
-    }
-
-    for (var i: i64 = 0; i < usable; i = i + 1) {
-      if (reply.suggestions.size() >= cfg.max_suggestions) {
-        return AppResult.Ok;
-      }
-      var cand = (try clone_item(alloc, lines, i));
-      if (cand.length() > 0) {
-        // Ask mode answers "COMMAND<TAB>DESCRIPTION", so only the command
-        // half is judged. A line that does not read like a command is
-        // dropped rather than shown; see looks_like_command.
-        var parts = cand.split(alloc, CH_TAB);
-        var head = (try clone_item(alloc, parts, 0));
-        head.trim();
-        if ((try looks_like_command(alloc, head))) {
-          reply.suggestions.push(cand);
-        }
-      }
-    }
-
-    return AppResult.Ok;
-  }
-
-  /** Build and send a completion request. */
-  public function request_reply(alloc: ref HeapAllocator, cfg: const ref Config, context: const ref String, reply: ref Reply) AppResult<void> {
-    var body = (try build_body(alloc, cfg, context));
-    reply = (try call_api(alloc, cfg, body));
-
-    return AppResult.Ok;
   }
 }

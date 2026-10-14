@@ -1,0 +1,69 @@
+/** Collect bounded, sorted directory context for agent requests. */
+public module namo {
+  using std;
+  using std.io;
+
+  /** List directory names in a stable order within the context limit. */
+  public function list_dir(alloc: ref HeapAllocator, path: ref String, limit: i64) AppResult<String> {
+    var out = String(alloc, "");
+    var names = Vec<DirEntry>(alloc, 8);
+    match read_dir(alloc, path) {
+      SystemResult.Ok(value) => {
+        names = value;
+      },
+      (e: const ref IError) => {
+        return AppResult.Ok(out);
+      }
+    };
+
+    var want: i64 = names.size();
+    if (limit > 0 and want > limit) {
+      want = limit;
+    }
+
+    // Selection sort, stopped at `want`: taking the first N of a sorted
+    // listing costs N passes, not a full sort of a directory that may hold
+    // thousands of entries.
+    var used = ContiguousBuffer<u8>(alloc, names.size() + 1);
+    for (var u: i64 = 0; u < names.size(); u = u + 1) {
+      try used.set(u, 0);
+    }
+
+    for (var picked: i64 = 0; picked < want; picked = picked + 1) {
+      var best: i64 = -1;
+      for (var j: i64 = 0; j < names.size(); j = j + 1) {
+        if ((try used.get(j)) == 0) {
+          if (best < 0) {
+            best = j;
+          } else {
+            var cand = (try clone_entry_name(alloc, names, j));
+            var held = (try names.get(best)).name();
+            if (cand.compare(held) < 0) {
+              best = j;
+            }
+          }
+        }
+      }
+      if (best < 0) {
+        picked = want;
+      } else {
+        try used.set(best, 1);
+        // The listing rides inline in the prompt, so it is bounded by bytes
+        // as well as by count.
+        if (out.length() < 512) {
+          if (out.length() > 0) {
+            out.append(" ");
+          }
+          out.append((try names.get(best)).name());
+        }
+      }
+    }
+    return AppResult.Ok(out);
+  }
+
+  /** Copy an entry name before comparing it with another borrowed entry. */
+  function clone_entry_name(alloc: const ref HeapAllocator, entries: ref Vec<DirEntry>, index: i64) AppResult<String> {
+    var entry = try entries.get(index);
+    return AppResult.Ok(entry.name().clone(alloc));
+  }
+}

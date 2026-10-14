@@ -1,0 +1,24 @@
+/** Choose readable colors for chat turns, explanations, and command proposals. */
+public module namo {
+  using std;
+
+  /** Keep wrapped text in its section's color until the next labeled section. */
+  public function workspace_chat_color(line: const ref String, previous: i64) i64 {
+    if (line.starts_with("---")) {
+      return 8;
+    }
+    if (line.starts_with("You:")) {
+      return 5;
+    }
+    if (line.starts_with("Agent:")) {
+      return 6;
+    }
+    if (line.starts_with("Proposal:") or line.starts_with("Suggestion:") or line.starts_with("Run this exact command")) {
+      return 3;
+    }
+    if (line.starts_with("Explanation:") or line.starts_with("Type /") or line.starts_with("Alt-O") or line.starts_with("Thinking...") or line.starts_with("[ Accept") or line.starts_with("[ Run")) {
+      return -1;
+    }
+    return previous;
+  }
+}

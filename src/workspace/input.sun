@@ -1,0 +1,212 @@
+/** Decode workspace keys and route input to the shell or chat editor. */
+public module namo {
+  using std;
+
+  /** Insert chat text at the byte cursor without splitting UTF-8 characters. */
+  public function workspace_edit_insert(alloc: ref HeapAllocator, w: ref Workspace, text: const ref String) void {
+    if (w.input.length() + text.length() > 16384) {
+      return;
+    }
+    var next = string_slice(alloc, w.input, 0, w.input_cursor);
+    next.append(text);
+    next.append(string_slice(alloc, w.input, w.input_cursor, w.input.length() - w.input_cursor));
+    w.input_cursor = w.input_cursor + text.length();
+    w.input = next;
+  }
+
+  /** Route complete keys, preserving shell input except explicit workspace shortcuts. */
+  public function workspace_key(alloc: ref HeapAllocator, cfg: ref Config, w: ref Workspace, key: const ref String, millis: i64) AppResult<void> {
+    if (key.starts_with("\x1b[<")) {
+      return workspace_mouse(alloc, cfg, w, key, millis);
+    }
+    if (w.prefix) {
+      w.prefix = false;
+      if (key.equals_literal("a")) {
+        workspace_set_agent_visible(alloc, w, w.agent_visible == false);
+      } else if ((key.equals_literal("\t") or key.equals_literal("t") or key.equals_literal("\x1b[9;5u") or key.equals_literal("\x1b[27;5;9~") or key.equals_literal("\x1b[1;5I")) and w.agent_visible) {
+        w.focus_chat = w.focus_chat == false;
+      } else if (key.equals_literal("s")) {
+        w.horizontal = w.horizontal == false;
+      } else if (key.equals_literal("\x1b[D") or key.equals_literal("\x1b[A")) {
+        w.ratio = terminal_clamp(w.ratio - 5, 25, 75);
+      } else if (key.equals_literal("\x1b[C") or key.equals_literal("\x1b[B")) {
+        w.ratio = terminal_clamp(w.ratio + 5, 25, 75);
+      } else if (key.equals_literal("\x1b[5~")) {
+        if (w.focus_chat) {
+          w.scroll = w.scroll + 10;
+        } else {
+          w.terminal_scroll = terminal_clamp(w.terminal_scroll + 10, 0, w.terminal.history.size());
+        }
+      } else if (key.equals_literal("\x1b[6~")) {
+        if (w.focus_chat) {
+          w.scroll = terminal_clamp(w.scroll - 10, 0, 2000);
+        } else {
+          w.terminal_scroll = terminal_clamp(w.terminal_scroll - 10, 0, 2000);
+        }
+      } else if (key.equals_literal("\x1d")) {
+        var copy = key.clone(alloc);
+        workspace_send(w, copy);
+      }
+      w.dirty = true;
+      return AppResult.Ok;
+    }
+    if (key.equals_literal("\x1b[200~")) {
+      w.paste = true;
+      if (w.focus_chat or w.terminal.bracketed_paste == false) {
+        return AppResult.Ok;
+      }
+    } else if (key.equals_literal("\x1b[201~")) {
+      var was_pasting = w.paste;
+      w.paste = false;
+      if (was_pasting == false or w.focus_chat or w.terminal.bracketed_paste == false) {
+        return AppResult.Ok;
+      }
+    }
+    if (key.equals_literal("\x03")) {
+      w.paste = false;
+    }
+    if (w.paste == false and key.equals_literal("\x1d")) {
+      if (w.agent_visible) {
+        w.focus_chat = w.focus_chat == false;
+        w.scroll = 0;
+      }
+      w.dirty = true;
+      return AppResult.Ok;
+    }
+    if (w.paste == false and key.equals_literal("\x1b]")) {
+      w.prefix = true;
+      w.dirty = true;
+      return AppResult.Ok;
+    }
+    if (w.paste == false and (key.equals_literal("\x1ba") or key.equals_literal("å"))) {
+      workspace_set_agent_visible(alloc, w, true);
+      w.focus_chat = true;
+      w.chat.append("\nCommand alternatives:\n");
+      for (var i: i64 = 0; i < w.alternatives.size(); i = i + 1) {
+        w.chat.append(i + 1);
+        w.chat.append(". ");
+        w.chat.append((try w.alternatives.get(i)));
+        w.chat.append("\n");
+      }
+      w.chat.append("Use /pick N to review a different alternative.\n");
+      w.approving = w.proposal.length() > 0 and w.proposal_cwd.equals(w.cwd);
+      w.proposal_revision = w.revision;
+      if (w.approving == false) {
+        w.chat.append("\nNo current-directory proposal is available. Ask for an updated command.\n");
+      }
+      w.dirty = true;
+      return AppResult.Ok;
+    }
+    if (w.paste == false and (key.equals_literal("\x1bo") or key.equals_literal("ø"))) {
+      var hint = w.hint.clone(alloc);
+      if (hint.length() > 0) {
+        try workspace_insert(alloc, w, hint, false);
+      }
+      return AppResult.Ok;
+    }
+    if (w.focus_chat) {
+      w.scroll = 0;
+      if (key.equals_literal("\x1b") and w.paste == false) {
+        workspace_dismiss(alloc, w, millis);
+      } else if ((key.equals_literal("\r") or key.equals_literal("\n")) and w.paste == false) {
+        try workspace_submit(alloc, cfg, w, millis);
+      } else if (key.equals_literal("\x1b\r") or key.equals_literal("\n") or key.equals_literal("\r")) {
+        var newline = String(alloc, "\n");
+        workspace_edit_insert(alloc, w, newline);
+      } else if (key.equals_literal("\x7f") or key.equals_literal("\x08")) {
+        var end = w.input_cursor - 1;
+        while (end > 0 and (string_byte(w.input, end) & 192) == 128) {
+          end = end - 1;
+        }
+        if (end >= 0) {
+          var next = string_slice(alloc, w.input, 0, end);
+          next.append(string_slice(alloc, w.input, w.input_cursor, w.input.length() - w.input_cursor));
+          w.input = next;
+          w.input_cursor = end;
+        }
+      } else if (key.equals_literal("\x15")) {
+        w.input = String(alloc, "");
+        w.input_cursor = 0;
+      } else if (key.equals_literal("\x1b[D")) {
+        if (w.input_cursor > 0) {
+          w.input_cursor = w.input_cursor - 1;
+          while (w.input_cursor > 0 and (string_byte(w.input, w.input_cursor) & 192) == 128) {
+            w.input_cursor = w.input_cursor - 1;
+          }
+        }
+      } else if (key.equals_literal("\x1b[C")) {
+        if (w.input_cursor < w.input.length()) {
+          w.input_cursor = w.input_cursor + 1;
+          while (w.input_cursor < w.input.length() and (string_byte(w.input, w.input_cursor) & 192) == 128) {
+            w.input_cursor = w.input_cursor + 1;
+          }
+        }
+      } else if (key.equals_literal("\x01") or key.equals_literal("\x1b[H")) {
+        w.input_cursor = 0;
+      } else if (key.equals_literal("\x05") or key.equals_literal("\x1b[F")) {
+        w.input_cursor = w.input.length();
+      } else if (string_byte(key, 0) >= 32 and string_byte(key, 0) != 127 and w.input.length() < 16384) {
+        workspace_edit_insert(alloc, w, key);
+      }
+      w.dirty = true;
+    } else {
+      if (w.worker_pid > 0 and (w.worker_kind == 1 or w.worker_kind == 2)) {
+        workspace_cancel(alloc, w);
+      }
+      w.failure_pending = false;
+      if (w.handshake) {
+        w.handshake = false;
+        w.approving = false;
+      }
+      var data = key.clone(alloc);
+      if (w.terminal.application_keys and key.length() == 3 and key.starts_with("\x1b[")) {
+        var last = string_byte(key, 2);
+        if (last >= b'A' and last <= b'D') {
+          data = String(alloc, "\x1bO");
+          data.append_char(last);
+        }
+      }
+      workspace_send(w, data);
+      w.terminal_scroll = 0;
+      w.last_input = millis;
+      w.revision = w.revision + 1;
+      w.hint = String(alloc, "");
+      if (key.equals_literal("\r") or key.equals_literal("\n") or key.equals_literal("\x03")) {
+        w.idle = false;
+      }
+    }
+    return AppResult.Ok;
+  }
+
+  /** Parse escape keys and bracketed paste across arbitrary read boundaries. */
+  public function workspace_input(alloc: ref HeapAllocator, cfg: ref Config, w: ref Workspace, c: u8, millis: i64) AppResult<void> {
+    if (w.pending_keys.length() == 0 and c != 27 and c < 128) {
+      var key = String(alloc, "");
+      key.append_char(c);
+      return workspace_key(alloc, cfg, w, key, millis);
+    }
+    if (w.pending_keys.length() == 0) {
+      w.pending_since = millis;
+    }
+    w.pending_keys.append_char(c);
+    var length = w.pending_keys.length();
+    var first = string_byte(w.pending_keys, 0);
+    var ready = false;
+    if (first == 27 and length >= 2) {
+      var second = string_byte(w.pending_keys, 1);
+      if (second != 91 and second != 79) {
+        ready = true;
+      } else if (length >= 3 and c >= 64 and c <= 126) {
+        ready = true;
+      }
+    } else if (first >= 194) {
+      ready = length >= (first < 224 ? 2 : (first < 240 ? 3 : 4));
+    }
+    if (ready or length >= 128) {
+      var key = w.pending_keys.clone(alloc);
+      w.pending_keys = String(alloc, "");
+      try workspace_key(alloc, cfg, w, key, millis);
+    }
+    return AppResult.Ok;
+  }
+}

@@ -1,4 +1,4 @@
-// platform_macos.sun - macOS terminal and descriptor operations for the relay.
+// platform_macos.sun - macOS terminal and descriptor operations for the workspace.
 
 /** Implement terminal operations missing from the macOS standard library. */
 public module namo {
@@ -60,5 +60,109 @@ public module namo {
     unsafe { ioctl(master, PLATFORM_TIOCSWINSZ, ws.raw_data()); };
 
     return AppResult.Ok;
+  }
+  extern "C" function workspace_fork() i32 as "fork";
+  extern "C" function workspace_setsid() i32 as "setsid";
+  extern "C" function workspace_dup2(oldfd: i32, newfd: i32) i32 as "dup2";
+  extern "C" function workspace_close(fd: i32) i32 as "close";
+  extern "C" function workspace_execvp(path: raw_ptr<u8>, argv: raw_ptr<u8>) i32 as "execvp";
+  extern "C" function workspace_exit(status: i32) void as "_exit";
+  extern "C" function workspace_waitpid(pid: i32, status: raw_ptr<i32>, options: i32) i32 as "waitpid";
+  extern "C" function workspace_fcntl(fd: i32, cmd: i32, ...) i32 as "fcntl";
+
+  /** Launch a prepared shell with its own controlling terminal. */
+  public function platform_workspace_spawn(cmd: ref std.process.Command, slave: ref String, master: i32) i32 {
+    var argv = cmd.build_argv_array();
+    var args = argv.raw_data();
+    var program = cmd.program();
+    var path = slave.c_str();
+    var child: i32 = unsafe { workspace_fork(); };
+    if (child == 0) {
+      unsafe {
+        if (workspace_setsid() < 0) { workspace_exit(125); }
+        var fd = open(path, 2, 0);
+        if (fd < 0) { workspace_exit(125); }
+        if (ioctl(fd, 536900705, 0) < 0) { workspace_exit(125); }
+        if (workspace_dup2(fd, 0) < 0 or workspace_dup2(fd, 1) < 0 or workspace_dup2(fd, 2) < 0) { workspace_exit(125); }
+        if (fd > 2) { workspace_close(fd); }
+        workspace_close(master);
+        workspace_execvp(program, args);
+        workspace_exit(125);
+      };
+    }
+    return child;
+  }
+
+  /** Start a worker on prepared pipes without borrowing the user's terminal. */
+  public function platform_workspace_worker(cmd: ref std.process.Command, input: i32, output: i32) i32 {
+    var argv = cmd.build_argv_array();
+    var args = argv.raw_data();
+    var program = cmd.program();
+    var child: i32 = unsafe { workspace_fork(); };
+    if (child == 0) {
+      unsafe {
+        if (workspace_dup2(input, 0) < 0 or workspace_dup2(output, 1) < 0) { workspace_exit(125); }
+        var quiet = open("/dev/null", 2, 0);
+        if (quiet < 0 or workspace_dup2(quiet, 2) < 0) { workspace_exit(125); }
+        if (quiet > 2) { workspace_close(quiet); }
+        workspace_execvp(program, args);
+        workspace_exit(125);
+      };
+    }
+    return child;
+  }
+
+  /** Update a PTY's size to the terminal pane's dimensions. */
+  public function platform_workspace_size(master: i32, rows: i64, cols: i64) void {
+    var ws: array<u16, 4> = [_convert<u16>(rows), _convert<u16>(cols), 0u16, 0u16];
+    unsafe { ioctl(master, PLATFORM_TIOCSWINSZ, _address_of<u16>(ws[0])); };
+  }
+
+  /** Poll or reap a child, returning a normalized exit status when available. */
+  public function platform_workspace_wait(child: i32, block: bool) i32 {
+    var status: i32 = 0;
+    var result = unsafe { workspace_waitpid(child, _address_of<i32>(status), block ? 0 : 1); };
+    if (result <= 0) { return -1; }
+    if ((status & 127) != 0) { return 128 + (status & 127); }
+    return (status >> 8) & 255;
+  }
+
+  /** Prevent workspace descriptors from leaking into executed programs. */
+  public function platform_workspace_cloexec(fd: i32) bool {
+    return unsafe { workspace_fcntl(fd, 2, 1); } >= 0;
+  }
+  extern "C" function workspace_mkdtemp(path: raw_ptr<u8>) raw_ptr<u8> as "mkdtemp";
+  extern "C" function workspace_mkfifo(path: raw_ptr<u8>, mode: u32) i32 as "mkfifo";
+
+  /** Create an unpredictable private directory for shell control channels. */
+  public function platform_workspace_directory(alloc: ref HeapAllocator) String {
+    var path = String(alloc, "/tmp/namo-workspace-XXXXXX");
+    var result = unsafe { workspace_mkdtemp(path.c_str()); };
+    if (result == null) { return String(alloc, ""); }
+    return path;
+  }
+
+  /** Create a private shell metadata FIFO. */
+  public function platform_workspace_fifo(path: ref String) bool {
+    return unsafe { workspace_mkfifo(path.c_str(), 384); } == 0;
+  }
+  extern "C" function workspace_sigemptyset(set: raw_ptr<u8>) i32 as "sigemptyset";
+  extern "C" function workspace_sigaddset(set: raw_ptr<u8>, signal: i32) i32 as "sigaddset";
+  extern "C" function workspace_sigprocmask(how: i32, set: raw_ptr<u8>, old: raw_ptr<u8>) i32 as "sigprocmask";
+  extern "C" function workspace_signal(signal: i32, handler: i64) i64 as "signal";
+
+  /** Hold termination signals while replacing scoped handlers around a worker spawn. */
+  public function platform_workspace_signals(block: bool) void {
+    var set: array<u64, 16> = [0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64];
+    unsafe {
+      var mask_address = _bitcast<raw_ptr<u8>>(_address_of<u64>(set[0]));
+      workspace_sigemptyset(mask_address); workspace_sigaddset(mask_address, 2); workspace_sigaddset(mask_address, 15);
+      workspace_sigprocmask(block ? 1 : 2, mask_address, null);
+    };
+  }
+
+  /** Treat a closed worker pipe as an I/O error instead of terminating the UI. */
+  public function platform_workspace_ignore_pipe() void {
+    unsafe { workspace_signal(13, 1); };
   }
 }

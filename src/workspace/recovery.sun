@@ -1,0 +1,34 @@
+/** Keep optional agent failures and worker backpressure away from shell interaction. */
+public module namo {
+  using std;
+
+  /** Disable the agent after an internal error while leaving the shell usable. */
+  public function workspace_agent_failure(alloc: ref HeapAllocator, w: ref Workspace) void {
+    workspace_set_agent_visible(alloc, w, false);
+    w.chat.append("\nAgent unavailable; the shell remains usable. Alt-] then a reopens the agent.\n");
+  }
+
+  /** Feed a bounded worker chunk and reap canceled workers without waiting. */
+  public function workspace_worker_progress(alloc: ref HeapAllocator, w: ref Workspace) AppResult<void> {
+    var index: i64 = 0;
+    while (index < w.retired_workers.size()) {
+      var pid: i32 = try w.retired_workers.get(index);
+      if (platform_workspace_wait(pid, false) >= 0) {
+        var removed = try w.retired_workers.swap_remove(index);
+      } else {
+        index = index + 1;
+      }
+    }
+    if (w.worker_pid > 0 and w.worker_pending.length() > 0) {
+      var chunk = string_slice(alloc, w.worker_pending, 0, terminal_clamp(w.worker_pending.length(), 0, 65536));
+      var written = w.worker_input.write(chunk);
+      if (written > 0) {
+        w.worker_pending = string_slice(alloc, w.worker_pending, written, w.worker_pending.length() - written);
+        if (w.worker_pending.length() == 0) {
+          w.worker_input.close();
+        }
+      }
+    }
+    return AppResult.Ok;
+  }
+}

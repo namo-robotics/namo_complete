@@ -1,0 +1,34 @@
+/** Calculate pane rectangles independently of rendering and terminal input. */
+public module namo {
+  /** Describe a split layout or a single focused pane when space is limited. */
+  public class WorkspaceLayout {
+    public var split: bool;
+    public var terminal_rows: i64;
+    public var terminal_cols: i64;
+    public var chat_row: i64 = 0;
+    public var chat_col: i64 = 0;
+    public var chat_rows: i64;
+    public var chat_cols: i64;
+
+    /** Reserve status rows and keep both pane sizes valid in either orientation. */
+    init(rows: i64, cols: i64, ratio: i64, visible: bool, horizontal: bool) {
+      var height = rows - 2;
+      this.split = visible and (horizontal ? height >= 7 : cols >= 80);
+      this.terminal_rows = height;
+      this.terminal_cols = cols;
+      this.chat_rows = height;
+      this.chat_cols = cols;
+      if (this.split) {
+        if (horizontal) {
+          this.terminal_rows = (height - 1) * ratio / 100;
+          this.chat_row = this.terminal_rows + 1;
+          this.chat_rows = height - this.chat_row;
+        } else {
+          this.terminal_cols = (cols - 1) * ratio / 100;
+          this.chat_col = this.terminal_cols + 1;
+          this.chat_cols = cols - this.chat_col;
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,602 @@
+/** Emulate a bounded terminal screen without forwarding application escapes. */
+public module namo {
+  using std;
+
+  /** A character cell with terminal colors and display attributes. */
+  public class TerminalCell {
+    public var text: String;
+    public var fg: i64;
+    public var bg: i64;
+    public var attr: i64;
+    public var width: i64;
+    /** Construct an empty cell in the current rendition. */
+    init(alloc: ref HeapAllocator, fg: i64, bg: i64, attr: i64) {
+      this.text = String(alloc, " ");
+      this.fg = fg;
+      this.bg = bg;
+      this.attr = attr;
+      this.width = 1;
+    }
+
+    /** Copy a cell without sharing mutable text. */
+    public const method copy(alloc: ref HeapAllocator) TerminalCell {
+      var out = TerminalCell(alloc, this.fg, this.bg, this.attr);
+      out.text = this.text.clone(alloc);
+      out.width = this.width;
+      return out;
+    }
+  }
+
+  /** Maintain primary and alternate screens and an incremental escape parser. */
+  public class TerminalScreen {
+    public var cells: Vec<TerminalCell>;
+    public var primary: Vec<TerminalCell>;
+    public var history: Vec<String>;
+    public var rows: i64;
+    public var cols: i64;
+    public var row: i64 = 0;
+    public var col: i64 = 0;
+    public var saved_row: i64 = 0;
+    public var saved_col: i64 = 0;
+    public var primary_row: i64 = 0;
+    public var primary_col: i64 = 0;
+    public var top: i64 = 0;
+    public var bottom: i64;
+    public var fg: i64 = -1;
+    public var bg: i64 = -1;
+    public var attr: i64 = 0;
+    public var alternate: bool = false;
+    public var cursor: bool = true;
+    public var application_keys: bool = false;
+    public var bracketed_paste: bool = false;
+    public var mouse: i64 = 0;
+    public var mouse_sgr: bool = false;
+    public var wrap: bool = true;
+    public var origin: bool = false;
+    public var insert: bool = false;
+    public var pending_wrap: bool = false;
+    public var state: i64 = 0;
+    public var sequence: String;
+    public var utf: String;
+    public var utf_left: i64 = 0;
+    public var code: i64 = 0;
+    public var replies: String;
+    public var completed: String;
+    /** Allocate a screen with bounded dimensions. */
+    init(alloc: ref HeapAllocator, rows: i64, cols: i64) {
+      this.rows = rows;
+      this.cols = cols;
+      this.bottom = rows - 1;
+      this.cells = Vec<TerminalCell>(alloc, rows * cols);
+      this.primary = Vec<TerminalCell>(alloc, rows * cols);
+      this.history = Vec<String>(alloc, 128);
+      this.sequence = String(alloc, "");
+      this.utf = String(alloc, "");
+      this.replies = String(alloc, "");
+      this.completed = String(alloc, "");
+      for (var i: i64 = 0; i < rows * cols; i = i + 1) {
+        this.cells.push(TerminalCell(alloc, -1, -1, 0));
+      }
+    }
+  }
+
+  /** Clamp a position to an inclusive range. */
+  public function terminal_clamp(value: i64, low: i64, high: i64) i64 {
+    if (value < low) {
+      return low;
+    }
+    if (value > high) {
+      return high;
+    }
+    return value;
+  }
+
+  /** Measure combining marks and common wide Unicode characters. */
+  public function terminal_width(code: i64) i64 {
+    if ((code >= 0x300 and code <= 0x36f) or (code >= 0x1ab0 and code <= 0x1aff) or (code >= 0x1dc0 and code <= 0x1dff) or (code >= 0xfe00 and code <= 0xfe0f) or code == 0x200d or (code >= 0x1f3fb and code <= 0x1f3ff) or (code >= 0x20d0 and code <= 0x20ff)) {
+      return 0;
+    }
+    if (code >= 0x1100 and (code <= 0x115f or code == 0x2329 or code == 0x232a or (code >= 0x2e80 and code <= 0xa4cf) or (code >= 0xac00 and code <= 0xd7a3) or (code >= 0xf900 and code <= 0xfaff) or (code >= 0xfe10 and code <= 0xfe19) or (code >= 0xfe30 and code <= 0xfe6f) or (code >= 0xff00 and code <= 0xff60) or (code >= 0xffe0 and code <= 0xffe6) or (code >= 0x1f300 and code <= 0x1faff) or (code >= 0x20000 and code <= 0x3fffd))) {
+      return 2;
+    }
+    return 1;
+  }
+
+  /** Extract visible text from one screen row. */
+  public function terminal_line(alloc: ref HeapAllocator, t: const ref TerminalScreen, row: i64) AppResult<String> {
+    var out = String(alloc, "");
+    for (var col: i64 = 0; col < t.cols; col = col + 1) {
+      var cell = try t.cells.get(row * t.cols + col);
+      if (cell.width != 0) {
+        out.append(cell.text);
+      }
+    }
+    return AppResult.Ok(out);
+  }
+
+  /** Clear a range using the current background color. */
+  public function terminal_clear(alloc: ref HeapAllocator, t: ref TerminalScreen, start: i64, end: i64) AppResult<void> {
+    for (var i: i64 = start; i < end; i = i + 1) {
+      try t.cells.set(i, TerminalCell(alloc, t.fg, t.bg, t.attr));
+    }
+    return AppResult.Ok;
+  }
+
+  /** Scroll the active region and retain normal-screen scrollback. */
+  public function terminal_scroll(alloc: ref HeapAllocator, t: ref TerminalScreen, reverse: bool) AppResult<void> {
+    if (reverse == false) {
+      if (t.top == 0 and t.alternate == false) {
+        var line = try terminal_line(alloc, t, 0);
+        if (t.history.size() >= 2000) {
+          var removed = try t.history.remove(0);
+        }
+        t.history.push(line);
+      }
+      for (var r: i64 = t.top; r < t.bottom; r = r + 1) {
+        for (var c: i64 = 0; c < t.cols; c = c + 1) {
+          var cell = (try t.cells.get((r + 1) * t.cols + c)).copy(alloc);
+          try t.cells.set(r * t.cols + c, cell);
+        }
+      }
+      try terminal_clear(alloc, t, t.bottom * t.cols, (t.bottom + 1) * t.cols);
+    } else {
+      for (var r: i64 = t.bottom; r > t.top; r = r - 1) {
+        for (var c: i64 = 0; c < t.cols; c = c + 1) {
+          var cell = (try t.cells.get((r - 1) * t.cols + c)).copy(alloc);
+          try t.cells.set(r * t.cols + c, cell);
+        }
+      }
+      try terminal_clear(alloc, t, t.top * t.cols, (t.top + 1) * t.cols);
+    }
+    return AppResult.Ok;
+  }
+
+  /** Advance the cursor, scrolling at the bottom margin. */
+  public function terminal_newline(alloc: ref HeapAllocator, t: ref TerminalScreen) AppResult<void> {
+    var line = try terminal_line(alloc, t, t.row);
+    line.trim();
+    if (line.length() > 0) {
+      t.completed.append(line);
+      t.completed.append("\n");
+    }
+    if (t.row == t.bottom) {
+      try terminal_scroll(alloc, t, false);
+    } else {
+      t.row = terminal_clamp(t.row + 1, 0, t.rows - 1);
+    }
+    t.pending_wrap = false;
+    return AppResult.Ok;
+  }
+
+  /** Place one decoded character into the screen. */
+  public function terminal_put(alloc: ref HeapAllocator, t: ref TerminalScreen, text: const ref String, code: i64) AppResult<void> {
+    var width = terminal_width(code);
+    var previous = t.row * t.cols + terminal_clamp(t.pending_wrap ? t.col : t.col - 1, 0, t.cols - 1);
+    if ((try t.cells.get(previous)).width == 0 and previous > 0) {
+      previous = previous - 1;
+    }
+    var join = (try t.cells.get(previous)).text.ends_with("\xe2\x80\x8d");
+    if (width == 0 or join) {
+      var cell = try t.cells.get(previous);
+      if (cell.width == 0 and previous > 0) {
+        previous = previous - 1;
+      }
+      var target = try t.cells.get(previous);
+      if (target.text.length() < 64) {
+        target.text.append(text);
+      }
+      return AppResult.Ok;
+    }
+    if (t.pending_wrap or (width == 2 and t.col == t.cols - 1)) {
+      if (t.wrap) {
+        try terminal_newline(alloc, t);
+        t.col = 0;
+      }
+      t.pending_wrap = false;
+    }
+    if (t.insert) {
+      for (var c: i64 = t.cols - 1; c >= t.col + width; c = c - 1) {
+        var copy = (try t.cells.get(t.row * t.cols + c - width)).copy(alloc);
+        try t.cells.set(t.row * t.cols + c, copy);
+      }
+    }
+    var at = t.row * t.cols + t.col;
+    if ((try t.cells.get(at)).width == 0 and t.col > 0) {
+      try t.cells.set(at - 1, TerminalCell(alloc, t.fg, t.bg, t.attr));
+    }
+    if ((try t.cells.get(at)).width == 2 and t.col + 1 < t.cols) {
+      try t.cells.set(at + 1, TerminalCell(alloc, t.fg, t.bg, t.attr));
+    }
+    var cell = TerminalCell(alloc, t.fg, t.bg, t.attr);
+    cell.text = text.clone(alloc);
+    cell.width = width;
+    try t.cells.set(at, cell);
+    if (width == 2 and t.col + 1 < t.cols) {
+      var continuation = TerminalCell(alloc, t.fg, t.bg, t.attr);
+      continuation.width = 0;
+      continuation.text = String(alloc, "");
+      try t.cells.set(at + 1, continuation);
+    }
+    t.col = t.col + width;
+    if (t.col >= t.cols) {
+      t.col = t.cols - 1;
+      t.pending_wrap = true;
+    }
+    return AppResult.Ok;
+  }
+
+  /** Read a CSI parameter, applying the command's default value. */
+  public function terminal_param(params: const ref Vec<i64>, index: i64, fallback: i64) i64 {
+    if (index >= params.size()) {
+      return fallback;
+    }
+    var value = match params.get(index) {
+      AccessResult.Ok(v) => v,
+      _ => 0
+    };
+    return value == 0 ? fallback : value;
+  }
+
+  /** Apply a complete control sequence to the emulated screen. */
+  public function terminal_csi(alloc: ref HeapAllocator, t: ref TerminalScreen, final: u8) AppResult<void> {
+    var params = Vec<i64>(alloc, 8);
+    var number: i64 = 0;
+    var private_mode = t.sequence.starts_with("?");
+    for (var i: i64 = 0; i < t.sequence.length(); i = i + 1) {
+      var c = string_byte(t.sequence, i);
+      if (c >= 48 and c <= 57) {
+        number = terminal_clamp(number * 10 + c - 48, 0, 1000000);
+      }
+      if (c == 59 or c == 58) {
+        params.push(number);
+        number = 0;
+      }
+    }
+    params.push(number);
+    var n = terminal_param(params, 0, 1);
+    var first = terminal_param(params, 0, 0);
+    t.pending_wrap = false;
+    if (final == b'A') {
+      t.row = terminal_clamp(t.row - n, t.origin ? t.top : 0, t.rows - 1);
+    } else if (final == b'B' or final == b'e') {
+      t.row = terminal_clamp(t.row + n, 0, t.origin ? t.bottom : t.rows - 1);
+    } else if (final == b'C' or final == b'a') {
+      t.col = terminal_clamp(t.col + n, 0, t.cols - 1);
+    } else if (final == b'D') {
+      t.col = terminal_clamp(t.col - n, 0, t.cols - 1);
+    } else if (final == b'E' or final == b'F') {
+      t.row = terminal_clamp(t.row + (final == b'E' ? n : -n), 0, t.rows - 1);
+      t.col = 0;
+    } else if (final == b'G' or final == b'`') {
+      t.col = terminal_clamp(n - 1, 0, t.cols - 1);
+    } else if (final == b'd') {
+      t.row = terminal_clamp(n - 1 + (t.origin ? t.top : 0), 0, t.rows - 1);
+    } else if (final == b'H' or final == b'f') {
+      t.row = terminal_clamp(n - 1 + (t.origin ? t.top : 0), 0, t.rows - 1);
+      t.col = terminal_clamp(terminal_param(params, 1, 1) - 1, 0, t.cols - 1);
+    } else if (final == b'J') {
+      if (first == 2 or first == 3) {
+        try terminal_clear(alloc, t, 0, t.rows * t.cols);
+      } else if (first == 0) {
+        try terminal_clear(alloc, t, t.row * t.cols + t.col, t.rows * t.cols);
+      } else if (first == 1) {
+        try terminal_clear(alloc, t, 0, t.row * t.cols + t.col + 1);
+      }
+      if (first == 3) {
+        t.history.clear();
+      }
+    } else if (final == b'K') {
+      var start = first == 0 ? t.col : 0;
+      var end = first == 1 ? t.col + 1 : t.cols;
+      try terminal_clear(alloc, t, t.row * t.cols + start, t.row * t.cols + end);
+    } else if (final == b'r' and private_mode == false) {
+      t.top = terminal_clamp(n - 1, 0, t.rows - 1);
+      t.bottom = terminal_clamp(terminal_param(params, 1, t.rows) - 1, t.top, t.rows - 1);
+      t.row = t.origin ? t.top : 0;
+      t.col = 0;
+    } else if (final == b's') {
+      t.saved_row = t.row;
+      t.saved_col = t.col;
+    } else if (final == b'u') {
+      t.row = t.saved_row;
+      t.col = t.saved_col;
+    } else if (final == b'S' or final == b'T' or final == b'L' or final == b'M') {
+      var top = t.top;
+      if (final == b'L' or final == b'M') {
+        t.top = t.row;
+      }
+      for (var i: i64 = 0; i < terminal_clamp(n, 1, t.rows); i = i + 1) {
+        try terminal_scroll(alloc, t, final == b'T' or final == b'L');
+      }
+      t.top = top;
+    } else if (final == b'P' or final == b'@' or final == b'X') {
+      n = terminal_clamp(n, 1, t.cols - t.col);
+      if (final == b'P') {
+        for (var c: i64 = t.col; c < t.cols - n; c = c + 1) {
+          var copy = (try t.cells.get(t.row * t.cols + c + n)).copy(alloc);
+          try t.cells.set(t.row * t.cols + c, copy);
+        }
+        try terminal_clear(alloc, t, (t.row + 1) * t.cols - n, (t.row + 1) * t.cols);
+      } else {
+        if (final == b'@') {
+          for (var c: i64 = t.cols - 1; c >= t.col + n; c = c - 1) {
+            var copy = (try t.cells.get(t.row * t.cols + c - n)).copy(alloc);
+            try t.cells.set(t.row * t.cols + c, copy);
+          }
+        }
+        try terminal_clear(alloc, t, t.row * t.cols + t.col, t.row * t.cols + t.col + n);
+      }
+    } else if (final == b'm') {
+      for (var i: i64 = 0; i < params.size(); i = i + 1) {
+        var p: i64 = terminal_param(params, i, 0);
+        if (p == 0) {
+          t.fg = -1;
+          t.bg = -1;
+          t.attr = 0;
+        } else if (p == 1) {
+          t.attr = t.attr | 1;
+        } else if (p == 4) {
+          t.attr = t.attr | 2;
+        } else if (p == 7) {
+          t.attr = t.attr | 4;
+        } else if (p == 22) {
+          t.attr = t.attr & ~1;
+        } else if (p == 24) {
+          t.attr = t.attr & ~2;
+        } else if (p == 27) {
+          t.attr = t.attr & ~4;
+        } else if (p == 39) {
+          t.fg = -1;
+        } else if (p == 49) {
+          t.bg = -1;
+        } else if (p >= 30 and p <= 37) {
+          t.fg = p - 30;
+        } else if (p >= 40 and p <= 47) {
+          t.bg = p - 40;
+        } else if (p >= 90 and p <= 97) {
+          t.fg = p - 90 + 8;
+        } else if (p >= 100 and p <= 107) {
+          t.bg = p - 100 + 8;
+        } else if ((p == 38 or p == 48) and i + 2 < params.size()) {
+          var mode: i64 = terminal_param(params, i + 1, 0);
+          var color: i64 = -1;
+          if (mode == 5) {
+            color = terminal_clamp(terminal_param(params, i + 2, 0), 0, 255);
+            i = i + 2;
+          } else if (mode == 2 and i + 4 < params.size()) {
+            color = 16777216 + terminal_clamp(terminal_param(params, i + 2, 0), 0, 255) * 65536 + terminal_clamp(terminal_param(params, i + 3, 0), 0, 255) * 256 + terminal_clamp(terminal_param(params, i + 4, 0), 0, 255);
+            i = i + 4;
+          }
+          if (p == 38) {
+            t.fg = color;
+          } else {
+            t.bg = color;
+          }
+        }
+      }
+    } else if (final == b'h' or final == b'l') {
+      var enabled = final == b'h';
+      for (var i: i64 = 0; i < params.size(); i = i + 1) {
+        var p: i64 = terminal_param(params, i, 0);
+        if (private_mode) {
+          if (p == 1) {
+            t.application_keys = enabled;
+          }
+          if (p == 6) {
+            t.origin = enabled;
+            t.row = enabled ? t.top : 0;
+            t.col = 0;
+          }
+          if (p == 7) {
+            t.wrap = enabled;
+          }
+          if (p == 25) {
+            t.cursor = enabled;
+          }
+          if (p == 2004) {
+            t.bracketed_paste = enabled;
+          }
+          if (p == 1000 or p == 1002 or p == 1003) {
+            t.mouse = enabled ? p : 0;
+          }
+          if (p == 1006) {
+            t.mouse_sgr = enabled;
+          }
+          if ((p == 1049 or p == 47 or p == 1047) and enabled != t.alternate) {
+            if (enabled) {
+              t.primary.clear();
+              for (var j: i64 = 0; j < t.cells.size(); j = j + 1) {
+                t.primary.push((try t.cells.get(j)).copy(alloc));
+              }
+              t.cells.clear();
+              for (var j: i64 = 0; j < t.rows * t.cols; j = j + 1) {
+                t.cells.push(TerminalCell(alloc, -1, -1, 0));
+              }
+              t.primary_row = t.row;
+              t.primary_col = t.col;
+              t.row = 0;
+              t.col = 0;
+            } else {
+              t.cells.clear();
+              for (var j: i64 = 0; j < t.primary.size(); j = j + 1) {
+                t.cells.push((try t.primary.get(j)).copy(alloc));
+              }
+              t.primary.clear();
+              t.row = t.primary_row;
+              t.col = t.primary_col;
+            }
+            t.alternate = enabled;
+            t.top = 0;
+            t.bottom = t.rows - 1;
+          }
+        } else if (p == 4) {
+          t.insert = enabled;
+        }
+      }
+    } else if (final == b'n') {
+      if (first == 5) {
+        t.replies.append("\x1b[0n");
+      }
+      if (first == 6) {
+        t.replies.append("\x1b[");
+        t.replies.append(t.row + 1);
+        t.replies.append(";");
+        t.replies.append(t.col + 1);
+        t.replies.append("R");
+      }
+    } else if (final == b'c') {
+      t.replies.append("\x1b[?1;2c");
+    }
+    return AppResult.Ok;
+  }
+
+  /** Consume a byte while retaining incomplete escape and UTF-8 sequences. */
+  public function terminal_feed(alloc: ref HeapAllocator, t: ref TerminalScreen, c: u8) AppResult<void> {
+    if (t.state == 3 or t.state == 4) {
+      if (c == 7 or (t.state == 4 and c == 92)) {
+        t.state = 0;
+      } else {
+        t.state = c == 27 ? 4 : 3;
+      }
+      return AppResult.Ok;
+    }
+    if (t.state == 5) {
+      t.state = 0;
+      return AppResult.Ok;
+    }
+    if (t.state == 1) {
+      t.state = 0;
+      if (c == b'[') {
+        t.state = 2;
+        t.sequence = String(alloc, "");
+      } else if (c == b']' or c == b'P' or c == b'_' or c == b'^') {
+        t.state = 3;
+      } else if (c == b'(' or c == b')' or c == b'#' or c == b'%') {
+        t.state = 5;
+      } else if (c == b'7') {
+        t.saved_row = t.row;
+        t.saved_col = t.col;
+      } else if (c == b'8') {
+        t.row = t.saved_row;
+        t.col = t.saved_col;
+      } else if (c == b'D' or c == b'E') {
+        try terminal_newline(alloc, t);
+        if (c == b'E') {
+          t.col = 0;
+        }
+      } else if (c == b'M') {
+        if (t.row == t.top) {
+          try terminal_scroll(alloc, t, true);
+        } else {
+          t.row = terminal_clamp(t.row - 1, 0, t.rows - 1);
+        }
+      } else if (c == b'c') {
+        try terminal_clear(alloc, t, 0, t.rows * t.cols);
+        t.row = 0;
+        t.col = 0;
+        t.fg = -1;
+        t.bg = -1;
+        t.attr = 0;
+      }
+      return AppResult.Ok;
+    }
+    if (t.state == 2) {
+      if (c >= 64 and c <= 126) {
+        try terminal_csi(alloc, t, c);
+        t.state = 0;
+      } else if (c == 27) {
+        t.state = 1;
+      } else if (t.sequence.length() < 256) {
+        t.sequence.append_char(c);
+      } else {
+        t.state = 0;
+      }
+      return AppResult.Ok;
+    }
+    if (t.utf_left > 0) {
+      if (c >= 128 and c <= 191) {
+        t.utf.append_char(c);
+        t.code = t.code * 64 + (c & 63);
+        t.utf_left = t.utf_left - 1;
+        if (t.utf_left == 0) {
+          if (t.code >= 160 and t.code <= 0x10ffff and compute_utf8_len(t.code) == t.utf.length() and (t.code < 0xd800 or t.code > 0xdfff)) {
+            try terminal_put(alloc, t, t.utf, t.code);
+          }
+        }
+        return AppResult.Ok;
+      }
+      t.utf_left = 0;
+    }
+    if (c == 27) {
+      t.state = 1;
+    } else if (c == 13) {
+      t.col = 0;
+      t.pending_wrap = false;
+    } else if (c == 10 or c == 11 or c == 12) {
+      try terminal_newline(alloc, t);
+    } else if (c == 8) {
+      t.col = terminal_clamp(t.col - 1, 0, t.cols - 1);
+      t.pending_wrap = false;
+    } else if (c == 9) {
+      t.col = terminal_clamp((t.col / 8 + 1) * 8, 0, t.cols - 1);
+    } else if (c >= 32 and c < 127) {
+      var s = String(alloc, "");
+      s.append_char(c);
+      try terminal_put(alloc, t, s, c);
+    } else if (c >= 194 and c <= 244) {
+      t.utf = String(alloc, "");
+      t.utf.append_char(c);
+      if (c < 224) {
+        t.utf_left = 1;
+        t.code = c & 31;
+      } else if (c < 240) {
+        t.utf_left = 2;
+        t.code = c & 15;
+      } else {
+        t.utf_left = 3;
+        t.code = c & 7;
+      }
+    }
+    return AppResult.Ok;
+  }
+
+  /** Resize both screens, retaining the overlapping cells. */
+  public function terminal_resize(alloc: ref HeapAllocator, t: ref TerminalScreen, rows: i64, cols: i64) AppResult<void> {
+    var cells = Vec<TerminalCell>(alloc, rows * cols);
+    var primary = Vec<TerminalCell>(alloc, rows * cols);
+    for (var r: i64 = 0; r < rows; r = r + 1) {
+      for (var c: i64 = 0; c < cols; c = c + 1) {
+        if (r < t.rows and c < t.cols) {
+          var copy = (try t.cells.get(r * t.cols + c)).copy(alloc);
+          if (c == cols - 1 and copy.width == 2) {
+            copy = TerminalCell(alloc, -1, -1, 0);
+          }
+          cells.push(copy);
+        } else {
+          cells.push(TerminalCell(alloc, -1, -1, 0));
+        }
+        if (t.alternate) {
+          if (r < t.rows and c < t.cols) {
+            primary.push((try t.primary.get(r * t.cols + c)).copy(alloc));
+          } else {
+            primary.push(TerminalCell(alloc, -1, -1, 0));
+          }
+        }
+      }
+    }
+    t.cells = cells;
+    t.primary = primary;
+    t.rows = rows;
+    t.cols = cols;
+    t.row = terminal_clamp(t.row, 0, rows - 1);
+    t.col = terminal_clamp(t.col, 0, cols - 1);
+    t.primary_row = terminal_clamp(t.primary_row, 0, rows - 1);
+    t.primary_col = terminal_clamp(t.primary_col, 0, cols - 1);
+    t.saved_row = terminal_clamp(t.saved_row, 0, rows - 1);
+    t.saved_col = terminal_clamp(t.saved_col, 0, cols - 1);
+    t.top = 0;
+    t.bottom = rows - 1;
+    t.pending_wrap = false;
+    return AppResult.Ok;
+  }
+}

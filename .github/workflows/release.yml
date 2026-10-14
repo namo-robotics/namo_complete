@@ -23,7 +23,7 @@ jobs:
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ca-certificates curl git file bash zsh python3 util-linux build-essential
+            ca-certificates curl git file bash zsh python3 util-linux build-essential vim-tiny less procps
 
       - uses: actions/checkout@v4
         with:
@@ -49,6 +49,7 @@ jobs:
           file bin/namo_complete | grep -Eq 'static-pie linked|statically linked'
           ./test.sh
           ./test-zsh.sh
+          bash ./test-workspace.sh
           NAME=$(NAMO_BUILT_WITH="$(cat /tmp/sun-version.txt)" ./packaging/package.sh "${{ steps.version.outputs.value }}")
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
 
@@ -58,7 +59,7 @@ jobs:
           TMP=$(mktemp -d)
           tar -C "$TMP" -xzf "dist/$NAME.tar.gz"
           sh "$TMP/$NAME/install.sh" --prefix "$TMP/prefix" --no-rc
-          env -u ANTHROPIC_API_KEY NAMO_LINE=gi NAMO_CWD="$PWD" "$TMP/prefix/bin/namo_complete" </dev/null
+          "$TMP/prefix/bin/namo_complete" --version
 
       - uses: actions/upload-artifact@v4
         with:
@@ -105,6 +106,7 @@ jobs:
           if otool -L bin/namo_complete | grep -Eq 'lib(ssl|crypto)'; then exit 1; fi
           bash ./test.sh
           ./test-zsh.sh
+          bash ./test-workspace.sh
           NAME=$(NAMO_BUILT_WITH="$(cat /tmp/sun-version.txt)" bash ./packaging/package.sh "${{ steps.version.outputs.value }}")
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
 
@@ -114,7 +116,7 @@ jobs:
           TMP=$(mktemp -d)
           tar -C "$TMP" -xzf "dist/$NAME.tar.gz"
           zsh "$TMP/$NAME/install.sh" --prefix "$TMP/prefix" --no-rc
-          env -u ANTHROPIC_API_KEY NAMO_LINE=gi NAMO_CWD="$PWD" "$TMP/prefix/bin/namo_complete" </dev/null
+          "$TMP/prefix/bin/namo_complete" --version
 
       - uses: actions/upload-artifact@v4
         with:
