@@ -9,8 +9,6 @@
 	"initializeCommand": "mkdir -p \"${localEnv:HOME}${localEnv:USERPROFILE}/.codex\"",
 	"remoteUser": "ubuntu",
 	"updateRemoteUserUID": true,
-	"workspaceFolder": "/workspace",
-	"workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
 	"mounts": [
 		"source=${localEnv:HOME}${localEnv:USERPROFILE}/.ssh,target=/home/ubuntu/.ssh,type=bind,readonly",
 		"source=sun-ccache,target=/home/ubuntu/.cache/ccache,type=volume",

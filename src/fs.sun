@@ -14,23 +14,25 @@
 // in every function that opens one of its files (and `path` does here), while
 // the rest of the program borrows it const.
 
+/** Provide file and descriptor helpers with graceful failure handling. */
 public module namo {
   using std;
   using std.io;
 
   public var MODE_0700: i32 = 448;
 
-  // Create a directory, tolerating "already exists".
+  /** Create a directory, tolerating "already exists". */
   public function ensure_dir(alloc: ref HeapAllocator, path: ref String) void {
-    try {
-      make_dir(path, MODE_0700);
-    } catch (e: const ref IError) {
-      // Already there, or the parent is missing; the caller finds out when
-      // the write fails.
-    }
+    match make_dir(path, MODE_0700) {
+      (e: const ref IError) => {
+        // Already there, or the parent is missing; the caller finds out when
+        // the write fails.
+      },
+      _ => {}
+    };
   }
 
-  // mkdir -p: create every component of an absolute path.
+  /** mkdir -p: create every component of an absolute path. */
   public function ensure_dir_p(alloc: ref HeapAllocator, path: const ref String) void {
     var acc = String(alloc, "");
     for (var i: i64 = 0; i < path.length(); i = i + 1) {
@@ -45,34 +47,56 @@ public module namo {
     }
   }
 
-  // Remove a file while tolerating an already-missing path.
+  /** Remove a file while tolerating an already-missing path. */
   public function remove_path(alloc: ref HeapAllocator, path: ref String) void {
-    try {
-      remove_file(path);
-    } catch (e: const ref IError) {
-      // Not there is the state we wanted anyway.
-    }
+    match remove_file(path) {
+      (e: const ref IError) => {
+        // Not there is the state we wanted anyway.
+      },
+      _ => {}
+    };
   }
 
-  // Drain a descriptor to end-of-file. Used for stdin, which arrives as fd 0
-  // and is not ours to close -- File.close() leaves fd 0 alone.
+  /** Drain a descriptor to end-of-file. Used for stdin, which arrives as fd 0
+   * and is not ours to close -- File.close() leaves fd 0 alone. */
   public function read_fd(alloc: ref HeapAllocator, fd: i32) String {
     var f = File();
     f.adopt(fd);
     var out = String(alloc, "");
-    try {
-      out = f.read_all(alloc);
-    } catch (e: const ref IError) {
-      out = String(alloc, "");
-    }
+    match f.read_all(alloc) {
+      SystemResult.Ok(value) => {
+        out = value;
+      },
+      (e: const ref IError) => {
+        out = String(alloc, "");
+      }
+    };
     return out;
   }
 
-  // Close a descriptor we hold nothing else for. The daemon needs this for
-  // the inherited descriptors it drops on startup.
+  /** Close a descriptor we hold nothing else for. The daemon needs this for
+   * the inherited descriptors it drops on startup. */
   public function close_fd(fd: i32) void {
     var f = File();
     f.adopt(fd);
     f.close();
+  }
+
+  /** Read bounded bytes, distinguishing a temporarily empty descriptor from closure. */
+  function read_available(file: ref File, buffer: ref ContiguousBuffer<u8>) i64 {
+    var bytes = MutableByteSlice(buffer);
+    return match file.read(bytes) {
+      ReadResult.Data(count) => count,
+      ReadResult.WouldBlock => -2,
+      _ => -1
+    };
+  }
+
+  /** Make an inherited descriptor nonblocking, including the shell's shared copy. */
+  public function platform_nonblocking(fd: i32) bool {
+    return match std.set_fd_nonblocking(fd, true) {
+      SystemResult.Ok => true,
+      (e: const ref IError) => false
+    };
   }
 }

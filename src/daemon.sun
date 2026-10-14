@@ -17,6 +17,7 @@
 // FIFO reports end-of-input, which is what happens when the shell holding the
 // write end goes away.
 
+/** Serve interactive hints and synchronous completion requests. */
 public module namo {
   using std;
   using std.io;
@@ -58,7 +59,7 @@ public module namo {
   // Nothing the shell had open is of any use to us; see daemon_run.
   var MAX_INHERITED_FD: i32 = 256;
 
-  // Holds the long-lived state used by the interactive hint daemon.
+  /** Holds the long-lived state used by the interactive hint daemon. */
   public class Daemon {
     // The terminal we draw the hint row on, and the pipe the shell types
     // into. Both are owned here: closing them is what ends the daemon.
@@ -119,20 +120,20 @@ public module namo {
   // Hint table
   // ------------------------------------------------------------------------
 
-  function table_find(st: const ref Daemon, line: const ref String) i64 throws IError {
+  function table_find(st: const ref Daemon, line: const ref String) AppResult<i64> {
     for (var i: i64 = 0; i < st.keys.size(); i = i + 1) {
-      if (st.keys.get(i).equals(line)) {
-        return i;
+      if ((try st.keys.get(i)).equals(line)) {
+        return AppResult.Ok(i);
       }
     }
-    return -1;
+    return AppResult.Ok(-1);
   }
 
-  function table_put(alloc: ref HeapAllocator, st: ref Daemon, line: const ref String, hint: const ref String) void throws IError {
-    var at = table_find(st, line);
+  function table_put(alloc: ref HeapAllocator, st: ref Daemon, line: const ref String, hint: const ref String) AppResult<void> {
+    var at = (try table_find(st, line));
     if (at >= 0) {
-      st.vals.set(at, hint.clone(alloc));
-      return;
+      try st.vals.set(at, hint.clone(alloc));
+      return AppResult.Ok;
     }
     if (st.keys.size() >= TABLE_MAX) {
       st.keys.clear();
@@ -140,6 +141,8 @@ public module namo {
     }
     st.keys.push(line.clone(alloc));
     st.vals.push(hint.clone(alloc));
+
+    return AppResult.Ok;
   }
 
   // ------------------------------------------------------------------------
@@ -186,11 +189,11 @@ public module namo {
 
   // Decide what the row should show for `line` and put it there. Reads only
   // the in-memory table, so this is safe to run on every single keystroke.
-  function render(alloc: ref HeapAllocator, cfg: const ref Config, st: ref Daemon, line: const ref String) void throws IError {
+  function render(alloc: ref HeapAllocator, cfg: const ref Config, st: ref Daemon, line: const ref String) AppResult<void> {
     if (line.length() < cfg.hint_min) {
       st.last = String(alloc, "");
       clear_row(alloc, st);
-      return;
+      return AppResult.Ok;
     }
 
     // A failure outranks the hint table. Whatever is cached there was true
@@ -206,13 +209,13 @@ public module namo {
         erow.append("...");
       }
       paint(alloc, st, erow);
-      return;
+      return AppResult.Ok;
     }
 
     var hint = String(alloc, "");
-    var at = table_find(st, line);
+    var at = (try table_find(st, line));
     if (at >= 0) {
-      hint = st.vals.get(at).clone(alloc);
+      hint = (try clone_item(alloc, st.vals, at));
     } else {
       // A hint the user is typing straight into stays up instead of blinking
       // off and back on with every character that confirms it.
@@ -230,23 +233,28 @@ public module namo {
     } else {
       clear_row(alloc, st);
     }
+
+    return AppResult.Ok;
   }
 
   // ------------------------------------------------------------------------
   // Directory listing
   // ------------------------------------------------------------------------
 
-  // `ls -1A | head` without the fork, over the directory the line was typed in
-  // rather than the one this process happens to be sitting in. Sorted, so the
-  // context the model sees does not depend on directory order.
-  public function list_dir(alloc: ref HeapAllocator, path: ref String, limit: i64) String throws IError {
+  /** `ls -1A | head` without the fork, over the directory the line was typed in
+   * rather than the one this process happens to be sitting in. Sorted, so the
+   * context the model sees does not depend on directory order. */
+  public function list_dir(alloc: ref HeapAllocator, path: ref String, limit: i64) AppResult<String> {
     var out = String(alloc, "");
     var names = Vec<DirEntry>(alloc, 8);
-    try {
-      names = read_dir(alloc, path);
-    } catch (e: const ref IError) {
-      return out;
-    }
+    match read_dir(alloc, path) {
+      SystemResult.Ok(value) => {
+        names = value;
+      },
+      (e: const ref IError) => {
+        return AppResult.Ok(out);
+      }
+    };
 
     var want: i64 = names.size();
     if (limit > 0 and want > limit) {
@@ -258,18 +266,18 @@ public module namo {
     // thousands of entries.
     var used = ContiguousBuffer<u8>(alloc, names.size() + 1);
     for (var u: i64 = 0; u < names.size(); u = u + 1) {
-      used.set(u, 0);
+      try used.set(u, 0);
     }
 
     for (var picked: i64 = 0; picked < want; picked = picked + 1) {
       var best: i64 = -1;
       for (var j: i64 = 0; j < names.size(); j = j + 1) {
-        if (used.get(j) == 0) {
+        if ((try used.get(j)) == 0) {
           if (best < 0) {
             best = j;
           } else {
-            var cand = names.get(j).name().clone(alloc);
-            var held = names.get(best).name();
+            var cand = (try clone_entry_name(alloc, names, j));
+            var held = (try names.get(best)).name();
             if (cand.compare(held) < 0) {
               best = j;
             }
@@ -279,18 +287,18 @@ public module namo {
       if (best < 0) {
         picked = want;
       } else {
-        used.set(best, 1);
+        try used.set(best, 1);
         // The listing rides inline in the prompt, so it is bounded by bytes
         // as well as by count.
         if (out.length() < 512) {
           if (out.length() > 0) {
             out.append(" ");
           }
-          out.append(names.get(best).name());
+          out.append((try names.get(best)).name());
         }
       }
     }
-    return out;
+    return AppResult.Ok(out);
   }
 
   // ------------------------------------------------------------------------
@@ -358,14 +366,17 @@ public module namo {
     st.poller.clear();
     st.poller.add_read(st.fifo.get_fd());
     var ready: i32 = 0;
-    try {
-      ready = st.poller.wait(timeout_ms);
-    } catch (e: const ref IError) {
-      // A signal cutting the wait short is not end-of-input; report it as a
-      // timeout and let the caller decide. A wait that keeps failing ends the
-      // daemon anyway, through the blocking call at the top of daemon_loop.
-      return 0;
-    }
+    match st.poller.wait(timeout_ms) {
+      SystemResult.Ok(value) => {
+        ready = value;
+      },
+      (e: const ref IError) => {
+        // A signal cutting the wait short is not end-of-input; report it as a
+        // timeout and let the caller decide. A wait that keeps failing ends the
+        // daemon anyway, through the blocking call at the top of daemon_loop.
+        return 0;
+      }
+    };
     if (ready <= 0) {
       return 0;
     }
@@ -414,29 +425,32 @@ public module namo {
 
   // One record, or REC_TIMEOUT after `timeout_ms` (negative blocks forever),
   // or REC_EOF once the shell that owns the write end is gone.
-  function next_record(alloc: ref HeapAllocator, st: ref Daemon, timeout_ms: i32, out: ref String) i32 throws IError {
+  function next_record(alloc: ref HeapAllocator, st: ref Daemon, timeout_ms: i32, out: ref String) AppResult<i32> {
     var tries: i64 = 0;
     while (tries < 64) {
       tries = tries + 1;
       if (take_record(alloc, st, out)) {
-        return REC_OK;
+        return AppResult.Ok(REC_OK);
       }
       var pr: i32 = fifo_ready(st, timeout_ms);
       if (pr == 0) {
-        return REC_TIMEOUT;
+        return AppResult.Ok(REC_TIMEOUT);
       }
       if (pr < 0) {
-        return REC_EOF;
+        return AppResult.Ok(REC_EOF);
       }
-      var n: i64 = st.fifo.read_into(st.chunk.raw_data(), FIFO_BUF);
+      var n: i64 = read_available(st.fifo, st.chunk);
+      if (n == -2) {
+        continue;
+      }
       if (n <= 0) {
-        return REC_EOF;
+        return AppResult.Ok(REC_EOF);
       }
       for (var k: i64 = 0; k < n; k = k + 1) {
-        st.pending.append_char(st.chunk.get(k));
+        st.pending.append_char((try st.chunk.get(k)));
       }
     }
-    return REC_TIMEOUT;
+    return AppResult.Ok(REC_TIMEOUT);
   }
 
   function input_waiting(st: ref Daemon) bool {
@@ -452,49 +466,50 @@ public module namo {
 
   // The paid call. Everything it needs beyond the line itself comes from the
   // shell's history snapshot and from the directory the line was typed in.
-  function daemon_call(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, key: const ref String) Vec<String> throws IError {
+  function daemon_call(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, key: const ref String) AppResult<Vec<String>> {
     var out = Vec<String>(alloc, 4);
     if (cfg.api_key.length() == 0) {
       st.err = String(alloc, "ANTHROPIC_API_KEY is not set");
-      return out;
+      return AppResult.Ok(out);
     }
     if (cfg.min_gap > 0 and rate_limit_ok(alloc, cfg, cfg.min_gap) == false) {
-      return out;
+      return AppResult.Ok(out);
     }
 
     // `fc` is a shell builtin, so the shell is the only thing that can read
     // its own history; it drops a snapshot at every prompt for us to pick up.
     var history = Vec<String>(alloc, 8);
     if (cfg.history_lines > 0 and cfg.histfile.length() > 0) {
-      try {
-        var raw = read_to_string(alloc, cfg.histfile);
-        history = parse_history(alloc, raw, cfg.history_lines);
-      } catch (e: const ref IError) {
-        history = Vec<String>(alloc, 8);
-      }
+      match load_history(alloc, cfg, history) {
+        AppResult.Ok => {},
+        (e: const ref IError) => {
+          history = Vec<String>(alloc, 8);
+        }
+      };
     }
 
     var listing = String(alloc, "");
     if (cfg.send_ls) {
-      listing = list_dir(alloc, cfg.cwd, cfg.ls_limit);
+      listing = (try list_dir(alloc, cfg.cwd, cfg.ls_limit));
     }
 
-    var context = build_context(alloc, cfg, history, listing);
+    var context = (try build_context(alloc, cfg, history, listing));
 
     var reply = Reply(alloc);
-    try {
-      var body = build_body(alloc, cfg, context);
-      reply = call_api(alloc, cfg, body);
-    } catch (e: const ref IError) {
-      st.err = String(alloc, "the request could not be sent");
-      return out;
-    }
+
+    match request_reply(alloc, cfg, context, reply) {
+      AppResult.Ok => {},
+      (e: const ref IError) => {
+        st.err = String(alloc, "the request could not be sent");
+        return AppResult.Ok(out);
+      }
+    };
     if (reply.failed) {
       st.err = reply.error.clone(alloc);
       if (st.err.length() == 0) {
         st.err = String(alloc, "the request failed");
       }
-      return out;
+      return AppResult.Ok(out);
     }
 
     // The call worked. An answer with nothing usable in it is not a failure --
@@ -502,42 +517,42 @@ public module namo {
     // rather than showing an error.
     st.err = String(alloc, "");
     if (reply.suggestions.size() == 0) {
-      return out;
+      return AppResult.Ok(out);
     }
 
-    cache_store(alloc, cfg, key, reply.suggestions);
+    try cache_store(alloc, cfg, key, reply.suggestions);
     for (var i: i64 = 0; i < reply.suggestions.size(); i = i + 1) {
-      out.push(reply.suggestions.get(i).clone(alloc));
+      out.push((try clone_item(alloc, reply.suggestions, i)));
     }
-    return out;
+    return AppResult.Ok(out);
   }
 
   // network=false stays local (a cache read, ~2ms); network=true may pay for
   // an API call. Either way the answer lands in the table and the row is
   // repainted from it.
-  function serve(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, rec: const ref String, network: bool) void throws IError {
+  function serve(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, rec: const ref String, network: bool) AppResult<void> {
     var line = rec_line(alloc, rec);
     if (line.length() < cfg.hint_min) {
-      return;
+      return AppResult.Ok;
     }
-    if (network == false and table_find(st, line) >= 0) {
-      render(alloc, cfg, st, line);
-      return;
+    if (network == false and (try table_find(st, line)) >= 0) {
+      try render(alloc, cfg, st, line);
+      return AppResult.Ok;
     }
 
     var cwd = rec_cwd(alloc, rec);
     cfg.set_target(alloc, line, cwd);
 
     var key = cache_key(alloc, cfg);
-    var hit = cache_lookup(alloc, cfg, key);
+    var hit = (try cache_lookup(alloc, cfg, key));
     if (hit.size() == 0 and network) {
-      hit = daemon_call(alloc, cfg, st, key);
+      hit = (try daemon_call(alloc, cfg, st, key));
     }
 
     if (hit.size() > 0) {
-      var top = hit.get(0).clone(alloc);
+      var top = (try clone_item(alloc, hit, 0));
       if (top.equals(line) == false) {
-        table_put(alloc, st, line, top);
+        try table_put(alloc, st, line, top);
         st.last = top.clone(alloc);
       }
     }
@@ -545,51 +560,56 @@ public module namo {
     // Newer keystrokes are already queued: this answer is for a line the user
     // has moved past, and painting it would fight the round about to run.
     if (network and input_waiting(st)) {
-      return;
+      return AppResult.Ok;
     }
-    render(alloc, cfg, st, line);
+    try render(alloc, cfg, st, line);
+
+    return AppResult.Ok;
   }
 
   // The shell could not find the command, and the shell has already printed its
   // own message and handed the prompt back -- the whole point of doing this
   // here is that nobody is waiting for it. Paid immediately rather than
   // debounced: the line is finished, there is no next keystroke to wait for.
-  function serve_dym(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, rec: const ref String) void throws IError {
+  function serve_dym(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, rec: const ref String) AppResult<void> {
     // The record is a knock on the door; the line itself is in the file the
     // handler wrote, as "<word> TAB <fallback> TAB <what `history 1` printed>".
     // Reading it here rather than in the shell keeps the picking-apart -- the
     // history number, the first-word check -- in one place with a test.
     if (cfg.dymfile.length() == 0) {
-      return;
+      return AppResult.Ok;
     }
     var content = String(alloc, "");
-    try {
-      content = read_to_string(alloc, cfg.dymfile);
-    } catch (e: const ref IError) {
-      return;
-    }
+    match read_to_string(alloc, cfg.dymfile) {
+      SystemResult.Ok(value) => {
+        content = value;
+      },
+      (e: const ref IError) => {
+        return AppResult.Ok;
+      }
+    };
     remove_path(alloc, cfg.dymfile);
 
     var fields = content.split(alloc, CH_TAB);
     if (fields.size() < 3) {
-      return;
+      return AppResult.Ok;
     }
-    var word = fields.get(0).clone(alloc);
-    var fallback = fields.get(1).clone(alloc);
+    var word = (try clone_item(alloc, fields, 0));
+    var fallback = (try clone_item(alloc, fields, 1));
     var raw = String(alloc, "");
     for (var f: i64 = 2; f < fields.size(); f = f + 1) {
       if (f > 2) {
         raw.append_char(CH_TAB);
       }
-      raw.append(fields.get(f));
+      raw.append((try fields.get(f)));
     }
     word.trim();
     fallback.trim();
 
-    var typed = history_line(alloc, raw, word, fallback);
+    var typed = (try history_line(alloc, raw, word, fallback));
     typed.trim();
     if (typed.length() == 0) {
-      return;
+      return AppResult.Ok;
     }
 
     var cwd = rec_cwd(alloc, rec);
@@ -601,16 +621,16 @@ public module namo {
     cfg.min_gap = 0;
 
     var key = cache_key(alloc, cfg);
-    var hit = cache_lookup(alloc, cfg, key);
+    var hit = (try cache_lookup(alloc, cfg, key));
     if (hit.size() == 0) {
-      hit = daemon_call(alloc, cfg, st, key);
+      hit = (try daemon_call(alloc, cfg, st, key));
     }
 
     cfg.min_gap = saved_gap;
     cfg.clear_query_target(alloc);
 
     if (hit.size() == 0) {
-      return;
+      return AppResult.Ok;
     }
     // Two rules, both the same rule: this row belongs to the command that
     // failed, and to nothing else. Keystrokes queued while the answer was in
@@ -619,53 +639,57 @@ public module namo {
     // stale before it is drawn -- it stays in the cache, where the same typo
     // will find it, and the row is left alone.
     if (input_waiting(st)) {
-      return;
+      return AppResult.Ok;
     }
     if (st.screen.length() > 0) {
-      return;
+      return AppResult.Ok;
     }
 
     var row = String(alloc, "");
     row.append(cfg.dym_prefix);
-    row.append(hit.get(0));
+    row.append((try hit.get(0)));
     paint(alloc, st, row);
+
+    return AppResult.Ok;
   }
 
   // Every wait below can be the one a correction or a key press lands in --
   // both are posted while the daemon is anywhere in its cycle -- and neither
   // is a line being typed. So they are served here, and the caller only ever
   // sees records that are.
-  function next_line_record(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, timeout_ms: i32, out: ref String) i32 throws IError {
-    var r: i32 = next_record(alloc, st, timeout_ms, out);
+  function next_line_record(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, timeout_ms: i32, out: ref String) AppResult<i32> {
+    var r: i32 = (try next_record(alloc, st, timeout_ms, out));
     var more: bool = true;
     while (r == REC_OK and more) {
       if (rec_is_stop(alloc, out)) {
-        return REC_EOF;
+        return AppResult.Ok(REC_EOF);
       } else if (rec_is_dym(alloc, out)) {
-        serve_dym(alloc, cfg, st, out);
-        r = next_record(alloc, st, timeout_ms, out);
+        try serve_dym(alloc, cfg, st, out);
+        r = (try next_record(alloc, st, timeout_ms, out));
       } else if (rec_is_sync(alloc, out)) {
-        serve_sync(alloc, cfg, st, out);
-        r = next_record(alloc, st, timeout_ms, out);
+        try serve_sync(alloc, cfg, st, out);
+        r = (try next_record(alloc, st, timeout_ms, out));
       } else {
         more = false;
       }
     }
-    return r;
+    return AppResult.Ok(r);
   }
 
   // The shell is inside `read -t`, so an answer always goes back -- even an
   // empty one. A request that got no reply at all would leave it there until
   // the timeout, for nothing.
-  function reply_send(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, id: const ref String, items: const ref Vec<String>, error: const ref String) void throws IError {
+  function reply_send(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, id: const ref String, items: const ref Vec<String>, error: const ref String) AppResult<void> {
     if (cfg.reply.length() == 0) {
-      return;
+      return AppResult.Ok;
     }
     if (st.reply_open == false) {
       // A timed-out shell may no longer drain replies. Never let that stall
       // the daemon and fill the request pipe behind it.
       var fd: i32 = platform_fifo_open(cfg.reply);
-      if (fd < 0) { return; }
+      if (fd < 0) {
+        return AppResult.Ok;
+      }
       st.reply.adopt(fd);
       st.reply_open = true;
     }
@@ -686,7 +710,7 @@ public module namo {
       }
       msg.append_char(CH_NL);
       var error_written: i64 = st.reply.write(msg);
-      return;
+      return AppResult.Ok;
     }
     msg.append(items.size());
     msg.append_char(CH_NL);
@@ -697,14 +721,14 @@ public module namo {
     // to parse. The flag is "!" for a command worth stopping on before it
     // goes anywhere near a prompt -- that judgement is ours too.
     for (var i: i64 = 0; i < items.size(); i = i + 1) {
-      var parts = items.get(i).split(alloc, CH_TAB);
+      var parts = (try items.get(i)).split(alloc, CH_TAB);
       var cmd = String(alloc, "");
       var desc = String(alloc, "");
       if (parts.size() > 0) {
-        cmd = parts.get(0).clone(alloc);
+        cmd = (try clone_item(alloc, parts, 0));
       }
       if (parts.size() > 1) {
-        desc = parts.get(1).clone(alloc);
+        desc = (try clone_item(alloc, parts, 1));
       }
       cmd.trim();
       desc.trim();
@@ -723,13 +747,15 @@ public module namo {
       msg.append_char(CH_NL);
     }
     var written: i64 = st.reply.write(msg);
+
+    return AppResult.Ok;
   }
 
   // A request the shell is blocked on: Alt-O, Alt-A or Alt-G. The shell has
   // nothing to do but wait, so this is paid immediately and never debounced,
   // and the answer goes straight back down the reply FIFO. The hint row is
   // not touched: the shell owns what happens to the line it asked about.
-  function serve_sync(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, rec: const ref String) void throws IError {
+  function serve_sync(alloc: ref HeapAllocator, cfg: ref Config, st: ref Daemon, rec: const ref String) AppResult<void> {
     var marked = rec_line(alloc, rec);
     var body = String(alloc, "");
     for (var i: i64 = 1; i < marked.length(); i = i + 1) {
@@ -739,16 +765,16 @@ public module namo {
     // <id> TAB <mode> TAB <line>. The line is whatever is left, tabs and all.
     var fields = body.split(alloc, CH_TAB);
     if (fields.size() < 3) {
-      return;
+      return AppResult.Ok;
     }
-    var id = fields.get(0).clone(alloc);
-    var mode = fields.get(1).clone(alloc);
+    var id = (try clone_item(alloc, fields, 0));
+    var mode = (try clone_item(alloc, fields, 1));
     var subject = String(alloc, "");
     for (var f: i64 = 2; f < fields.size(); f = f + 1) {
       if (f > 2) {
         subject.append_char(CH_TAB);
       }
-      subject.append(fields.get(f));
+      subject.append((try fields.get(f)));
     }
 
     var out = Vec<String>(alloc, 4);
@@ -772,9 +798,9 @@ public module namo {
       cfg.min_gap = 0;
 
       var key = cache_key(alloc, cfg);
-      out = cache_lookup(alloc, cfg, key);
+      out = (try cache_lookup(alloc, cfg, key));
       if (out.size() == 0) {
-        out = daemon_call(alloc, cfg, st, key);
+        out = (try daemon_call(alloc, cfg, st, key));
         if (out.size() == 0 and st.err.length() > 0) {
           error = st.err.clone(alloc);
         }
@@ -785,7 +811,9 @@ public module namo {
       cfg.line = String(alloc, "");
     }
 
-    reply_send(alloc, cfg, st, id, out, error);
+    try reply_send(alloc, cfg, st, id, out, error);
+
+    return AppResult.Ok;
   }
 
   // ------------------------------------------------------------------------
@@ -803,76 +831,15 @@ public module namo {
 
     var running: bool = true;
     while (running) {
-      try {
-        if (next_line_record(alloc, cfg, st, -1, cur) != REC_OK) {
-          running = false;
-        } else {
-          render(alloc, cfg, st, rec_line(alloc, cur));
-
-          // Coalesce the burst: mid-word keystrokes are not worth a lookup each.
-          var settled: bool = false;
-          while (settled == false) {
-            var q: i32 = next_line_record(alloc, cfg, st, quiet_ms, msg);
-            if (q == REC_OK) {
-              cur.clear();
-              cur.append(msg);
-              render(alloc, cfg, st, rec_line(alloc, cur));
-            } else {
-              settled = true;
-              if (q == REC_EOF) {
-                running = false;
-              }
-            }
-          }
-
-          if (running) {
-            serve(alloc, cfg, st, cur, false);
-
-            var idle: bool = false;
-            while (idle == false and running) {
-              var d: i32 = next_line_record(alloc, cfg, st, debounce_ms, msg);
-              if (d == REC_TIMEOUT) {
-                idle = true;
-              } else {
-                if (d == REC_EOF) {
-                  running = false;
-                } else {
-                  cur.clear();
-                  cur.append(msg);
-                  render(alloc, cfg, st, rec_line(alloc, cur));
-
-                  var quiet2: bool = false;
-                  while (quiet2 == false) {
-                    var r: i32 = next_line_record(alloc, cfg, st, quiet_ms, msg);
-                    if (r == REC_OK) {
-                      cur.clear();
-                      cur.append(msg);
-                      render(alloc, cfg, st, rec_line(alloc, cur));
-                    } else {
-                      quiet2 = true;
-                      if (r == REC_EOF) {
-                        running = false;
-                      }
-                    }
-                  }
-                  if (running) {
-                    serve(alloc, cfg, st, cur, false);
-                  }
-                }
-              }
-            }
-
-            if (running and idle) {
-              serve(alloc, cfg, st, cur, true);
-            }
-          }
+      match daemon_step(alloc, cfg, cur, msg, st, running, quiet_ms, debounce_ms) {
+        AppResult.Ok => {},
+        (e: const ref IError) => {
+          // Discard a failed request and leave the input loop available.
+          clear_row(alloc, st);
+          st.keys.clear();
+          st.vals.clear();
         }
-      } catch (e: const ref IError) {
-        // Discard a failed request and leave the input loop available.
-        clear_row(alloc, st);
-        st.keys.clear();
-        st.vals.clear();
-      }
+      };
     }
     return 0;
   }
@@ -890,11 +857,12 @@ public module namo {
     var s = String(alloc, "");
     s.append(child);
     s.append("\n");
-    try {
-      write_string(cfg.pidfile, s);
-    } catch (e: const ref IError) {
-      // Without the pid file the shell simply never respawns us.
-    }
+    match write_string(cfg.pidfile, s) {
+      (e: const ref IError) => {
+        // Without the pid file the shell simply never respawns us.
+      },
+      _ => {}
+    };
   }
 
   // Point our own stdin, stdout and stderr at /dev/null. The inherited ones
@@ -902,31 +870,30 @@ public module namo {
   // the line being typed.
   function silence_std_streams() void {
     var sink = File();
-    try {
-      sink.open("/dev/null", FileMode.Read);
-      dup_fd(sink.get_fd(), 0);
-      sink.close();
-      sink.open("/dev/null", FileMode.Write);
-      dup_fd(sink.get_fd(), 1);
-      dup_fd(sink.get_fd(), 2);
-      sink.close();
-    } catch (e: const ref IError) {
-      // Nothing useful to say, and nowhere left to say it.
-    }
+
+    match redirect_std_streams(sink) {
+      AppResult.Ok => {},
+      (e: const ref IError) => {
+        // Nothing useful to say, and nowhere left to say it.
+      }
+    };
   }
 
-  // Start the detached process that serves interactive hint requests.
+  /** Start the detached process that serves interactive hint requests. */
   public function daemon_run(alloc: ref HeapAllocator, cfg: ref Config) i32 {
     if (cfg.fifo.length() == 0) {
       return 0;
     }
 
     var child: i32 = 0;
-    try {
-      child = fork();
-    } catch (e: const ref IError) {
-      return 1;
-    }
+    match fork() {
+      SystemResult.Ok(value) => {
+        child = value;
+      },
+      (e: const ref IError) => {
+        return 1;
+      }
+    };
     if (child > 0) {
       // The shell called us synchronously; hand it back its prompt at once.
       // The pid goes down here rather than in the child, so that it is already
@@ -941,11 +908,12 @@ public module namo {
     // group, and Ctrl-C must not take the hint row with it. new_session() would
     // do that too, but it also drops the controlling terminal -- and /dev/tty
     // is the one thing we cannot do without.
-    try {
-      set_pgid(0, 0);
-    } catch (e: const ref IError) {
-      // Already a group leader, or the shell moved us; neither is fatal.
-    }
+    match set_pgid(0, 0) {
+      (e: const ref IError) => {
+        // Already a group leader, or the shell moved us; neither is fatal.
+      },
+      _ => {}
+    };
 
     // Everything the shell had open came with us through fork+exec, and one of
     // those descriptors is the *write* end of our own FIFO: the shell opens it
@@ -959,19 +927,21 @@ public module namo {
     silence_std_streams();
 
     var st = Daemon(alloc);
-    try {
-      st.tty.open(cfg.tty_path, FileMode.Write);
-    } catch (e: const ref IError) {
-      return 0;
-    }
+    match st.tty.open(cfg.tty_path, FileMode.Write) {
+      (e: const ref IError) => {
+        return 0;
+      },
+      _ => {}
+    };
     // Read-only, so that when the shell closes its end we see end-of-file and
     // stop rather than outliving the shell we were drawing for.
-    try {
-      st.fifo.open(cfg.fifo, FileMode.Read);
-    } catch (e: const ref IError) {
-      st.tty.close();
-      return 0;
-    }
+    match st.fifo.open(cfg.fifo, FileMode.Read) {
+      (e: const ref IError) => {
+        st.tty.close();
+        return 0;
+      },
+      _ => {}
+    };
 
     var rc = daemon_loop(alloc, cfg, st);
     clear_row(alloc, st);
@@ -981,5 +951,101 @@ public module namo {
       remove_path(alloc, cfg.pidfile);
     }
     return rc;
+  }
+
+  /** Load and parse the shell history snapshot. */
+  function load_history(alloc: ref HeapAllocator, cfg: ref Config, history: ref Vec<String>) AppResult<void> {
+    var raw = (try read_to_string(alloc, cfg.histfile));
+    history = (try parse_history(alloc, raw, cfg.history_lines));
+
+    return AppResult.Ok;
+  }
+
+  /** Coalesce input and serve one settled request. */
+  function daemon_step(alloc: ref HeapAllocator, cfg: ref Config, cur: ref String, msg: ref String, st: ref Daemon, running: ref bool, quiet_ms: i32, debounce_ms: i32) AppResult<void> {
+    if ((try next_line_record(alloc, cfg, st, -1, cur)) != REC_OK) {
+      running = false;
+    } else {
+      try render(alloc, cfg, st, rec_line(alloc, cur));
+
+      // Coalesce the burst: mid-word keystrokes are not worth a lookup each.
+      var settled: bool = false;
+      while (settled == false) {
+        var q: i32 = (try next_line_record(alloc, cfg, st, quiet_ms, msg));
+        if (q == REC_OK) {
+          cur.clear();
+          cur.append(msg);
+          try render(alloc, cfg, st, rec_line(alloc, cur));
+        } else {
+          settled = true;
+          if (q == REC_EOF) {
+            running = false;
+          }
+        }
+      }
+
+      if (running) {
+        try serve(alloc, cfg, st, cur, false);
+
+        var idle: bool = false;
+        while (idle == false and running) {
+          var d: i32 = (try next_line_record(alloc, cfg, st, debounce_ms, msg));
+          if (d == REC_TIMEOUT) {
+            idle = true;
+          } else {
+            if (d == REC_EOF) {
+              running = false;
+            } else {
+              cur.clear();
+              cur.append(msg);
+              try render(alloc, cfg, st, rec_line(alloc, cur));
+
+              var quiet2: bool = false;
+              while (quiet2 == false) {
+                var r: i32 = (try next_line_record(alloc, cfg, st, quiet_ms, msg));
+                if (r == REC_OK) {
+                  cur.clear();
+                  cur.append(msg);
+                  try render(alloc, cfg, st, rec_line(alloc, cur));
+                } else {
+                  quiet2 = true;
+                  if (r == REC_EOF) {
+                    running = false;
+                  }
+                }
+              }
+              if (running) {
+                try serve(alloc, cfg, st, cur, false);
+              }
+            }
+          }
+        }
+
+        if (running and idle) {
+          try serve(alloc, cfg, st, cur, true);
+        }
+      }
+    }
+
+    return AppResult.Ok;
+  }
+
+  /** Redirect inherited standard descriptors to the null device. */
+  function redirect_std_streams(sink: ref File) AppResult<void> {
+    try sink.open("/dev/null", FileMode.Read);
+    try dup_fd(sink.get_fd(), 0);
+    sink.close();
+    try sink.open("/dev/null", FileMode.Write);
+    try dup_fd(sink.get_fd(), 1);
+    try dup_fd(sink.get_fd(), 2);
+    sink.close();
+
+    return AppResult.Ok;
+  }
+
+  /** Copy an entry name before comparing it with another borrowed entry. */
+  function clone_entry_name(alloc: const ref HeapAllocator, entries: ref Vec<DirEntry>, index: i64) AppResult<String> {
+    var entry = try entries.get(index);
+    return AppResult.Ok(entry.name().clone(alloc));
   }
 }

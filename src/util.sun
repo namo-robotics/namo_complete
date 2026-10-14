@@ -3,25 +3,33 @@
 // the model sent back. Everything else (trim, to_lower, contains, split,
 // split_whitespace, join, clone, append_hex) lives on std.String.
 
+/** Provide checked string helpers and command heuristics. */
 public module namo {
   using std;
 
+  /** Carries request, system, and checked-access failures to their handlers. */
+  public enum AppResult<T> {
+    Ok(T),
+    Error(Error),
+    OutOfBounds(IndexOutOfBoundsError),
+    Json(JsonError),
+    Tls(tls.TlsError)
+  }
+
   /** Read a byte, returning NUL when the position is outside the string. */
   public function string_byte(value: const ref String, index: i64) u8 {
-    try {
-      return value.at(index);
-    } catch (e: const ref IError) {
-      return 0;
-    }
+    return match value.at(index) {
+      AccessResult.Ok(value) => value,
+      (e: const ref IError) => 0
+    };
   }
 
   /** Copy a byte range, returning an empty string for an invalid range. */
   public function string_slice(alloc: const ref HeapAllocator, value: const ref String, start: i64, count: i64) String {
-    try {
-      return value.substr(alloc, start, count);
-    } catch (e: const ref IError) {
-      return String(alloc, "");
-    }
+    return match value.substr(alloc, start, count) {
+      AccessResult.Ok(value) => value,
+      (e: const ref IError) => String(alloc, "")
+    };
   }
 
   public var CH_NL: u8 = 10;
@@ -29,29 +37,29 @@ public module namo {
   public var CH_TAB: u8 = 9;
   public var CH_CR: u8 = 13;
 
-  // Split on '\n', dropping empty/whitespace-only lines. Trailing CR goes with
-  // the surrounding whitespace.
-  public function split_lines(alloc: ref HeapAllocator, s: const ref String) Vec<String> throws IError {
+  /** Split on '\n', dropping empty/whitespace-only lines. Trailing CR goes with
+   * the surrounding whitespace. */
+  public function split_lines(alloc: ref HeapAllocator, s: const ref String) AppResult<Vec<String>> {
     var out = Vec<String>(alloc, 8);
     var parts = s.split_nonempty(alloc, CH_NL);
     for (var i: i64 = 0; i < parts.size(); i = i + 1) {
-      var line = parts.get(i).clone(alloc);
+      var line = (try clone_item(alloc, parts, i));
       line.trim();
       if (line.length() > 0) {
         out.push(line);
       }
     }
-    return out;
+    return AppResult.Ok(out);
   }
 
-  // Collapse whitespace runs to a single space; used for cache-key stability.
+  /** Collapse whitespace runs to a single space; used for cache-key stability. */
   public function normalize_ws(alloc: ref HeapAllocator, s: const ref String) String {
     var words = s.split_whitespace(alloc);
     return join(alloc, words, " ");
   }
 
-  // Polynomial rolling hash, reduced each step so it cannot overflow i64.
-  // This is a cache key, not a security primitive.
+  /** Polynomial rolling hash, reduced each step so it cannot overflow i64.
+   * This is a cache key, not a security primitive. */
   public function hash_str(s: const ref String, seed: i64) i64 {
     var h: i64 = seed;
     for (var i: i64 = 0; i < s.length(); i = i + 1) {
@@ -132,33 +140,33 @@ public module namo {
     return false;
   }
 
-  // True when the line reads like something a shell could run. The model is told
-  // to stay silent when it has nothing useful, but it sometimes answers with a
-  // sentence instead ("I cannot produce a useful completion ..."). A sentence
-  // in the hint row is worse than an empty row, so it is dropped here -- once,
-  // before caching, so every caller sees the same filtered set.
-  public function looks_like_command(alloc: ref HeapAllocator, cmd: const ref String) bool throws IError {
+  /** True when the line reads like something a shell could run. The model is told
+   * to stay silent when it has nothing useful, but it sometimes answers with a
+   * sentence instead ("I cannot produce a useful completion ..."). A sentence
+   * in the hint row is worse than an empty row, so it is dropped here -- once,
+   * before caching, so every caller sees the same filtered set. */
+  public function looks_like_command(alloc: ref HeapAllocator, cmd: const ref String) AppResult<bool> {
     if (cmd.length() == 0) {
-      return false;
+      return AppResult.Ok(false);
     }
 
     // Markdown fences and bullets, comments, list markers, quoted prose: a
     // command line never starts this way.
     var first: u8 = string_byte(cmd, 0);
     if (first == 35 or first == 96 or first == 42 or first == 45) {
-      return false;
+      return AppResult.Ok(false);
     }
     if (first == 124 or first == 62 or first == 60 or first == 91) {
-      return false;
+      return AppResult.Ok(false);
     }
     if (first == 34 or first == 39 or first == 63 or first == 33) {
-      return false;
+      return AppResult.Ok(false);
     }
     // Numbered list: "1) ls -la", "2. cd src".
     if (first >= 48 and first <= 57 and cmd.length() > 1) {
       var second: u8 = string_byte(cmd, 1);
       if (second == 41 or second == 46) {
-        return false;
+        return AppResult.Ok(false);
       }
     }
 
@@ -166,18 +174,18 @@ public module namo {
     // hence the letter test rather than a bare '.'.
     var last: u8 = string_byte(cmd, cmd.length() - 1);
     if (last == 63 or last == 33 or last == 58) {
-      return false;
+      return AppResult.Ok(false);
     }
     if (last == 46 and cmd.length() > 1) {
       if (is_alpha(string_byte(cmd, cmd.length() - 2))) {
-        return false;
+        return AppResult.Ok(false);
       }
     }
 
     var low = cmd.clone(alloc);
     low.to_lower();
     if (sounds_like_refusal(low)) {
-      return false;
+      return AppResult.Ok(false);
     }
 
     // Anything else long and wordy: several English function words with none
@@ -186,21 +194,21 @@ public module namo {
       var words = low.split_whitespace(alloc);
       var stops: i64 = 0;
       for (var i: i64 = 0; i < words.size(); i = i + 1) {
-        var w = words.get(i);
+        var w = (try words.get(i));
         if (is_stopword(w)) {
           stops = stops + 1;
         }
       }
       if (words.size() >= 5 and stops >= 2) {
-        return false;
+        return AppResult.Ok(false);
       }
     }
-    return true;
+    return AppResult.Ok(true);
   }
 
-  // A command one keystroke from running, in someone else's prompt. The shell
-  // used to carry this list; it lives here so there is one copy of it, and so
-  // the tests can reach it.
+  /** A command one keystroke from running, in someone else's prompt. The shell
+   * used to carry this list; it lives here so there is one copy of it, and so
+   * the tests can reach it. */
   public function looks_destructive(alloc: ref HeapAllocator, cmd: const ref String) bool {
     var low = cmd.clone(alloc);
     low.to_lower();
@@ -232,16 +240,8 @@ public module namo {
     return false;
   }
 
-  // What `history 1` prints, turned back into the line the user typed:
-  //
-  //     "  512  grpe -r TODO *.md"  ->  "grpe -r TODO *.md"
-  //
-  // The shell hands over the whole line rather than picking it apart itself,
-  // along with the word the shell could not find and the words it would use if the
-  // line was never recorded at all -- HISTCONTROL=ignorespace, HISTIGNORE and
-  // `set +o history` all leave entry 1 belonging to some earlier command, and
-  // the first word is what gives that away.
-  public function history_line(alloc: ref HeapAllocator, raw: const ref String, word: const ref String, fallback: const ref String) String throws IError {
+  /** Recover the typed command from history, using the fallback when history omitted it. */
+  public function history_line(alloc: ref HeapAllocator, raw: const ref String, word: const ref String, fallback: const ref String) AppResult<String> {
     var line = raw.clone(alloc);
     line.trim();
 
@@ -253,15 +253,15 @@ public module namo {
     typed.trim();
 
     var words = typed.split_whitespace(alloc);
-    if (words.size() == 0 or words.get(0).equals(word) == false) {
-      return fallback.clone(alloc);
+    if (words.size() == 0 or (try words.get(0)).equals(word) == false) {
+      return AppResult.Ok(fallback.clone(alloc));
     }
-    return typed;
+    return AppResult.Ok(typed);
   }
 
-  // True when the line carries a known credential prefix. Only these are
-  // matched: keyword heuristics ("password", "token", `export `) dropped far
-  // too much ordinary history to be worth the recall.
+  /** True when the line carries a known credential prefix. Only these are
+   * matched: keyword heuristics ("password", "token", `export `) dropped far
+   * too much ordinary history to be worth the recall. */
   public function looks_secret(line: const ref String) bool {
     if (line.contains("sk-") or line.contains("ghp_")) {
       return true;
@@ -273,5 +273,11 @@ public module namo {
       return true;
     }
     return false;
+  }
+
+  /** Copy a checked string element without extending the container borrow. */
+  public function clone_item(alloc: const ref HeapAllocator, items: const ref Vec<String>, index: i64) AppResult<String> {
+    var item = try items.get(index);
+    return AppResult.Ok(item.clone(alloc));
   }
 }

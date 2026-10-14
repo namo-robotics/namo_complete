@@ -3,11 +3,12 @@
 // Production requests use Sun's TLS bundle. Plain HTTP remains supported for
 // NAMO_ENDPOINT so the test suite can run against a loopback mock server.
 
+/** Build HTTP requests and parse completion responses. */
 public module namo {
   using std;
   using tls;
 
-  // Holds parsed suggestions or a user-facing request failure.
+  /** Holds parsed suggestions or a user-facing request failure. */
   public class Reply {
     public var suggestions: Vec<String>;
     public var failed: bool;
@@ -56,7 +57,7 @@ public module namo {
     return (c >= b'a' and c <= b'z') or (c >= b'A' and c <= b'Z') or (c >= b'0' and c <= b'9') or c == b'.' or c == b'-';
   }
 
-  function parse_endpoint(alloc: ref HeapAllocator, raw: const ref String) Endpoint throws IError {
+  function parse_endpoint(alloc: ref HeapAllocator, raw: const ref String) AppResult<Endpoint> {
     var out = Endpoint(alloc);
     var start: i64 = 0;
     if (raw.starts_with("https://")) {
@@ -67,7 +68,7 @@ public module namo {
         out.port = 80;
         start = 7;
       } else {
-        throw Error(-1, "NAMO_ENDPOINT must start with http:// or https://");
+        return AppResult.Error(Error(-1, "NAMO_ENDPOINT must start with http:// or https://"));
       }
     }
 
@@ -90,39 +91,41 @@ public module namo {
       var port_text = string_slice(alloc, raw, colon + 1, slash - colon - 1);
       var parsed_port: i64 = match port_text.parse_i64() {
         Option.Some(value) => value,
-        Option.None => throw Error(-1, "NAMO_ENDPOINT has an invalid port")
+        Option.None => {
+          return AppResult.Error(Error(-1, "NAMO_ENDPOINT has an invalid port"));
+        }
       };
       if (parsed_port <= 0 or parsed_port > 65535) {
-        throw Error(-1, "NAMO_ENDPOINT has an invalid port");
+        return AppResult.Error(Error(-1, "NAMO_ENDPOINT has an invalid port"));
       }
       out.port = _convert<i32>(parsed_port);
     }
     if (host_end <= start) {
-      throw Error(-1, "NAMO_ENDPOINT has an invalid host");
+      return AppResult.Error(Error(-1, "NAMO_ENDPOINT has an invalid host"));
     }
     out.host = string_slice(alloc, raw, start, host_end - start);
     for (var i: i64 = 0; i < out.host.length(); i = i + 1) {
       var c: u8 = string_byte(out.host, i);
       if (usable_host_char(c) == false) {
-        throw Error(-1, "NAMO_ENDPOINT has an invalid host");
+        return AppResult.Error(Error(-1, "NAMO_ENDPOINT has an invalid host"));
       }
     }
     if (out.secure == false and out.host.equals_literal("127.0.0.1") == false and out.host.equals_literal("localhost") == false) {
-      throw Error(-1, "plaintext NAMO_ENDPOINT must use loopback");
+      return AppResult.Error(Error(-1, "plaintext NAMO_ENDPOINT must use loopback"));
     }
     if (slash < raw.length()) {
       out.path = string_slice(alloc, raw, slash, raw.length() - slash);
     }
     if (out.path.contains("#")) {
-      throw Error(-1, "NAMO_ENDPOINT must not contain a fragment");
+      return AppResult.Error(Error(-1, "NAMO_ENDPOINT must not contain a fragment"));
     }
     for (var i: i64 = 0; i < out.path.length(); i = i + 1) {
       var c: u8 = string_byte(out.path, i);
       if (c <= 32 or c == 127) {
-        throw Error(-1, "NAMO_ENDPOINT has an invalid path");
+        return AppResult.Error(Error(-1, "NAMO_ENDPOINT has an invalid path"));
       }
     }
-    return out;
+    return AppResult.Ok(out);
   }
 
   function build_request(alloc: ref HeapAllocator, cfg: const ref Config, endpoint: const ref Endpoint, body: const ref String) String {
@@ -154,64 +157,64 @@ public module namo {
     return req;
   }
 
-  function read_tls(alloc: ref HeapAllocator, endpoint: ref Endpoint, request: ref String) String throws IError {
+  function read_tls(alloc: ref HeapAllocator, endpoint: ref Endpoint, request: ref String) AppResult<String> {
     var stream = TlsStream();
-    stream.connect(endpoint.host, endpoint.port);
-    stream.send_string(request);
+    try stream.connect(endpoint.host, endpoint.port);
+    try stream.send_string(request);
     var raw = String(alloc, "");
     var chunk = ContiguousBuffer<u8>(alloc, 8192);
-    var n: i64 = stream.recv(chunk);
+    var n: i64 = (try stream.recv(chunk));
     while (n > 0) {
       for (var i: i64 = 0; i < n; i = i + 1) {
-        raw.append_char(chunk.get(i));
+        raw.append_char((try chunk.get(i)));
       }
-      n = stream.recv(chunk);
+      n = (try stream.recv(chunk));
     }
     stream.close();
-    return raw;
+    return AppResult.Ok(raw);
   }
 
-  function read_tcp(alloc: ref HeapAllocator, endpoint: ref Endpoint, request: const ref String) String throws IError {
+  function read_tcp(alloc: ref HeapAllocator, endpoint: ref Endpoint, request: const ref String) AppResult<String> {
     var stream = TcpStream();
     if (endpoint.host.equals_literal("127.0.0.1")) {
-      stream.connect_local(endpoint.port);
+      try stream.connect_local(endpoint.port);
     } else {
-      stream.connect_host(endpoint.host, endpoint.port);
+      try stream.connect_host(endpoint.host, endpoint.port);
     }
-    stream.send_string(request);
+    try stream.send_string(request);
     var raw = String(alloc, "");
     var chunk = ContiguousBuffer<u8>(alloc, 8192);
-    var n: i64 = stream.recv(chunk);
+    var n: i64 = (try stream.recv(chunk));
     while (n > 0) {
       for (var i: i64 = 0; i < n; i = i + 1) {
-        raw.append_char(chunk.get(i));
+        raw.append_char((try chunk.get(i)));
       }
-      n = stream.recv(chunk);
+      n = (try stream.recv(chunk));
     }
     stream.close();
-    return raw;
+    return AppResult.Ok(raw);
   }
 
-  // Send one request to the configured HTTP or HTTPS endpoint.
-  public function call_api(alloc: ref HeapAllocator, cfg: const ref Config, body: ref String) Reply throws IError {
+  /** Send one request to the configured HTTP or HTTPS endpoint. */
+  public function call_api(alloc: ref HeapAllocator, cfg: const ref Config, body: ref String) AppResult<Reply> {
     var reply = Reply(alloc);
 
     if (usable_key(cfg.api_key) == false) {
       eprint("[namo] ANTHROPIC_API_KEY is not a usable header value\n");
       reply.failed = true;
-      return reply;
+      return AppResult.Ok(reply);
     }
 
-    var endpoint = parse_endpoint(alloc, cfg.endpoint);
+    var endpoint = (try parse_endpoint(alloc, cfg.endpoint));
     var request = build_request(alloc, cfg, endpoint, body);
     var raw = String(alloc, "");
     if (endpoint.secure) {
-      raw = read_tls(alloc, endpoint, request);
+      raw = (try read_tls(alloc, endpoint, request));
     } else {
-      raw = read_tcp(alloc, endpoint, request);
+      raw = (try read_tcp(alloc, endpoint, request));
     }
     var response = HttpClientResponse(alloc);
-    parse_response(alloc, raw, response);
+    try parse_response(alloc, raw, response);
     parse_reply(alloc, cfg, response.body, reply);
     if ((response.status < 200 or response.status >= 300) and (reply.failed == false or reply.error.equals_literal("could not parse api response"))) {
       var message = String(alloc, "HTTP status ");
@@ -222,77 +225,94 @@ public module namo {
       reply.failed = true;
       reply.error = message;
     }
-    return reply;
+    return AppResult.Ok(reply);
   }
 
-  // Pull the completion lines out of a Messages API response.
+  /** Pull the completion lines out of a Messages API response. */
   public function parse_reply(alloc: ref HeapAllocator, cfg: const ref Config, raw: const ref String, reply: ref Reply) void {
-    try {
-      var doc = parse_json(alloc, raw);
-
-      if (doc.has("error")) {
-        var msg = doc.get("error").get("message").as_string();
-        var m = String(alloc, "[namo] api error: ");
-        m.append(msg);
-        m.append("\n");
-        eprint(m);
+    match parse_reply_checked(alloc, cfg, raw, reply) {
+      AppResult.Ok => {},
+      (e: const ref IError) => {
+        eprint("[namo] could not parse api response\n");
         reply.failed = true;
-        reply.error = msg.clone(alloc);
-        return;
+        reply.error = String(alloc, "could not parse api response");
       }
+    };
+  }
 
-      // Not content[0]: a model with thinking on -- which is the default from
-      // Claude Opus 5 on -- puts a `thinking` block first, and the block the
-      // completions are in is somewhere after it. Blocks with no "text"
-      // member are skipped rather than assumed away.
-      var ti: i64 = -1;
-      for (var i: i64 = 0; i < doc.get("content").len(); i = i + 1) {
-        if (doc.get("content").at(i).has("text")) {
-          ti = i;
-          break;
-        }
-      }
-      if (ti < 0) {
-        eprint("[namo] api response carried no text block\n");
-        reply.failed = true;
-        reply.error = String(alloc, "response had no text block");
-        return;
-      }
+  /** Parse a response and propagate malformed JSON or checked-access failures. */
+  function parse_reply_checked(alloc: ref HeapAllocator, cfg: const ref Config, raw: const ref String, reply: ref Reply) AppResult<void> {
+    var doc = (try parse_json(alloc, raw));
 
-      var text = doc.get("content").at(ti).get("text").as_string();
-      var lines = split_lines(alloc, text);
-
-      // A truncated response leaves a partial final line; drop it.
-      var usable: i64 = lines.size();
-      if (doc.has("stop_reason")) {
-        if (doc.get("stop_reason").as_string().equals_literal("max_tokens")) {
-          if (usable > 1) {
-            usable = usable - 1;
-          }
-        }
-      }
-
-      for (var i: i64 = 0; i < usable; i = i + 1) {
-        if (reply.suggestions.size() >= cfg.max_suggestions) {
-          return;
-        }
-        var cand = lines.get(i).clone(alloc);
-        if (cand.length() > 0) {
-          // Ask mode answers "COMMAND<TAB>DESCRIPTION", so only the command
-          // half is judged. A line that does not read like a command is
-          // dropped rather than shown; see looks_like_command.
-          var parts = cand.split(alloc, CH_TAB);
-          var head = parts.get(0).clone(alloc);
-          head.trim();
-          if (looks_like_command(alloc, head)) {
-            reply.suggestions.push(cand);
-          }
-        }
-      }
-    } catch (e: const ref IError) {
-      eprint("[namo] could not parse api response\n");
+    if (doc.has("error")) {
+      var msg = (try (try (try doc.get("error")).get("message")).as_string());
+      var m = String(alloc, "[namo] api error: ");
+      m.append(msg);
+      m.append("\n");
+      eprint(m);
       reply.failed = true;
-      reply.error = String(alloc, "could not parse api response");
+      reply.error = msg.clone(alloc);
+      return AppResult.Ok;
     }
+
+    // Not content[0]: a model with thinking on -- which is the default from
+    // Claude Opus 5 on -- puts a `thinking` block first, and the block the
+    // completions are in is somewhere after it. Blocks with no "text"
+    // member are skipped rather than assumed away.
+    var truncated: bool = false;
+    if (doc.has("stop_reason")) {
+      truncated = (try (try doc.get("stop_reason")).as_string()).equals_literal("max_tokens");
+    }
+    var ti: i64 = -1;
+    var content = try doc.get("content");
+    for (var i: i64 = 0; i < content.len(); i = i + 1) {
+      if ((try content.at(i)).has("text")) {
+        ti = i;
+        break;
+      }
+    }
+    if (ti < 0) {
+      eprint("[namo] api response carried no text block\n");
+      reply.failed = true;
+      reply.error = String(alloc, "response had no text block");
+      return AppResult.Ok;
+    }
+
+    var text = (try (try (try content.at(ti)).get("text")).as_string());
+    var lines = (try split_lines(alloc, text));
+
+    // A truncated response leaves a partial final line; drop it.
+    var usable: i64 = lines.size();
+    if (truncated and usable > 1) {
+      usable = usable - 1;
+    }
+
+    for (var i: i64 = 0; i < usable; i = i + 1) {
+      if (reply.suggestions.size() >= cfg.max_suggestions) {
+        return AppResult.Ok;
+      }
+      var cand = (try clone_item(alloc, lines, i));
+      if (cand.length() > 0) {
+        // Ask mode answers "COMMAND<TAB>DESCRIPTION", so only the command
+        // half is judged. A line that does not read like a command is
+        // dropped rather than shown; see looks_like_command.
+        var parts = cand.split(alloc, CH_TAB);
+        var head = (try clone_item(alloc, parts, 0));
+        head.trim();
+        if ((try looks_like_command(alloc, head))) {
+          reply.suggestions.push(cand);
+        }
+      }
+    }
+
+    return AppResult.Ok;
+  }
+
+  /** Build and send a completion request. */
+  public function request_reply(alloc: ref HeapAllocator, cfg: const ref Config, context: const ref String, reply: ref Reply) AppResult<void> {
+    var body = (try build_body(alloc, cfg, context));
+    reply = (try call_api(alloc, cfg, body));
+
+    return AppResult.Ok;
   }
 }

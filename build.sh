@@ -47,6 +47,8 @@ case "$(uname -s):$(uname -m)" in
 esac
 
 BUILT_WITH=${NAMO_BUILT_WITH:-$(sun --version 2>/dev/null | head -1)}
+# Keep the version stamp independent of the compiler logger prefix.
+BUILT_WITH=$(printf '%s\n' "$BUILT_WITH" | sed 's/^\[sun\]\[info\]: //')
 case "$BUILT_WITH" in
   "sun 0.dev ("*|"sun dev ("*|*dirty*) ;;
   *) echo "warning: expected a Sun dev release; building with: $BUILT_WITH" >&2 ;;

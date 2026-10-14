@@ -4,13 +4,14 @@
 // and every miss is a paid round trip. The cache is keyed on the normalized
 // prefix plus cwd plus shell plus model, so a different directory gets different answers.
 
+/** Cache suggestions and limit request frequency. */
 public module namo {
   using std;
   using std.io;
   using std.time;
 
-  // Two independent rolling hashes, concatenated -- ~60 bits of key. This is
-  // a cache key, not a security primitive.
+  /** Two independent rolling hashes, concatenated -- ~60 bits of key. This is
+   * a cache key, not a security primitive. */
   public function cache_key(alloc: ref HeapAllocator, cfg: const ref Config) String {
     var subject = String(alloc, "");
     if (cfg.is_dym()) {
@@ -46,51 +47,54 @@ public module namo {
     return p;
   }
 
-  // Cache format: first line is the unix timestamp, remaining lines are the
-  // suggestions. Returns an empty Vec on miss or expiry.
-  public function cache_lookup(alloc: ref HeapAllocator, cfg: const ref Config, key: const ref String) Vec<String> throws IError {
+  /** Cache format: first line is the unix timestamp, remaining lines are the
+   * suggestions. Returns an empty Vec on miss or expiry. */
+  public function cache_lookup(alloc: ref HeapAllocator, cfg: const ref Config, key: const ref String) AppResult<Vec<String>> {
     var out = Vec<String>(alloc, 4);
     // NAMO_CACHE=0 means neither read nor written -- checked here rather than
     // at every call site, because the daemon's sites forgot to.
     if (cfg.use_cache == false) {
-      return out;
+      return AppResult.Ok(out);
     }
     var path = cache_file(alloc, cfg, key);
 
     var raw = String(alloc, "");
-    try {
-      raw = read_to_string(alloc, path);
-    } catch (e: const ref IError) {
-      return out;
-    }
+    match read_to_string(alloc, path) {
+      SystemResult.Ok(value) => {
+        raw = value;
+      },
+      (e: const ref IError) => {
+        return AppResult.Ok(out);
+      }
+    };
 
-    var lines = split_lines(alloc, raw);
+    var lines = (try split_lines(alloc, raw));
     if (lines.size() < 2) {
-      return out;
+      return AppResult.Ok(out);
     }
 
-    var stamped = lines.get(0).parse_i64();
+    var stamped = (try clone_item(alloc, lines, 0)).parse_i64();
     var ts: i64 = match stamped {
       Option.Some(v) => v,
       Option.None => 0
     };
     if (ts <= 0 or read_unix_time() - ts > cfg.cache_ttl) {
-      return out;
+      return AppResult.Ok(out);
     }
 
     for (var i: i64 = 1; i < lines.size(); i = i + 1) {
-      out.push(lines.get(i).clone(alloc));
+      out.push((try clone_item(alloc, lines, i)));
     }
-    return out;
+    return AppResult.Ok(out);
   }
 
-  // Store non-empty suggestions under a cache key.
-  public function cache_store(alloc: ref HeapAllocator, cfg: const ref Config, key: const ref String, items: const ref Vec<String>) void throws IError {
+  /** Store non-empty suggestions under a cache key. */
+  public function cache_store(alloc: ref HeapAllocator, cfg: const ref Config, key: const ref String, items: const ref Vec<String>) AppResult<void> {
     if (cfg.use_cache == false) {
-      return;
+      return AppResult.Ok;
     }
     if (items.size() == 0) {
-      return;
+      return AppResult.Ok;
     }
     ensure_dir_p(alloc, cfg.cache_dir);
 
@@ -98,20 +102,23 @@ public module namo {
     body.append(read_unix_time());
     body.append("\n");
     for (var i: i64 = 0; i < items.size(); i = i + 1) {
-      body.append(items.get(i));
+      body.append((try items.get(i)));
       body.append("\n");
     }
 
     var path = cache_file(alloc, cfg, key);
-    try {
-      write_string(path, body);
-    } catch (e: const ref IError) {
-      // A cache write failure is never fatal.
-    }
+    match write_string(path, body) {
+      (e: const ref IError) => {
+        // A cache write failure is never fatal.
+      },
+      _ => {}
+    };
+
+    return AppResult.Ok;
   }
 
-  // Minimum interval between API calls, enforced with a stamp file.
-  // Returns false when the caller should back off.
+  /** Minimum interval between API calls, enforced with a stamp file.
+   * Returns false when the caller should back off. */
   public function rate_limit_ok(alloc: ref HeapAllocator, cfg: const ref Config, min_gap: i64) bool {
     ensure_dir_p(alloc, cfg.cache_dir);
     var path = String(alloc, "");
@@ -120,17 +127,13 @@ public module namo {
 
     var current: i64 = read_unix_time();
     var last: i64 = 0;
-    try {
-      var raw = read_to_string(alloc, path);
-      raw.trim();
-      var parsed = raw.parse_i64();
-      last = match parsed {
-        Option.Some(v) => v,
-        Option.None => 0
-      };
-    } catch (e: const ref IError) {
-      last = 0;
-    }
+
+    match read_rate_stamp(alloc, path, last) {
+      AppResult.Ok => {},
+      (e: const ref IError) => {
+        last = 0;
+      }
+    };
 
     if (last > 0 and current - last < min_gap) {
       return false;
@@ -138,11 +141,25 @@ public module namo {
 
     var stamp = String(alloc, "");
     stamp.append(current);
-    try {
-      write_string(path, stamp);
-    } catch (e: const ref IError) {
-      // Non-fatal.
-    }
+    match write_string(path, stamp) {
+      (e: const ref IError) => {
+        // Non-fatal.
+      },
+      _ => {}
+    };
     return true;
+  }
+
+  /** Read the last request timestamp when its stamp file is available. */
+  function read_rate_stamp(alloc: ref HeapAllocator, path: ref String, last: ref i64) AppResult<void> {
+    var raw = (try read_to_string(alloc, path));
+    raw.trim();
+    var parsed = raw.parse_i64();
+    last = match parsed {
+      Option.Some(v) => v,
+      Option.None => 0
+    };
+
+    return AppResult.Ok;
   }
 }

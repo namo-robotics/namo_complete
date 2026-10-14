@@ -30,7 +30,7 @@ ENV LANG=en_US.UTF-8 \
     LC_ALL=en_US.UTF-8
 
 # Refresh the rolling artifact when the validated compiler changes.
-ARG SUN_REV=fda0b191180fe15f8a498b5f001b91d6721bbad8
+ARG SUN_REV=cc7686189ee2fe60c090c09c914a67049f920be6
 
 # Install the rolling Sun compiler together with its matching stdlib and TLS
 # bundles. apt resolves the LLVM runtime declared by the package.
@@ -67,5 +67,7 @@ RUN echo "ubuntu ALL=(root) NOPASSWD:ALL" > /etc/sudoers.d/ubuntu \
 
 # Eager-load git completion (needed for alias completion)
 RUN echo '[ -f /usr/share/bash-completion/completions/git ] && . /usr/share/bash-completion/completions/git' > /etc/profile.d/git-completion.sh
+
+WORKDIR /workspaces/namo_complete
 
 CMD ["/bin/bash"]

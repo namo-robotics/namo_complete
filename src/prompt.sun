@@ -3,6 +3,7 @@
 // Every string that goes into the request is placed via the stdlib Json API,
 // so escaping (quotes, backslashes, newlines, unicode) is handled for us.
 
+/** Build completion context and API request bodies. */
 public module namo {
   using std;
   using std.io;
@@ -22,9 +23,9 @@ public module namo {
   // confident wrong guess under "did you mean" is worse than no line at all.
   public var DYM_SYSTEM_PROMPT: static_ptr<u8> = "You correct shell command lines that do not run.\n\nThe user typed a line whose first word is not a command on this system: a typo, the wrong name for a tool, or a tool that is not installed.\n\nRules:\n- Output ONLY command lines, at most 2, best first, one per line.\n- Output the whole corrected line, keeping the arguments that were typed.\n- Correct only what is wrong; do not rewrite a line that would have worked.\n- No explanations, no markdown, no backticks, no comments, no prose.\n- Never invent file or directory names that were not shown to you.\n- Prefer a command that appears in the history or the listing you were shown.\n- If nothing plausible fits, output nothing at all.";
 
-  // Assemble the tagged context block shown to the model. The cursor position
-  // is marked explicitly so the model knows where the user is typing.
-  public function build_context(alloc: ref HeapAllocator, cfg: ref Config, history: const ref Vec<String>, listing: const ref String) String throws IError {
+  /** Assemble the tagged context block shown to the model. The cursor position
+   * is marked explicitly so the model knows where the user is typing. */
+  public function build_context(alloc: ref HeapAllocator, cfg: ref Config, history: const ref Vec<String>, listing: const ref String) AppResult<String> {
     var ctx = String(alloc, "<shell>");
     ctx.append(cfg.shell_name);
     ctx.append("</shell>\n<cwd>");
@@ -41,11 +42,14 @@ public module namo {
     // that both shapes of the binary send the same context for the same shell.
     if (cfg.outfile.length() > 0) {
       var recorded = String(alloc, "");
-      try {
-        recorded = read_to_string(alloc, cfg.outfile);
-      } catch (e: const ref IError) {
-        recorded = String(alloc, "");
-      }
+      match read_to_string(alloc, cfg.outfile) {
+        SystemResult.Ok(value) => {
+          recorded = value;
+        },
+        (e: const ref IError) => {
+          recorded = String(alloc, "");
+        }
+      };
       recorded.trim();
       if (recorded.length() > 0) {
         ctx.append("<output>\n");
@@ -57,7 +61,7 @@ public module namo {
     if (history.size() > 0) {
       ctx.append("<history>\n");
       for (var i: i64 = 0; i < history.size(); i = i + 1) {
-        ctx.append(history.get(i));
+        ctx.append((try history.get(i)));
         ctx.append("\n");
       }
       ctx.append("</history>\n");
@@ -76,7 +80,7 @@ public module namo {
       ctx.append(cfg.line);
       ctx.append("<|CURSOR|></line>");
     }
-    return ctx;
+    return AppResult.Ok(ctx);
   }
 
   // Which models still accept `temperature`. Every model from the 4.6
@@ -123,45 +127,45 @@ public module namo {
     return base * 4;
   }
 
-  // Serialize the request body. Note: no `output_config.effort` (errors on
-  // Haiku 4.5) and no `cache_control` (Haiku's minimum cacheable prefix is
-  // 4096 tokens, far above our ~150-token system prompt, so it would silently
-  // no-op). Local caching does that job instead.
-  public function build_body(alloc: ref HeapAllocator, cfg: const ref Config, context: const ref String) String throws IError {
+  /** Serialize the request body. Note: no `output_config.effort` (errors on
+   * Haiku 4.5) and no `cache_control` (Haiku's minimum cacheable prefix is
+   * 4096 tokens, far above our ~150-token system prompt, so it would silently
+   * no-op). Local caching does that job instead. */
+  public function build_body(alloc: ref HeapAllocator, cfg: const ref Config, context: const ref String) AppResult<String> {
     var req = create_json_object(alloc);
-    req.set(String(alloc, "model"), create_json_string(alloc, cfg.model));
+    try req.set(String(alloc, "model"), create_json_string(alloc, cfg.model));
     // Determinism for the models that allow it: the same line in the same
     // directory should not produce a different hint each time it is typed.
     if (takes_temperature(cfg.model)) {
-      req.set(String(alloc, "temperature"), Json(0));
+      try req.set(String(alloc, "temperature"), Json(0));
     }
     // Ask mode carries a description per line, so it needs the extra room.
     if (cfg.is_dym()) {
       // Two bare command lines: no descriptions to pay for.
-      req.set(String(alloc, "max_tokens"), Json(token_budget(cfg.model, 150)));
-      req.set(String(alloc, "system"), create_json_string(alloc, DYM_SYSTEM_PROMPT));
+      try req.set(String(alloc, "max_tokens"), Json(token_budget(cfg.model, 150)));
+      try req.set(String(alloc, "system"), create_json_string(alloc, DYM_SYSTEM_PROMPT));
     } else if (cfg.is_ask()) {
-      req.set(String(alloc, "max_tokens"), Json(token_budget(cfg.model, 300)));
-      req.set(String(alloc, "system"), create_json_string(alloc, ASK_SYSTEM_PROMPT));
+      try req.set(String(alloc, "max_tokens"), Json(token_budget(cfg.model, 300)));
+      try req.set(String(alloc, "system"), create_json_string(alloc, ASK_SYSTEM_PROMPT));
     } else {
-      req.set(String(alloc, "max_tokens"), Json(token_budget(cfg.model, 150)));
-      req.set(String(alloc, "system"), create_json_string(alloc, SYSTEM_PROMPT));
+      try req.set(String(alloc, "max_tokens"), Json(token_budget(cfg.model, 150)));
+      try req.set(String(alloc, "system"), create_json_string(alloc, SYSTEM_PROMPT));
     }
 
     // Only non-whitespace stop sequences are accepted -- the API rejects
     // "\n\n" with "each stop sequence must contain non-whitespace".
     // max_tokens plus the system prompt already bound the response length.
     var stops = create_json_array(alloc);
-    stops.push(create_json_string(alloc, "```"));
-    req.set(String(alloc, "stop_sequences"), stops);
+    try stops.push(create_json_string(alloc, "```"));
+    try req.set(String(alloc, "stop_sequences"), stops);
 
     var msgs = create_json_array(alloc);
     var turn = create_json_object(alloc);
-    turn.set(String(alloc, "role"), create_json_string(alloc, "user"));
-    turn.set(String(alloc, "content"), create_json_string(alloc, context));
-    msgs.push(turn);
-    req.set(String(alloc, "messages"), msgs);
+    try turn.set(String(alloc, "role"), create_json_string(alloc, "user"));
+    try turn.set(String(alloc, "content"), create_json_string(alloc, context));
+    try msgs.push(turn);
+    try req.set(String(alloc, "messages"), msgs);
 
-    return req.to_string(alloc);
+    return AppResult.Ok(req.to_string(alloc));
   }
 }

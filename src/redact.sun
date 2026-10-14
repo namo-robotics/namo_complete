@@ -9,22 +9,23 @@
 // This is the only thing between the shell history and the network, so it is
 // applied in one place for both callers.
 
+/** Filter sensitive history before sending requests. */
 public module namo {
   using std;
 
-  // History lines carrying a known credential prefix are dropped entirely
-  // rather than partially masked; the rest is trimmed to the most recent
-  // `keep` commands.
-  public function parse_history(alloc: ref HeapAllocator, raw: const ref String, keep: i64) Vec<String> throws IError {
+  /** History lines carrying a known credential prefix are dropped entirely
+   * rather than partially masked; the rest is trimmed to the most recent
+   * `keep` commands. */
+  public function parse_history(alloc: ref HeapAllocator, raw: const ref String, keep: i64) AppResult<Vec<String>> {
     var out = Vec<String>(alloc, 16);
     if (keep <= 0) {
-      return out;
+      return AppResult.Ok(out);
     }
-    var lines = split_lines(alloc, raw);
+    var lines = (try split_lines(alloc, raw));
 
     var hist = Vec<String>(alloc, 16);
     for (var i: i64 = 0; i < lines.size(); i = i + 1) {
-      var line = lines.get(i);
+      var line = (try lines.get(i));
       if (looks_secret(line) == false) {
         hist.push(line.clone(alloc));
       }
@@ -35,8 +36,8 @@ public module namo {
       start = hist.size() - keep;
     }
     for (var j: i64 = start; j < hist.size(); j = j + 1) {
-      out.push(hist.get(j).clone(alloc));
+      out.push((try clone_item(alloc, hist, j)));
     }
-    return out;
+    return AppResult.Ok(out);
   }
 }

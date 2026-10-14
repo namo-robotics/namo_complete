@@ -225,7 +225,7 @@ cp .env.example .env && chmod 600 .env
 ```
 
 [`.devcontainer/`](.devcontainer/) uses the repository's Ubuntu 26.04
-image. The validated compiler is Sun `fda0b191180f`. Builds require a complete
+image. The validated compiler is Sun `cc7686189ee2`. Builds require a complete
 Sun dev artifact with matching `stdlib.moon` and `tls.moon` bundles.
 `upgrade-sun.sh` installs these into `.sun/`, which `build.sh` uses automatically.
 The current macOS TLS bundle requires a recent Apple linker; CI uses the
@@ -236,9 +236,8 @@ itself separately.
 
 ## Notes on Sun
 
-[SUN_FEEDBACK.md](SUN_FEEDBACK.md) records the compiler gaps that shaped the
-project, what Sun `fda0b191180f` resolved, and the small platform FFI/borrow
-workarounds that remain.
+[SUN_FEEDBACK.md](SUN_FEEDBACK.md) tracks the remaining compiler and standard-library
+gaps, including the remaining platform FFI and borrow workarounds.
 
 ## License
 

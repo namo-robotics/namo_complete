@@ -11,10 +11,12 @@ using std;
 using std.env;
 using namo;
 
-function emit(alloc: ref HeapAllocator, items: const ref Vec<String>) void throws IError {
+function emit(alloc: ref HeapAllocator, items: const ref Vec<String>) AppResult<void> {
   for (var i: i64 = 0; i < items.size(); i = i + 1) {
-    println(items.get(i));
+    println((try items.get(i)));
   }
+
+  return AppResult.Ok;
 }
 
 // Which build is this? The `dev` release is a rolling tag, so the version alone
@@ -36,16 +38,17 @@ function print_version(alloc: ref HeapAllocator) void {
 
 /** Run a command and report checked-access or request failures without a traceback. */
 function main(argc: i32, argv: raw_ptr<raw_ptr<i8>>) i32 {
-  try {
-    return run(argc, argv);
-  } catch (e: const ref IError) {
-    eprint("[namo] command failed\n");
-    return 1;
-  }
+  return match run(argc, argv) {
+    AppResult.Ok(value) => value,
+    (e: const ref IError) => {
+      eprint("[namo] command failed\n");
+      1;
+    }
+  };
 }
 
 /** Dispatch the command and propagate failures to the process boundary. */
-function run(argc: i32, argv: raw_ptr<raw_ptr<i8>>) i32 throws IError {
+function run(argc: i32, argv: raw_ptr<raw_ptr<i8>>) AppResult<i32> {
   var alloc = make_heap_allocator();
   var cfg = Config(alloc);
 
@@ -54,35 +57,42 @@ function run(argc: i32, argv: raw_ptr<raw_ptr<i8>>) i32 throws IError {
   // with NAMO_DISABLE=1 can still be asked what it has installed.
   var cli = cfg.environment.args(argc, argv);
   for (var i: i64 = 1; i < cli.size(); i = i + 1) {
-    var arg: const ref String = cli.get(i);
+    var arg = (try clone_item(alloc, cli, i));
     if (arg.equals_literal("--nonblocking-fifo")) {
-      if (i + 1 >= cli.size()) { return 1; }
-      var fd_text: const ref String = cli.get(i + 1);
-      var fd: i64 = match fd_text.parse_i64() { Option.Some(value) => value, Option.None => -1 };
-      if (fd < 3 or fd > 2147483647) { return 1; }
-      return platform_nonblocking(_convert<i32>(fd)) ? 0 : 1;
+      if (i + 1 >= cli.size()) {
+        return AppResult.Ok(1);
+      }
+      var fd_text = (try clone_item(alloc, cli, i + 1));
+      var fd: i64 = match fd_text.parse_i64() {
+        Option.Some(value) => value,
+        Option.None => -1
+      };
+      if (fd < 3 or fd > 2147483647) {
+        return AppResult.Ok(1);
+      }
+      return AppResult.Ok(platform_nonblocking(_convert<i32>(fd)) ? 0 : 1);
     }
     if (arg.equals_literal("--version") or arg.equals_literal("-V")) {
       print_version(alloc);
-      return 0;
+      return AppResult.Ok(0);
     }
   }
 
   if (cfg.disabled) {
-    return 0;
+    return AppResult.Ok(0);
   }
 
   // Hints as you type: fork off the daemon and give the shell its prompt back.
   // See
   // daemon.sun for why none of that work can happen in the shell itself.
   if (cfg.daemon) {
-    return daemon_run(alloc, cfg);
+    return AppResult.Ok(daemon_run(alloc, cfg));
   }
 
   // Output capture: the shell's stdout on the other side of a pty. See
   // cmd_output_relay.sun for why it is a pty and not a pipe.
   if (cfg.relay) {
-    return relay_run(alloc, cfg);
+    return AppResult.Ok((try relay_run(alloc, cfg)));
   }
 
   // Too little to go on: not worth a round trip. A borrow, not an assignment:
@@ -92,31 +102,31 @@ function run(argc: i32, argv: raw_ptr<raw_ptr<i8>>) i32 throws IError {
   var prefix = subject.clone(alloc);
   prefix.trim();
   if (prefix.length() < 3) {
-    return 0;
+    return AppResult.Ok(0);
   }
 
   var key = cache_key(alloc, cfg);
   if (cfg.use_cache) {
-    var hit = cache_lookup(alloc, cfg, key);
+    var hit = (try cache_lookup(alloc, cfg, key));
     if (hit.size() > 0) {
-      emit(alloc, hit);
-      return 0;
+      try emit(alloc, hit);
+      return AppResult.Ok(0);
     }
   }
 
   // Cache-only mode is asked for a line at a time and must never block on the
   // network: serve from cache or return nothing at all.
   if (cfg.cache_only) {
-    return 0;
+    return AppResult.Ok(0);
   }
 
   if (cfg.api_key.length() == 0) {
     eprint("[namo] ANTHROPIC_API_KEY is not set\n");
-    return 1;
+    return AppResult.Ok(1);
   }
 
   if (cfg.min_gap > 0 and rate_limit_ok(alloc, cfg, cfg.min_gap) == false) {
-    return 0;
+    return AppResult.Ok(0);
   }
 
   // History arrives on stdin: `fc` is a shell builtin, so the shell is the
@@ -124,52 +134,53 @@ function run(argc: i32, argv: raw_ptr<raw_ptr<i8>>) i32 throws IError {
   // to take -- same code the daemon uses, so both paths send the same
   // context for the same directory.
   var raw_stdin = read_fd(alloc, 0);
-  var history = parse_history(alloc, raw_stdin, cfg.history_lines);
+  var history = (try parse_history(alloc, raw_stdin, cfg.history_lines));
 
   var listing = String(alloc, "");
   if (cfg.send_ls) {
-    listing = list_dir(alloc, cfg.cwd, cfg.ls_limit);
+    listing = (try list_dir(alloc, cfg.cwd, cfg.ls_limit));
   }
 
-  var context = build_context(alloc, cfg, history, listing);
+  var context = (try build_context(alloc, cfg, history, listing));
 
   var reply = Reply(alloc);
-  try {
-    var body = build_body(alloc, cfg, context);
-    reply = call_api(alloc, cfg, body);
-  } catch (e: const ref IError) {
-    eprint("[namo] request failed\n");
-    return 1;
-  }
+
+  match request_reply(alloc, cfg, context, reply) {
+    AppResult.Ok => {},
+    (e: const ref IError) => {
+      eprint("[namo] request failed\n");
+      return AppResult.Ok(1);
+    }
+  };
 
   if (reply.failed) {
-    return 1;
+    return AppResult.Ok(1);
   }
   if (reply.suggestions.size() == 0) {
-    return 0;
+    return AppResult.Ok(0);
   }
 
-  cache_store(alloc, cfg, key, reply.suggestions);
-  emit(alloc, reply.suggestions);
-  return 0;
+  try cache_store(alloc, cfg, key, reply.suggestions);
+  try emit(alloc, reply.suggestions);
+  return AppResult.Ok(0);
 }
 
 manifest {
-    source_files: [
-        "version.sun",
-        "util.sun",
-        "fs.sun",
-        "config.sun",
-        "prompt.sun",
-        "redact.sun",
-        "client.sun",
-        "cache.sun",
-        "daemon.sun",
-        "cmd_output_relay.sun"
-    ]
-    libraries: ["stdlib.moon", "tls.moon"]
-    target: {
-        linux: { source_files: ["platform_linux.sun"] }
-        macos: { source_files: ["platform_macos.sun"] }
-    }
+  source_files: [
+    "version.sun",
+    "util.sun",
+    "fs.sun",
+    "config.sun",
+    "prompt.sun",
+    "redact.sun",
+    "client.sun",
+    "cache.sun",
+    "daemon.sun",
+    "cmd_output_relay.sun"
+  ]
+  libraries: ["stdlib.moon", "tls.moon"]
+  target: {
+    linux: { source_files: ["platform_linux.sun"] }
+    macos: { source_files: ["platform_macos.sun"] }
+  }
 }
