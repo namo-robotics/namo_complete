@@ -153,7 +153,7 @@ outside the interactive loop; stale automatic requests are canceled as you type.
 
 Use the [development container](.devcontainer/) or install the build dependencies:
 
-- **Linux:** `x86_64-linux-musl-gcc` with musl-built C++ runtime archives from musl.cc.
+- **Linux:** `x86_64-linux-musl-gcc` with musl-built C++ runtime archives from [musl.cc’s GitHub releases](https://github.com/musl-cc/musl.cc/releases).
 - **macOS:** `brew install llvm@20 libarchive bash` and a recent Apple linker.
 
 ```sh

@@ -9,7 +9,9 @@ trap 'rm -rf "$staging"' EXIT
 case "$(uname -s):$(uname -m)" in
   Linux:x86_64)
     # Sun needs musl-built C++ runtime archives as well as the C compiler.
-    curl -fL --retry 3 -o "$staging/musl.tgz" https://musl.cc/x86_64-linux-musl-cross.tgz
+    curl -fsSL --connect-timeout 15 --max-time 180 --retry 3 -o "$staging/musl.tgz" \
+      https://github.com/musl-cc/musl.cc/releases/download/v0.0.1/x86_64-linux-musl-cross.tgz
+    echo "c5d410d9f82a4f24c549fe5d24f988f85b2679b452413a9f7e5f7b956f2fe7ea  $staging/musl.tgz" | sha256sum -c -
     mkdir -p /opt/cross
     tar -xzf "$staging/musl.tgz" -C /opt/cross
     /opt/cross/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc --version
